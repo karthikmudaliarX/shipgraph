@@ -1,0 +1,52 @@
+{
+  "name": "shipgraph",
+  "version": "0.1.0",
+  "description": "Deterministic release control for autonomous coding agents.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "shipgraph": "dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "eslint src tests --ext .ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "release-control",
+    "autonomous-agents",
+    "ci",
+    "git",
+    "orchestration"
+  ],
+  "author": "Karthik Mudaliar",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/karthikmudaliarX/shipgraph.git"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "packageManager": "pnpm@9.12.0",
+  "dependencies": {
+    "better-sqlite3": "^11.5.0",
+    "commander": "^12.1.0",
+    "execa": "^9.5.1",
+    "pino": "^9.5.0",
+    "yaml": "^2.6.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.7.5",
+    "@eslint/js": "^9.12.0",
+    "eslint": "^9.12.0",
+    "typescript-eslint": "^8.9.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.3"
+  }
+}

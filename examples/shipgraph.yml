@@ -1,0 +1,20 @@
+version: 1
+
+project:
+  name: example
+  repository: owner/repo
+  defaultBranch: main
+
+execution:
+  maxConcurrentTickets: 1
+  maxRepairIterations: 6
+
+release:
+  requireHumanApproval: true
+  requireCleanCI: true
+  requireExactShaReviews: true
+
+agents:
+  implementer: opencode
+  reviewers:
+    - correctness
