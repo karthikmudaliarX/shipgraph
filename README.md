@@ -63,7 +63,9 @@ agent might get approval on one revision and land another.
 
 ## Current status
 
-CORE-001 (this branch) establishes the foundation:
+CORE-001 ✅
+
+CORE-001 establishes the foundation:
 
 - CLI (`doctor`, `init`, `status`)
 - Typed configuration (`shipgraph.yml`)
@@ -74,6 +76,13 @@ CORE-001 (this branch) establishes the foundation:
 - Agent and git-host adapter contracts
 - Unit and integration tests
 - GitHub Actions CI
+
+CORE-002 active in this PR:
+
+- Approved `shipgraph.backlog.yml` contract and whole-DAG validation
+- Persistent, transactional backlog synchronization
+- Deterministic `QUEUED` → `ELIGIBLE` reconciliation
+- Read-only capacity-aware `shipgraph ready` selection
 
 Agent execution, PR monitoring, autonomous review, repair loops, auto-merge, and
 successor tickets are intentionally **not** implemented yet.
@@ -98,6 +107,18 @@ shipgraph status
 
 # Structured status
 shipgraph status --json
+
+# Validate the approved backlog without changing SQLite
+shipgraph backlog validate
+
+# Import approved work and reconcile eligibility
+shipgraph backlog sync
+
+# Report eligible and dispatchable work without starting it
+shipgraph ready
+
+# Structured ready queue
+shipgraph ready --json
 ```
 
 `init` never persists the template's empty identity. Once a valid configuration
@@ -126,7 +147,6 @@ pnpm build
 
 Planned successor tickets (not yet implemented):
 
-- **CORE-002** — Persistent backlog DAG and eligibility scheduler
 - **WORK-001** — Isolated git worktree lifecycle
 - **AGENT-001** — OpenCode execution adapter
 - **GH-001** — GitHub PR and CI integration

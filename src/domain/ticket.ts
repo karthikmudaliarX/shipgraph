@@ -65,7 +65,7 @@ export const ticketReleaseConfigSchema = z.object({
  * Ticket IDs must be stable. Dependencies must reference ticket IDs.
  * An executing agent must NOT create an APPROVED ticket directly.
  */
-export const ticketContractSchema = z.object({
+const ticketDefinitionShape = {
   id: ticketIdSchema,
   title: z.string().min(1),
   description: z.string().min(1),
@@ -77,8 +77,12 @@ export const ticketContractSchema = z.object({
   risk: ticketRiskSchema,
   agent: ticketAgentConfigSchema.default({}),
   release: ticketReleaseConfigSchema.default({}),
-  status: ticketStateSchema.default('QUEUED'),
-}).strict().superRefine((ticket, context) => {
+} as const;
+
+function addDependencyInvariants(
+  ticket: { id: string; dependsOn: readonly string[] },
+  context: z.RefinementCtx
+): void {
   if (ticket.dependsOn.includes(ticket.id)) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -94,7 +98,23 @@ export const ticketContractSchema = z.object({
       message: 'ticket dependencies must be unique',
     });
   }
-});
+}
+
+/** Static approved work definition. Runtime state is deliberately absent. */
+export const ticketDefinitionSchema = z
+  .object(ticketDefinitionShape)
+  .strict()
+  .superRefine(addDependencyInvariants);
+
+/**
+ * First-class ticket contract including persisted runtime state.
+ *
+ * The backlog uses ticketDefinitionSchema; SQLite owns the status field.
+ */
+export const ticketContractSchema = z.object({
+  ...ticketDefinitionShape,
+  status: ticketStateSchema.default('QUEUED'),
+}).strict().superRefine(addDependencyInvariants);
 
 export type TicketPriority = z.infer<typeof ticketPrioritySchema>;
 export type TicketRisk = z.infer<typeof ticketRiskSchema>;
@@ -103,14 +123,19 @@ export type AcceptanceCriterion = z.infer<typeof acceptanceCriterionSchema>;
 export type VerificationConfig = z.infer<typeof verificationConfigSchema>;
 export type TicketAgentConfig = z.infer<typeof ticketAgentConfigSchema>;
 export type TicketReleaseConfig = z.infer<typeof ticketReleaseConfigSchema>;
+export type TicketDefinition = z.infer<typeof ticketDefinitionSchema>;
 export type TicketContract = z.infer<typeof ticketContractSchema>;
 
 export function validateTicket(value: unknown): TicketContract {
   return ticketContractSchema.parse(value);
 }
 
+export function validateTicketDefinition(value: unknown): TicketDefinition {
+  return ticketDefinitionSchema.parse(value);
+}
+
 export function validateTicketDependencies(
-  ticket: TicketContract,
+  ticket: Pick<TicketContract, 'id' | 'dependsOn'>,
   knownTicketIds: Set<string>
 ): void {
   const missing = ticket.dependsOn.filter((id) => !knownTicketIds.has(id));

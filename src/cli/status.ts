@@ -1,5 +1,9 @@
 import { assertSafeShipgraphPaths } from '../utils/paths.js';
-import { openReadonlyDatabase, type DbConnection } from '../persistence/db.js';
+import {
+  assertMigrationsCompatible,
+  openReadonlyDatabase,
+  type DbConnection,
+} from '../persistence/db.js';
 import {
   createProjectRepository,
   createTicketRepository,
@@ -11,6 +15,8 @@ import {
   type ShipgraphConfig,
 } from '../config/schema.js';
 import { existsSync } from 'node:fs';
+import { ALL_TICKET_STATES, type TicketStateValue } from '../core/state-machine/state.js';
+import { calculateReady } from '../scheduler/ready.js';
 
 export type ProjectStatus = {
   projectId: string;
@@ -19,6 +25,9 @@ export type ProjectStatus = {
   defaultBranch: string;
   ticketCount: number;
   eventCount: number;
+  countsByState: Readonly<Record<TicketStateValue, number>>;
+  eligibleCount: number;
+  dispatchableCount: number;
 };
 
 export type StatusReport = {
@@ -56,6 +65,7 @@ export function showStatus(
   let db: DbConnection | undefined;
   try {
     db = openReadonlyDatabase(paths.dbPath);
+    assertMigrationsCompatible(db);
     const projectRepo = createProjectRepository(db);
     const ticketRepo = createTicketRepository(db);
     const eventRepo = createEventRepository(db);
@@ -84,6 +94,18 @@ export function showStatus(
       );
     }
 
+    const tickets = ticketRepo.findByProjectId(project.id);
+    const countsByState = Object.fromEntries(
+      ALL_TICKET_STATES.map((state) => [
+        state,
+        tickets.filter((ticket) => ticket.status === state).length,
+      ])
+    ) as Record<TicketStateValue, number>;
+    const ready = calculateReady(
+      ticketRepo.findApprovedByProjectId(project.id),
+      config.execution.maxConcurrentTickets
+    );
+
     return emitStatus(
       {
         project: {
@@ -91,8 +113,11 @@ export function showStatus(
           name: project.name,
           repository: project.repository,
           defaultBranch: project.defaultBranch,
-          ticketCount: ticketRepo.countByProjectId(project.id),
+          ticketCount: tickets.length,
           eventCount: eventRepo.countByProjectId(project.id),
+          countsByState,
+          eligibleCount: ready.eligible.length,
+          dispatchableCount: ready.dispatchable.length,
         },
       },
       options
@@ -126,6 +151,11 @@ function emitStatus(
     console.log(`Default branch: ${report.project.defaultBranch}`);
     console.log(`Tickets: ${report.project.ticketCount}`);
     console.log(`Events: ${report.project.eventCount}`);
+    console.log(
+      `States: ${ALL_TICKET_STATES.map((state) => `${state}=${report.project?.countsByState[state] ?? 0}`).join(', ')}`
+    );
+    console.log(`Eligible: ${report.project.eligibleCount}`);
+    console.log(`Dispatchable: ${report.project.dispatchableCount}`);
   }
   return report;
 }

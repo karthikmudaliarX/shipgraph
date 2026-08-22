@@ -37,6 +37,7 @@ export function persistTicketTransition(
   db: DbConnection,
   input: {
     ticketId: string;
+    projectId?: string;
     next: TicketStateValue;
     reason?: string;
     context?: TransitionContext;
@@ -52,6 +53,11 @@ export function persistTicketTransition(
     const current = ticketRepository.findById(input.ticketId);
     if (!current) {
       throw new StateTransitionError(`Ticket ${input.ticketId} does not exist`);
+    }
+    if (input.projectId !== undefined && current.projectId !== input.projectId) {
+      throw new StateTransitionError(
+        `Ticket ${input.ticketId} does not belong to project ${input.projectId}`
+      );
     }
 
     const result = transition(current.status, input.next, input.context);

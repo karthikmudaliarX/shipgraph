@@ -9,7 +9,7 @@ import {
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { stringify } from 'yaml';
-import { assertSafeShipgraphPaths } from '../utils/paths.js';
+import { assertSafeDatabaseFile, assertSafeShipgraphPaths } from '../utils/paths.js';
 import { openAndMigrate } from '../persistence/db.js';
 import {
   createProjectRepository,
@@ -194,16 +194,6 @@ function configurationRequiredResult(wroteConfigTemplate: boolean): InitResult {
     configurationRequired: true,
     initializedDb: false,
   };
-}
-
-function assertSafeDatabaseFile(path: string): void {
-  const stats = lstatSync(path);
-  if (!stats.isFile() || stats.nlink !== 1) {
-    throw new Error(`ShipGraph database must be a regular, unlinked file: ${path}`);
-  }
-  if (process.getuid !== undefined && stats.uid !== process.getuid()) {
-    throw new Error(`ShipGraph database must be owned by the current user: ${path}`);
-  }
 }
 
 function pathExists(path: string): boolean {

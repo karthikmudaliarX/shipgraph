@@ -112,6 +112,35 @@ export const MIGRATIONS: readonly Migration[] = [
       END;
     `,
   },
+  {
+    version: 2,
+    name: 'create_backlog_sync_metadata',
+    up: `
+      CREATE TABLE IF NOT EXISTS backlog_syncs (
+        project_id TEXT PRIMARY KEY,
+        version INTEGER NOT NULL,
+        content_hash TEXT NOT NULL,
+        source_path TEXT NOT NULL,
+        synced_at TEXT NOT NULL,
+        FOREIGN KEY (project_id) REFERENCES projects(id)
+      );
+    `,
+  },
+  {
+    version: 3,
+    name: 'create_approved_backlog_ticket_markers',
+    up: `
+      CREATE TABLE IF NOT EXISTS approved_backlog_tickets (
+        project_id TEXT NOT NULL,
+        ticket_id TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        approved_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, ticket_id),
+        FOREIGN KEY (project_id) REFERENCES projects(id),
+        FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+      );
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {
@@ -131,21 +160,59 @@ export function createInMemoryDatabase(): DbConnection {
  * Apply pending migrations in order inside a transaction.
  */
 export function migrate(db: DbConnection): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      version INTEGER PRIMARY KEY,
-      name TEXT NOT NULL,
-      applied_at TEXT NOT NULL
-    );
-  `);
+  const applyPending = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      );
+    `);
+    const appliedVersions = assertMigrationRowsCompatible(db);
+    for (const migration of MIGRATIONS) {
+      if (appliedVersions.has(migration.version)) continue;
+      db.exec(migration.up);
+      db
+        .prepare(
+          'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)'
+        )
+        .run(migration.version, migration.name, new Date().toISOString());
+    }
+  }).immediate;
 
-  const appliedRows = db
-    .prepare('SELECT version, name FROM schema_migrations ORDER BY version')
-    .all() as Array<{ version: number; name: string }>;
+  applyPending();
+}
+
+/** Validate migration names/versions without mutating a read-only database. */
+export function assertMigrationsCompatible(db: DbConnection): void {
+  const appliedVersions = assertMigrationRowsCompatible(db);
+  const pending = MIGRATIONS.filter((migration) => !appliedVersions.has(migration.version));
+  if (pending.length > 0) {
+    throw new Error(
+      `ShipGraph database is missing migration(s): ${pending
+        .map((migration) => `${migration.version} (${migration.name})`)
+        .join(', ')}. Run shipgraph init to upgrade it.`
+    );
+  }
+}
+
+function assertMigrationRowsCompatible(db: DbConnection): ReadonlySet<number> {
+  let appliedRows: Array<{ version: number; name: string }>;
+  try {
+    appliedRows = db
+      .prepare('SELECT version, name FROM schema_migrations ORDER BY version')
+      .all() as Array<{ version: number; name: string }>;
+  } catch (error) {
+    throw new Error(
+      `ShipGraph database migration metadata is unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  }
+
   const knownMigrations = new Map(
     MIGRATIONS.map((migration) => [migration.version, migration.name])
   );
-
   for (const applied of appliedRows) {
     const expectedName = knownMigrations.get(applied.version);
     if (expectedName === undefined || expectedName !== applied.name) {
@@ -154,25 +221,7 @@ export function migrate(db: DbConnection): void {
       );
     }
   }
-
-  const appliedVersions = new Set(appliedRows.map((row) => row.version));
-
-  const pending = MIGRATIONS.filter((m) => !appliedVersions.has(m.version));
-
-  if (pending.length === 0) return;
-
-  const applyMigration = db.transaction((migration: Migration) => {
-    db.exec(migration.up);
-    db
-      .prepare(
-        'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)'
-      )
-      .run(migration.version, migration.name, new Date().toISOString());
-  });
-
-  for (const migration of pending) {
-    applyMigration(migration);
-  }
+  return new Set(appliedRows.map((row) => row.version));
 }
 
 /**
