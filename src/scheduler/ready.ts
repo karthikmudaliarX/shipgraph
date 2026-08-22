@@ -77,8 +77,16 @@ export function calculateReady(
     return priorityDifference || compareStableStrings(first.ticket, second.ticket);
   };
 
+  const evaluations = evaluateEligibility(tickets);
+  const evaluationById = new Map(
+    evaluations.map((evaluation) => [evaluation.ticket, evaluation])
+  );
   const eligible = tickets
-    .filter((ticket) => ticket.status === TicketState.ELIGIBLE)
+    .filter(
+      (ticket) =>
+        ticket.status === TicketState.ELIGIBLE &&
+        evaluationById.get(ticket.id)?.eligible === true
+    )
     .map((ticket) => ({
       ticket: ticket.id,
       title: ticket.title,
@@ -87,7 +95,6 @@ export function calculateReady(
     }))
     .sort(sortReady);
 
-  const evaluations = evaluateEligibility(tickets);
   const byId = new Map(tickets.map((ticket) => [ticket.id, ticket]));
   const waiting = evaluations
     .filter((evaluation) => evaluation.blockers.length > 0)

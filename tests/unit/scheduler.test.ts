@@ -70,6 +70,32 @@ describe('eligibility and deterministic ready selection', () => {
     );
   });
 
+  it('fails closed when persisted ELIGIBLE state has a dependency blocker', () => {
+    const tickets = [
+      ticket('ROOT-001', TicketState.QUEUED),
+      ticket('WORK-001', TicketState.ELIGIBLE, 'high', ['ROOT-001']),
+    ];
+
+    expect(evaluateEligibility(tickets).find((entry) => entry.ticket === 'WORK-001')).toEqual({
+      ticket: 'WORK-001',
+      eligible: false,
+      blockers: [{
+        dependency: 'ROOT-001',
+        state: TicketState.QUEUED,
+        reason: 'dependency-not-complete',
+      }],
+    });
+    const report = calculateReady(tickets, 1);
+    expect(report.eligible).toEqual([]);
+    expect(report.dispatchable).toEqual([]);
+    expect(report.waiting).toMatchObject([
+      {
+        ticket: 'WORK-001',
+        blockers: [{ dependency: 'ROOT-001', reason: 'dependency-not-complete' }],
+      },
+    ]);
+  });
+
   it('orders eligible work by priority then ID and applies capacity', () => {
     const tickets = [
       ticket('LOW-001', TicketState.ELIGIBLE, 'low'),

@@ -70,9 +70,11 @@ dependencies are all `COMPLETE`.
 dependency produces a structured `dependency-cancelled` blocker. Reconciliation
 is restart-safe because it reads the persisted graph and states on every run.
 
-`shipgraph ready` is read-only. It reports all `ELIGIBLE` tickets and selects
-the deterministic prefix that fits the configured
-`execution.maxConcurrentTickets` capacity. Active build/release states from
+`shipgraph ready` is read-only. It reports approved `ELIGIBLE` tickets only
+when their dependencies are still complete, and selects the deterministic
+prefix that fits the configured `execution.maxConcurrentTickets` capacity.
+Persisted eligibility is revalidated on every read, so stale legacy state fails
+closed into the waiting report instead of becoming dispatchable. Active build/release states from
 `PLANNING` through `MERGED` consume a slot; `QUEUED`, `ELIGIBLE`, exceptional
 states, and terminal `COMPLETE`/`CANCELLED` do not. Selection is ordered by
 `critical`, `high`, `medium`, `low`, then stable ticket ID. The command reports

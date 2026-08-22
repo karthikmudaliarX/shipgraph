@@ -39,10 +39,10 @@ export function evaluateEligibility(
   return [...tickets]
     .sort((first, second) => compareStableStrings(first.id, second.id))
     .map((ticket) => {
-      if (ticket.status === TicketState.ELIGIBLE) {
-        return { ticket: ticket.id, eligible: true, blockers: [] };
-      }
-      if (ticket.status !== TicketState.QUEUED) {
+      if (
+        ticket.status !== TicketState.QUEUED &&
+        ticket.status !== TicketState.ELIGIBLE
+      ) {
         return { ticket: ticket.id, eligible: false, blockers: [] };
       }
 
@@ -71,6 +71,9 @@ export function evaluateEligibility(
 
       return {
         ticket: ticket.id,
+        // A QUEUED ticket is promotable when clear. An ELIGIBLE ticket is
+        // dispatchable only while its dependencies remain clear. Recompute
+        // both states so stale persisted eligibility fails closed.
         eligible: blockers.length === 0,
         blockers,
       };
