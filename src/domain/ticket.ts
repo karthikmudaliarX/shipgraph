@@ -1,4 +1,9 @@
 import { z } from 'zod';
+import {
+  ALL_TICKET_STATES,
+  type TicketStateValue,
+} from '../core/state-machine/state.js';
+import { AGENT_PROVIDERS } from './agent-provider.js';
 
 /**
  * Priority levels for tickets.
@@ -17,6 +22,14 @@ export const ticketPrioritySchema = z.enum([
   TicketPriority.LOW,
 ]);
 
+export const ticketIdSchema = z.string().regex(/^[A-Z0-9]+-[0-9]+$/, {
+  message: 'ticket id must be in PROJECT-123 format',
+});
+
+export const ticketStateSchema = z.enum(
+  [...ALL_TICKET_STATES] as [TicketStateValue, ...TicketStateValue[]]
+);
+
 export const ticketRiskSchema = z.enum([
   'low',
   'medium',
@@ -27,24 +40,24 @@ export const ticketRiskSchema = z.enum([
 export const ticketScopeSchema = z.object({
   allowedPaths: z.array(z.string().min(1)).default([]).readonly(),
   forbiddenPaths: z.array(z.string().min(1)).default([]).readonly(),
-});
+}).strict();
 
 export const acceptanceCriterionSchema = z.object({
   id: z.string().min(1),
   description: z.string().min(1),
-});
+}).strict();
 
 export const verificationConfigSchema = z.object({
   commands: z.array(z.string().min(1)).default([]).readonly(),
-});
+}).strict();
 
 export const ticketAgentConfigSchema = z.object({
-  preferredProvider: z.enum(['opencode', 'codex', 'acp']).optional(),
-});
+  preferredProvider: z.enum(AGENT_PROVIDERS).optional(),
+}).strict();
 
 export const ticketReleaseConfigSchema = z.object({
   humanApprovalRequired: z.boolean().optional(),
-});
+}).strict();
 
 /**
  * First-class ticket contract.
@@ -53,20 +66,34 @@ export const ticketReleaseConfigSchema = z.object({
  * An executing agent must NOT create an APPROVED ticket directly.
  */
 export const ticketContractSchema = z.object({
-  id: z.string().min(1).regex(/^[A-Z0-9]+-[0-9]+$/, {
-    message: 'ticket id must be in PROJECT-123 format',
-  }),
+  id: ticketIdSchema,
   title: z.string().min(1),
   description: z.string().min(1),
   priority: ticketPrioritySchema,
-  dependsOn: z.array(z.string().min(1)).default([]).readonly(),
+  dependsOn: z.array(ticketIdSchema).default([]).readonly(),
   scope: ticketScopeSchema.default({}),
   acceptanceCriteria: z.array(acceptanceCriterionSchema).default([]).readonly(),
   verification: verificationConfigSchema.default({}),
   risk: ticketRiskSchema,
   agent: ticketAgentConfigSchema.default({}),
   release: ticketReleaseConfigSchema.default({}),
-  status: z.string().min(1).default('QUEUED'),
+  status: ticketStateSchema.default('QUEUED'),
+}).strict().superRefine((ticket, context) => {
+  if (ticket.dependsOn.includes(ticket.id)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['dependsOn'],
+      message: 'ticket cannot depend on itself',
+    });
+  }
+
+  if (new Set(ticket.dependsOn).size !== ticket.dependsOn.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['dependsOn'],
+      message: 'ticket dependencies must be unique',
+    });
+  }
 });
 
 export type TicketPriority = z.infer<typeof ticketPrioritySchema>;

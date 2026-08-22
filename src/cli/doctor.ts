@@ -65,7 +65,7 @@ export async function runDoctor(options: {
       status: 'pass',
       message: `gh available: ${ghResult.stdout.split('\n')[0]?.trim() ?? ''}`,
     });
-    const authResult = await runner.run('gh', ['auth', 'status']);
+    const authResult = await runner.run('gh', ['auth', 'status', '--active']);
     checks.push({
       name: 'gh_authenticated',
       status: authResult.exitCode === 0 ? 'pass' : 'fail',

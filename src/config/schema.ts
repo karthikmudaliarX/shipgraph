@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AGENT_PROVIDERS } from '../domain/agent-provider.js';
 
 /**
  * Supported ShipGraph configuration major versions.
@@ -19,25 +20,25 @@ export const projectConfigSchema = z.object({
     message: 'repository must be in owner/repo format',
   }),
   defaultBranch: z.string().min(1).default('main'),
-});
+}).strict();
 
 export const executionConfigSchema = z.object({
   maxConcurrentTickets: z.number().int().min(1).max(100).default(1),
   maxRepairIterations: z.number().int().min(0).max(100).default(6),
-});
+}).strict();
 
 export const releaseConfigSchema = z.object({
   requireHumanApproval: z.boolean().default(true),
   requireCleanCI: z.boolean().default(true),
   requireExactShaReviews: z.boolean().default(true),
-});
+}).strict();
 
 export const agentsConfigSchema = z.object({
-  implementer: z.enum(['opencode', 'codex', 'acp']).default('opencode'),
+  implementer: z.enum(AGENT_PROVIDERS).default('opencode'),
   reviewers: z
     .array(z.enum(['correctness', 'adversarial', 'security']))
     .default(['correctness']),
-});
+}).strict();
 
 export const shipgraphConfigSchema = z.object({
   version: configVersionSchema,
@@ -45,7 +46,7 @@ export const shipgraphConfigSchema = z.object({
   execution: executionConfigSchema.default({}),
   release: releaseConfigSchema.default({}),
   agents: agentsConfigSchema.default({}),
-});
+}).strict();
 
 export type ShipgraphConfig = z.infer<typeof shipgraphConfigSchema>;
 export type ProjectConfig = z.infer<typeof projectConfigSchema>;

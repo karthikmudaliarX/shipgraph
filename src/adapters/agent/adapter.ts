@@ -6,7 +6,7 @@
  */
 export type AgentCapability = 'execute' | 'review' | 'repair';
 
-export type AgentProvider = 'opencode' | 'codex' | 'acp';
+export type { AgentProvider } from '../../domain/agent-provider.js';
 
 export type AgentProbeResult =
   | { available: true; version?: string }
@@ -21,11 +21,4 @@ export interface AgentAdapter {
    */
   probe(): Promise<AgentProbeResult> | AgentProbeResult;
 }
-
-/**
- * Factory to create an agent adapter by provider name.
- */
-export function createAgentAdapter(_provider: AgentProvider): AgentAdapter {
-  // Placeholder: real adapters are implemented in AGENT-001.
-  throw new Error('Agent adapters are not implemented in CORE-001');
-}
+import type { AgentProvider } from '../../domain/agent-provider.js';

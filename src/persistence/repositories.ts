@@ -1,7 +1,18 @@
 import type { DbConnection } from './db.js';
 import type { ShipgraphConfig } from '../config/schema.js';
-import type { TicketContract, TicketPriority, TicketRisk } from '../domain/ticket.js';
-import type { ShipgraphEvent } from '../events/event.js';
+import type { TicketStateValue } from '../core/state-machine/state.js';
+import {
+  validateTicket,
+  type TicketContract,
+  type TicketPriority,
+  type TicketRisk,
+} from '../domain/ticket.js';
+import {
+  eventSchema,
+  type EventTypeValue,
+  type NewShipgraphEvent,
+  type ShipgraphEvent,
+} from '../events/event.js';
 
 export type ProjectRecord = {
   id: string;
@@ -45,7 +56,6 @@ export interface TicketRepository {
   create(ticket: TicketRecord): TicketRecord;
   findById(id: string): TicketRecord | undefined;
   findByProjectId(projectId: string): readonly TicketRecord[];
-  updateStatus(id: string, status: string): TicketRecord | undefined;
   countByProjectId(projectId: string): number;
 }
 
@@ -61,10 +71,10 @@ export interface RunRepository {
 }
 
 export interface EventRepository {
-  append(event: ShipgraphEvent): ShipgraphEvent;
+  append(event: NewShipgraphEvent): ShipgraphEvent;
+  countByProjectId(projectId: string): number;
   findByProjectId(projectId: string): readonly ShipgraphEvent[];
   findByTicketId(ticketId: string): readonly ShipgraphEvent[];
-  nextSequence(projectId: string): number;
 }
 
 export function createProjectRepository(db: DbConnection): ProjectRepository {
@@ -108,31 +118,84 @@ export function createTicketRepository(db: DbConnection): TicketRepository {
     return deps.map((d) => d.depends_on_ticket_id);
   };
 
+  const loadDependenciesForTickets = (
+    ticketIds: readonly string[]
+  ): ReadonlyMap<string, readonly string[]> => {
+    if (ticketIds.length === 0) return new Map();
+    const placeholders = ticketIds.map(() => '?').join(', ');
+    const rows = db
+      .prepare(
+        `SELECT ticket_id, depends_on_ticket_id
+         FROM ticket_dependencies
+         WHERE ticket_id IN (${placeholders})
+         ORDER BY ticket_id, depends_on_ticket_id`
+      )
+      .all(...ticketIds) as Array<{ ticket_id: string; depends_on_ticket_id: string }>;
+    const grouped = new Map<string, string[]>();
+    for (const row of rows) {
+      const dependencies = grouped.get(row.ticket_id) ?? [];
+      dependencies.push(row.depends_on_ticket_id);
+      grouped.set(row.ticket_id, dependencies);
+    }
+    return grouped;
+  };
+
+  const createTicket = db.transaction((ticket: TicketRecord): TicketRecord => {
+    const { projectId, createdAt, updatedAt, ...contract } = ticket;
+    const validated = validateTicket(contract);
+
+    if (validated.dependsOn.length > 0) {
+      const placeholders = validated.dependsOn.map(() => '?').join(', ');
+      const row = db
+        .prepare(
+          `SELECT COUNT(*) AS count FROM tickets
+           WHERE project_id = ? AND id IN (${placeholders})`
+        )
+        .get(projectId, ...validated.dependsOn) as { count: number };
+      if (row.count !== validated.dependsOn.length) {
+        throw new Error(
+          `Ticket ${validated.id} has dependencies that do not exist in project ${projectId}`
+        );
+      }
+    }
+
+    db.prepare(
+      `INSERT INTO tickets (
+        id, project_id, title, description, priority, risk, status,
+        scope_json, acceptance_criteria_json, verification_json,
+        agent_json, release_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      validated.id,
+      projectId,
+      validated.title,
+      validated.description,
+      validated.priority,
+      validated.risk,
+      validated.status,
+      JSON.stringify(validated.scope),
+      JSON.stringify(validated.acceptanceCriteria),
+      JSON.stringify(validated.verification),
+      JSON.stringify(validated.agent),
+      JSON.stringify(validated.release),
+      createdAt,
+      updatedAt
+    );
+
+    const insertDependency = db.prepare(
+      `INSERT INTO ticket_dependencies (ticket_id, depends_on_ticket_id, created_at)
+       VALUES (?, ?, ?)`
+    );
+    for (const dependencyId of validated.dependsOn) {
+      insertDependency.run(validated.id, dependencyId, createdAt);
+    }
+
+    return { ...validated, projectId, createdAt, updatedAt };
+  }).immediate;
+
   return {
     create(ticket): TicketRecord {
-      db.prepare(
-        `INSERT INTO tickets (
-          id, project_id, title, description, priority, risk, status,
-          scope_json, acceptance_criteria_json, verification_json,
-          agent_json, release_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        ticket.id,
-        ticket.projectId,
-        ticket.title,
-        ticket.description,
-        ticket.priority,
-        ticket.risk,
-        ticket.status,
-        JSON.stringify(ticket.scope),
-        JSON.stringify(ticket.acceptanceCriteria),
-        JSON.stringify(ticket.verification),
-        JSON.stringify(ticket.agent),
-        JSON.stringify(ticket.release),
-        ticket.createdAt,
-        ticket.updatedAt
-      );
-      return ticket;
+      return createTicket(ticket);
     },
     findById(id): TicketRecord | undefined {
       const row = db.prepare('SELECT * FROM tickets WHERE id = ?').get(id) as
@@ -145,18 +208,12 @@ export function createTicketRepository(db: DbConnection): TicketRepository {
       const rows = db
         .prepare('SELECT * FROM tickets WHERE project_id = ? ORDER BY created_at')
         .all(projectId);
-      return rows.map((row) => {
-        const ticket = rowToTicket(row as Record<string, unknown>);
-        return { ...ticket, dependsOn: loadDependencies(ticket.id) };
-      });
-    },
-    updateStatus(id, status): TicketRecord | undefined {
-      const now = new Date().toISOString();
-      const result = db
-        .prepare('UPDATE tickets SET status = ?, updated_at = ? WHERE id = ?')
-        .run(status, now, id);
-      if (result.changes === 0) return undefined;
-      return this.findById(id);
+      const tickets = rows.map((row) => rowToTicket(row as Record<string, unknown>));
+      const dependencies = loadDependenciesForTickets(tickets.map((ticket) => ticket.id));
+      return tickets.map((ticket) => ({
+        ...ticket,
+        dependsOn: dependencies.get(ticket.id) ?? [],
+      }));
     },
     countByProjectId(projectId): number {
       const row = db
@@ -228,22 +285,38 @@ export function createRunRepository(db: DbConnection): RunRepository {
 }
 
 export function createEventRepository(db: DbConnection): EventRepository {
+  const nextSequence = (projectId: string): number => {
+    const row = db
+      .prepare('SELECT MAX(sequence) as max_sequence FROM events WHERE project_id = ?')
+      .get(projectId) as { max_sequence: number | null };
+    return (row.max_sequence ?? 0) + 1;
+  };
+
+  const appendEvent = db.transaction((event: NewShipgraphEvent): ShipgraphEvent => {
+    const storedEvent = eventSchema.parse({
+      ...event,
+      sequence: nextSequence(event.projectId),
+    });
+
+    db.prepare(
+      `INSERT INTO events (id, sequence, timestamp, project_id, ticket_id, run_id, type, payload_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      storedEvent.id,
+      storedEvent.sequence,
+      storedEvent.timestamp,
+      storedEvent.projectId,
+      storedEvent.ticketId ?? null,
+      storedEvent.runId ?? null,
+      storedEvent.type,
+      JSON.stringify(storedEvent.payload)
+    );
+    return storedEvent;
+  }).immediate;
+
   return {
     append(event): ShipgraphEvent {
-      db.prepare(
-        `INSERT INTO events (id, sequence, timestamp, project_id, ticket_id, run_id, type, payload_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        event.id,
-        event.sequence,
-        event.timestamp,
-        event.projectId,
-        event.ticketId ?? null,
-        event.runId ?? null,
-        event.type,
-        JSON.stringify(event.payload)
-      );
-      return event;
+      return appendEvent(event);
     },
     findByProjectId(projectId): readonly ShipgraphEvent[] {
       const rows = db
@@ -253,17 +326,17 @@ export function createEventRepository(db: DbConnection): EventRepository {
         .all(projectId);
       return rows.map((row) => rowToEvent(row as Record<string, unknown>));
     },
+    countByProjectId(projectId): number {
+      const row = db
+        .prepare('SELECT COUNT(*) AS count FROM events WHERE project_id = ?')
+        .get(projectId) as { count: number };
+      return row.count;
+    },
     findByTicketId(ticketId): readonly ShipgraphEvent[] {
       const rows = db
         .prepare('SELECT * FROM events WHERE ticket_id = ? ORDER BY sequence ASC')
         .all(ticketId);
       return rows.map((row) => rowToEvent(row as Record<string, unknown>));
-    },
-    nextSequence(projectId): number {
-      const row = db
-        .prepare('SELECT MAX(sequence) as max_sequence FROM events WHERE project_id = ?')
-        .get(projectId) as { max_sequence: number | null };
-      return (row.max_sequence ?? 0) + 1;
     },
   };
 }
@@ -288,7 +361,7 @@ function rowToTicket(row: Record<string, unknown>): Omit<TicketRecord, 'dependsO
     description: String(row.description),
     priority: String(row.priority) as TicketPriority,
     risk: String(row.risk) as TicketRisk,
-    status: String(row.status),
+    status: String(row.status) as TicketStateValue,
     scope: JSON.parse(String(row.scope_json)),
     acceptanceCriteria: JSON.parse(String(row.acceptance_criteria_json)),
     verification: JSON.parse(String(row.verification_json)),
@@ -327,7 +400,7 @@ function rowToEvent(row: Record<string, unknown>): ShipgraphEvent {
     projectId: String(row.project_id),
     ticketId: row.ticket_id ? String(row.ticket_id) : undefined,
     runId: row.run_id ? String(row.run_id) : undefined,
-    type: String(row.type),
+    type: String(row.type) as EventTypeValue,
     payload: JSON.parse(String(row.payload_json)),
   };
 }

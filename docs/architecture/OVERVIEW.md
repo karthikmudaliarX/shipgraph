@@ -25,7 +25,7 @@ src/
     scheduler/      Eligibility and dependency ordering (future)
     policy/         Release and safety policy (future)
   domain/           Typed contracts (ticket, config)
-  persistence/      SQLite repositories and migrations
+  persistence/      SQLite repositories, transitions, and migrations
   adapters/
     agent/          Agent-adapter interface (OpenCode, Codex, ACP)
     git-host/       Git-host adapter interface (GitHub)
@@ -36,6 +36,16 @@ src/
 
 This is an intentional modular monolith. Boundaries are explicit but the project
 remains a single deployable unit.
+
+SQLite assigns each event's project-local sequence inside the append
+transaction. Ticket state mutation and its audit event share a compare-and-set
+transaction, so concurrent or partial transitions fail closed.
+
+Migrations are forward-only and fail closed if the database records a version
+or migration name unknown to the running binary. Before upgrading, operators
+should copy `.shipgraph/shipgraph.db` while ShipGraph is stopped. Recovery is
+restoring that backup or re-running `shipgraph init` for disposable empty state;
+lossless down migrations are intentionally not claimed in CORE-001.
 
 ## Outer-loop workflow
 

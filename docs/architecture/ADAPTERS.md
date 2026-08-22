@@ -26,7 +26,7 @@ Future providers:
 
 - OpenCode (AGENT-001)
 - Codex
-- ACP (Agent Communication Protocol)
+- ACP (Agent Client Protocol)
 
 CORE-001 does not implement execution. The probe contract is enough to support
 `shipgraph doctor` and future adapter discovery.

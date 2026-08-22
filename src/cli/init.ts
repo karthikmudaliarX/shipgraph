@@ -1,12 +1,14 @@
-import { mkdirSync, writeFileSync, statSync, accessSync } from 'node:fs';
+import { closeSync, constants, lstatSync, mkdirSync, openSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { getShipgraphPaths } from '../utils/paths.js';
+import { stringify } from 'yaml';
+import { assertSafeShipgraphPaths } from '../utils/paths.js';
 import { openAndMigrate } from '../persistence/db.js';
 import {
   createProjectRepository,
   createEventRepository,
 } from '../persistence/repositories.js';
 import { validateConfig, type ShipgraphConfig } from '../config/schema.js';
+import { loadConfig } from '../config/loader.js';
 import { EventType, type ProjectInitializedPayload } from '../events/event.js';
 
 export type InitResult = {
@@ -42,8 +44,8 @@ const DEFAULT_CONFIG: ShipgraphConfig = {
 /**
  * Initialize ShipGraph metadata for a target project.
  *
- * CORE-001 scope: creates safe configuration/state directories only.
- * No agent execution.
+ * CORE-001 scope: creates safe configuration/state directories, migrates the
+ * local database, and atomically records initialization. No agent execution.
  */
 export function initProject(
   projectDir: string,
@@ -52,61 +54,96 @@ export function initProject(
     skipConfig?: boolean;
   } = {}
 ): InitResult {
-  const paths = getShipgraphPaths(projectDir);
-  const config = options.config ?? DEFAULT_CONFIG;
+  const paths = assertSafeShipgraphPaths(projectDir);
+  const configAlreadyExists = pathExists(paths.configPath);
+  const config = options.config ?? (configAlreadyExists ? loadConfig(projectDir) : DEFAULT_CONFIG);
 
   validateConfig(config);
 
   let createdStateDir = false;
-  if (!directoryExists(paths.stateDir)) {
-    mkdirSync(paths.stateDir, { recursive: true });
+  if (!pathExists(paths.stateDir)) {
+    mkdirSync(paths.stateDir);
     createdStateDir = true;
   }
 
   let createdGlobalDir = false;
-  if (!directoryExists(paths.globalDir)) {
+  if (!pathExists(paths.globalDir)) {
     mkdirSync(paths.globalDir, { recursive: true });
     createdGlobalDir = true;
   }
 
   let wroteExampleConfig = false;
-  if (!options.skipConfig && !fileExists(paths.configPath)) {
-    writeFileSync(paths.configPath, renderConfigYaml(config));
+  if (!options.skipConfig && !configAlreadyExists) {
+    writeFileSync(paths.configPath, renderConfigYaml(config), { flag: 'wx', mode: 0o600 });
     wroteExampleConfig = true;
+  }
+
+  if (!pathExists(paths.dbPath)) {
+    const fd = openSync(
+      paths.dbPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW,
+      0o600
+    );
+    closeSync(fd);
   }
 
   const db = openAndMigrate(paths.dbPath);
   const projectRepo = createProjectRepository(db);
   const eventRepo = createEventRepository(db);
 
+  const existingProject = projectRepo.findAll()[0];
+  if (existingProject) {
+    const identityMatches =
+      existingProject.name === config.project.name &&
+      existingProject.repository === config.project.repository &&
+      existingProject.defaultBranch === config.project.defaultBranch &&
+      JSON.stringify(existingProject.config) === JSON.stringify(config);
+    db.close();
+    if (!identityMatches) {
+      throw new Error(
+        'shipgraph.yml does not match the project identity already stored in .shipgraph/shipgraph.db'
+      );
+    }
+    return {
+      projectId: existingProject.id,
+      createdStateDir,
+      createdGlobalDir,
+      wroteExampleConfig,
+      initializedDb: true,
+    };
+  }
+
   const projectId = randomUUID();
   const now = new Date().toISOString();
 
-  projectRepo.create({
-    id: projectId,
-    name: config.project.name,
-    repository: config.project.repository,
-    defaultBranch: config.project.defaultBranch,
-    config,
-    createdAt: now,
-    updatedAt: now,
+  const initialize = db.transaction(() => {
+    projectRepo.create({
+      id: projectId,
+      name: config.project.name,
+      repository: config.project.repository,
+      defaultBranch: config.project.defaultBranch,
+      config,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const payload: ProjectInitializedPayload = {
+      projectId,
+      name: config.project.name,
+      repository: config.project.repository,
+      defaultBranch: config.project.defaultBranch,
+    };
+
+    eventRepo.append({
+      id: randomUUID(),
+      timestamp: now,
+      projectId,
+      type: EventType.PROJECT_INITIALIZED,
+      payload,
+    });
   });
 
-  const payload: ProjectInitializedPayload = {
-    projectId,
-    name: config.project.name,
-    repository: config.project.repository,
-    defaultBranch: config.project.defaultBranch,
-  };
-
-  eventRepo.append({
-    id: randomUUID(),
-    sequence: 1,
-    timestamp: now,
-    projectId,
-    type: EventType.PROJECT_INITIALIZED,
-    payload,
-  });
+  initialize();
 
   db.close();
 
@@ -119,44 +156,16 @@ export function initProject(
   };
 }
 
-function directoryExists(path: string): boolean {
+function pathExists(path: string): boolean {
   try {
-    const stats = statSync(path);
-    return stats.isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-function fileExists(path: string): boolean {
-  try {
-    accessSync(path);
+    lstatSync(path);
     return true;
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     return false;
   }
 }
 
 function renderConfigYaml(config: ShipgraphConfig): string {
-  return `version: ${config.version}
-
-project:
-  name: ${config.project.name}
-  repository: ${config.project.repository}
-  defaultBranch: ${config.project.defaultBranch}
-
-execution:
-  maxConcurrentTickets: ${config.execution.maxConcurrentTickets}
-  maxRepairIterations: ${config.execution.maxRepairIterations}
-
-release:
-  requireHumanApproval: ${config.release.requireHumanApproval}
-  requireCleanCI: ${config.release.requireCleanCI}
-  requireExactShaReviews: ${config.release.requireExactShaReviews}
-
-agents:
-  implementer: ${config.agents.implementer}
-  reviewers:
-${config.agents.reviewers.map((r) => `    - ${r}`).join('\n')}
-`;
+  return stringify(config);
 }

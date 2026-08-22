@@ -37,23 +37,44 @@ describe('state machine', () => {
   });
 
   it('blocks MERGING without explicit human-approval override', () => {
-    const result = transition(TicketState.AWAITING_APPROVAL, TicketState.MERGING);
+    const result = transition(TicketState.RELEASE_READY, TicketState.MERGING);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.reason).toMatch(/human approval/);
     }
+    expect(canTransition(TicketState.RELEASE_READY, TicketState.MERGING)).toBe(false);
   });
 
   it('allows MERGING when human approval requirement is explicitly disabled', () => {
-    const result = transition(TicketState.AWAITING_APPROVAL, TicketState.MERGING, {
+    const result = transition(TicketState.RELEASE_READY, TicketState.MERGING, {
       releasePolicy: { requireHumanApproval: false },
     });
     expect(result.ok).toBe(true);
+    expect(
+      canTransition(TicketState.RELEASE_READY, TicketState.MERGING, {
+        releasePolicy: { requireHumanApproval: false },
+      })
+    ).toBe(true);
   });
 
   it('lists legal next states', () => {
     const next = legalNextStates(TicketState.FAILED);
     expect(next).toContain(TicketState.REPAIRING);
     expect(next).toContain(TicketState.NEEDS_HUMAN);
+  });
+
+  it('keeps canTransition and transition consistent for every state pair', () => {
+    for (const from of Object.values(TicketState)) {
+      for (const to of Object.values(TicketState)) {
+        const result = transition(from, to, {
+          releasePolicy: { requireHumanApproval: false },
+        });
+        expect(
+          canTransition(from, to, {
+            releasePolicy: { requireHumanApproval: false },
+          })
+        ).toBe(result.ok);
+      }
+    }
   });
 });

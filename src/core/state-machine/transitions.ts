@@ -27,7 +27,11 @@ const allowedTransitions: Record<TicketStateValue, readonly TicketStateValue[]> 
   ],
   [TicketState.CHANGES_REQUIRED]: [TicketState.REPAIRING, TicketState.NEEDS_HUMAN],
   [TicketState.REPAIRING]: [TicketState.VERIFYING, TicketState.FAILED],
-  [TicketState.RELEASE_READY]: [TicketState.AWAITING_APPROVAL, TicketState.NEEDS_HUMAN],
+  [TicketState.RELEASE_READY]: [
+    TicketState.AWAITING_APPROVAL,
+    TicketState.MERGING,
+    TicketState.NEEDS_HUMAN,
+  ],
   [TicketState.AWAITING_APPROVAL]: [TicketState.MERGING, TicketState.RELEASE_READY],
   [TicketState.MERGING]: [TicketState.MERGED, TicketState.FAILED],
   [TicketState.MERGED]: [TicketState.COMPLETE],
@@ -45,10 +49,9 @@ const allowedTransitions: Record<TicketStateValue, readonly TicketStateValue[]> 
 export function canTransition(
   from: TicketStateValue,
   to: TicketStateValue,
-  _context?: TransitionContext
+  context?: TransitionContext
 ): boolean {
-  if (from === to) return false;
-  return allowedTransitions[from]?.includes(to) ?? false;
+  return evaluateTransition(from, to, context).ok;
 }
 
 /**
@@ -56,6 +59,14 @@ export function canTransition(
  * Illegal transitions fail closed with a reason.
  */
 export function transition(
+  from: TicketStateValue,
+  to: TicketStateValue,
+  context?: TransitionContext
+): TransitionResult {
+  return evaluateTransition(from, to, context);
+}
+
+function evaluateTransition(
   from: TicketStateValue,
   to: TicketStateValue,
   context?: TransitionContext

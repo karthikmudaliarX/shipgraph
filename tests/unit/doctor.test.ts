@@ -35,8 +35,8 @@ describe('doctor', () => {
         stdout: 'gh version 2.57.0',
         stderr: '',
       },
-      'gh auth status': {
-        command: 'gh auth status',
+      'gh auth status --active': {
+        command: 'gh auth status --active',
         exitCode: 0,
         stdout: 'Logged in',
         stderr: '',
@@ -96,8 +96,8 @@ describe('doctor', () => {
         stdout: '',
         stderr: 'command not found',
       },
-      'gh auth status': {
-        command: 'gh auth status',
+      'gh auth status --active': {
+        command: 'gh auth status --active',
         exitCode: 1,
         stdout: '',
         stderr: 'command not found',
@@ -129,11 +129,34 @@ describe('doctor', () => {
     expect(ghAvailable?.status).toBe('fail');
   });
 
+  it('reports unhealthy when GitHub CLI is installed but not authenticated', async () => {
+    const runner = makeRunner({
+      'git --version': { command: 'git --version', exitCode: 0, stdout: 'git', stderr: '' },
+      'gh --version': { command: 'gh --version', exitCode: 0, stdout: 'gh', stderr: '' },
+      'gh auth status --active': {
+        command: 'gh auth status --active',
+        exitCode: 1,
+        stdout: '',
+        stderr: 'not logged in',
+      },
+      'pnpm --version': { command: 'pnpm --version', exitCode: 0, stdout: 'pnpm', stderr: '' },
+    });
+
+    const report = await runDoctor({ runner, json: true });
+    expect(report.healthy).toBe(false);
+    expect(report.checks.find((check) => check.name === 'gh_authenticated')?.status).toBe('fail');
+  });
+
   it('returns structured JSON output', async () => {
     const runner = makeRunner({
       'git --version': { command: 'git --version', exitCode: 0, stdout: 'git', stderr: '' },
       'gh --version': { command: 'gh --version', exitCode: 0, stdout: 'gh', stderr: '' },
-      'gh auth status': { command: 'gh auth status', exitCode: 0, stdout: '', stderr: '' },
+      'gh auth status --active': {
+        command: 'gh auth status --active',
+        exitCode: 0,
+        stdout: '',
+        stderr: '',
+      },
       'pnpm --version': { command: 'pnpm --version', exitCode: 0, stdout: 'pnpm', stderr: '' },
       'opencode --version': {
         command: 'opencode --version',

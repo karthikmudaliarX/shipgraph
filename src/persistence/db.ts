@@ -52,7 +52,8 @@ export const MIGRATIONS: readonly Migration[] = [
         depends_on_ticket_id TEXT NOT NULL,
         created_at TEXT NOT NULL,
         PRIMARY KEY (ticket_id, depends_on_ticket_id),
-        FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+        FOREIGN KEY (ticket_id) REFERENCES tickets(id),
+        FOREIGN KEY (depends_on_ticket_id) REFERENCES tickets(id)
       );
 
       CREATE TABLE IF NOT EXISTS runs (
@@ -76,14 +77,39 @@ export const MIGRATIONS: readonly Migration[] = [
         type TEXT NOT NULL,
         payload_json TEXT NOT NULL,
         UNIQUE (project_id, sequence),
-        FOREIGN KEY (project_id) REFERENCES projects(id)
+        FOREIGN KEY (project_id) REFERENCES projects(id),
+        FOREIGN KEY (ticket_id) REFERENCES tickets(id),
+        FOREIGN KEY (run_id) REFERENCES runs(id)
       );
+
+      CREATE INDEX IF NOT EXISTS idx_tickets_project_id
+        ON tickets(project_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_ticket_dependencies_depends_on
+        ON ticket_dependencies(depends_on_ticket_id);
+      CREATE INDEX IF NOT EXISTS idx_runs_ticket_id
+        ON runs(ticket_id, started_at);
+      CREATE INDEX IF NOT EXISTS idx_events_ticket_sequence
+        ON events(ticket_id, sequence);
+      CREATE INDEX IF NOT EXISTS idx_events_run_sequence
+        ON events(run_id, sequence);
 
       CREATE TABLE IF NOT EXISTS schema_migrations (
         version INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
         applied_at TEXT NOT NULL
       );
+
+      CREATE TRIGGER IF NOT EXISTS events_are_append_only_update
+      BEFORE UPDATE ON events
+      BEGIN
+        SELECT RAISE(ABORT, 'events are append-only');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS events_are_append_only_delete
+      BEFORE DELETE ON events
+      BEGIN
+        SELECT RAISE(ABORT, 'events are append-only');
+      END;
     `,
   },
 ];
@@ -113,12 +139,23 @@ export function migrate(db: DbConnection): void {
     );
   `);
 
-  const appliedVersions = new Set(
-    db
-      .prepare('SELECT version FROM schema_migrations')
-      .all()
-      .map((row) => (row as { version: number }).version)
+  const appliedRows = db
+    .prepare('SELECT version, name FROM schema_migrations ORDER BY version')
+    .all() as Array<{ version: number; name: string }>;
+  const knownMigrations = new Map(
+    MIGRATIONS.map((migration) => [migration.version, migration.name])
   );
+
+  for (const applied of appliedRows) {
+    const expectedName = knownMigrations.get(applied.version);
+    if (expectedName === undefined || expectedName !== applied.name) {
+      throw new Error(
+        `Database migration ${applied.version} (${applied.name}) is not supported by this ShipGraph binary`
+      );
+    }
+  }
+
+  const appliedVersions = new Set(appliedRows.map((row) => row.version));
 
   const pending = MIGRATIONS.filter((m) => !appliedVersions.has(m.version));
 
@@ -144,5 +181,12 @@ export function migrate(db: DbConnection): void {
 export function openAndMigrate(path: string): DbConnection {
   const db = createDatabase(path);
   migrate(db);
+  return db;
+}
+
+/** Open an initialized database without allowing status checks to mutate it. */
+export function openReadonlyDatabase(path: string): DbConnection {
+  const db = new Database(path, { readonly: true, fileMustExist: true });
+  db.pragma('foreign_keys = ON');
   return db;
 }

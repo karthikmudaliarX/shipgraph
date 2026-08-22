@@ -1,16 +1,21 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
-import { createInMemoryDatabase, migrate, MIGRATIONS } from '../../src/persistence/db.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createDatabase, migrate, MIGRATIONS } from '../../src/persistence/db.js';
 import type { DbConnection } from '../../src/persistence/db.js';
 import {
   createProjectRepository,
   createTicketRepository,
   createTicketDependencyRepository,
   createRunRepository,
+  createEventRepository,
 } from '../../src/persistence/repositories.js';
 import type { ProjectRecord, TicketRecord, RunRecord } from '../../src/persistence/repositories.js';
 
 import type { ShipgraphConfig } from '../../src/config/schema.js';
+import { EventType } from '../../src/events/event.js';
 
 const TEST_CONFIG: ShipgraphConfig = {
   version: 1,
@@ -22,14 +27,17 @@ const TEST_CONFIG: ShipgraphConfig = {
 
 describe('SQLite persistence', () => {
   let db: DbConnection;
+  let databaseDir: string;
 
   beforeEach(() => {
-    db = createInMemoryDatabase();
+    databaseDir = mkdtempSync(join(tmpdir(), 'shipgraph-persistence-'));
+    db = createDatabase(join(databaseDir, 'shipgraph.db'));
     migrate(db);
   });
 
   afterEach(() => {
     db.close();
+    rmSync(databaseDir, { recursive: true, force: true });
   });
 
   it('applies migrations to an empty database', () => {
@@ -37,6 +45,41 @@ describe('SQLite persistence', () => {
       .prepare('SELECT version FROM schema_migrations ORDER BY version')
       .all() as Array<{ version: number }>;
     expect(applied.map((m) => m.version)).toEqual(MIGRATIONS.map((m) => m.version));
+  });
+
+  it('fails closed when the database contains an unknown migration', () => {
+    db.prepare(
+      'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)'
+    ).run(999, 'future_schema', new Date().toISOString());
+
+    expect(() => migrate(db)).toThrow(/not supported/);
+  });
+
+  it('enforces append-only events at the database boundary', () => {
+    const projectId = randomUUID();
+    createProjectRepository(db).create({
+      id: projectId,
+      name: 'test',
+      repository: 'owner/repo',
+      defaultBranch: 'main',
+      config: TEST_CONFIG,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const event = createEventRepository(db).append({
+      id: randomUUID(),
+      timestamp: new Date().toISOString(),
+      projectId,
+      type: EventType.PROJECT_INITIALIZED,
+      payload: { projectId },
+    });
+
+    expect(() =>
+      db.prepare('UPDATE events SET type = ? WHERE id = ?').run('changed', event.id)
+    ).toThrow(/append-only/);
+    expect(() => db.prepare('DELETE FROM events WHERE id = ?').run(event.id)).toThrow(
+      /append-only/
+    );
   });
 
   it('stores and retrieves a project', () => {
@@ -101,19 +144,27 @@ describe('SQLite persistence', () => {
 
     ticketRepo.create(base);
     ticketRepo.create(dependent);
-    depRepo.createMany([
-      {
-        ticketId: 'CORE-002',
-        dependsOnTicketId: 'CORE-001',
-        createdAt: new Date().toISOString(),
-      },
-    ]);
-
     const found = ticketRepo.findById('CORE-002');
     expect(found?.dependsOn).toEqual(['CORE-001']);
 
     const projectTickets = ticketRepo.findByProjectId(projectId);
     expect(projectTickets).toHaveLength(2);
+
+    expect(() =>
+      ticketRepo.create({ ...base, id: 'CORE-003', dependsOn: ['CORE-999'] })
+    ).toThrow();
+
+    expect(ticketRepo.findById('CORE-003')).toBeUndefined();
+
+    expect(() =>
+      depRepo.createMany([
+        {
+          ticketId: 'CORE-002',
+          dependsOnTicketId: 'CORE-999',
+          createdAt: new Date().toISOString(),
+        },
+      ])
+    ).toThrow();
   });
 
   it('counts tickets by project', () => {

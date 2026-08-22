@@ -18,11 +18,3 @@ export interface GitHostAdapter {
    */
   probe(): Promise<GitHostProbeResult> | GitHostProbeResult;
 }
-
-/**
- * Factory to create a git-host adapter by type.
- */
-export function createGitHostAdapter(_type: GitHostType): GitHostAdapter {
-  // Placeholder: real adapters are implemented in GH-001.
-  throw new Error('Git host adapters are not implemented in CORE-001');
-}

@@ -48,13 +48,14 @@ are rejected. Self-transitions are also rejected.
 
 ## Policy-aware transitions
 
-Some transitions depend on policy. For example, `RELEASE_READY → MERGING`
-requires either human approval or an explicit policy override. The state
+Some transitions depend on policy. Any transition into `MERGING`, including
+`AWAITING_APPROVAL → MERGING`, requires either human approval or an explicit policy override. The state
 machine accepts a `TransitionContext` so callers can supply release policy
 without hard-coding it inside the machine.
 
 ## Persistence
 
-State updates are performed inside SQLite transactions. The corresponding
-`ticket.state_changed` event is appended in the same transaction so that state
-and audit log remain consistent.
+`persistTicketTransition` is the only normal application entry point that
+mutates ticket state. It performs a compare-and-set update and appends the
+corresponding `ticket.state_changed` event in one immediate SQLite transaction.
+The general ticket repository intentionally exposes no raw state-update method.

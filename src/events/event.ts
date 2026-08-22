@@ -4,16 +4,25 @@ import { TicketState, type TicketStateValue } from '../core/state-machine/state.
 /**
  * Core event types for the append-only audit log.
  */
+export const EVENT_TYPES = [
+  'project.initialized',
+  'ticket.created',
+  'ticket.state_changed',
+  'ticket.suggested',
+  'run.created',
+  'run.completed',
+] as const;
+
 export const EventType = {
-  PROJECT_INITIALIZED: 'project.initialized',
-  TICKET_CREATED: 'ticket.created',
-  TICKET_STATE_CHANGED: 'ticket.state_changed',
-  TICKET_SUGGESTED: 'ticket.suggested',
-  RUN_CREATED: 'run.created',
-  RUN_COMPLETED: 'run.completed',
+  PROJECT_INITIALIZED: EVENT_TYPES[0],
+  TICKET_CREATED: EVENT_TYPES[1],
+  TICKET_STATE_CHANGED: EVENT_TYPES[2],
+  TICKET_SUGGESTED: EVENT_TYPES[3],
+  RUN_CREATED: EVENT_TYPES[4],
+  RUN_COMPLETED: EVENT_TYPES[5],
 } as const;
 
-export type EventTypeValue = (typeof EventType)[keyof typeof EventType];
+export type EventTypeValue = (typeof EVENT_TYPES)[number];
 
 export const eventPayloadSchema = z.record(z.unknown()).default({});
 
@@ -25,16 +34,17 @@ export const eventPayloadSchema = z.record(z.unknown()).default({});
  */
 export const eventSchema = z.object({
   id: z.string().uuid(),
-  sequence: z.number().int().nonnegative(),
+  sequence: z.number().int().positive(),
   timestamp: z.string().datetime(),
   projectId: z.string().min(1),
   ticketId: z.string().optional(),
   runId: z.string().optional(),
-  type: z.string().min(1),
+  type: z.enum(EVENT_TYPES),
   payload: eventPayloadSchema,
-});
+}).strict();
 
 export type ShipgraphEvent = z.infer<typeof eventSchema>;
+export type NewShipgraphEvent = Omit<ShipgraphEvent, 'sequence'>;
 
 export type ProjectInitializedPayload = {
   projectId: string;

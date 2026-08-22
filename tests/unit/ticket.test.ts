@@ -47,6 +47,19 @@ describe('ticket contract', () => {
     expect(() => validateTicket(makeTicket({ risk: 'extreme' as any }))).toThrow();
   });
 
+  it('rejects statuses outside the state machine, including APPROVED', () => {
+    expect(() => validateTicket(makeTicket({ status: 'APPROVED' as never }))).toThrow();
+  });
+
+  it('rejects self-dependencies and duplicate dependencies', () => {
+    expect(() =>
+      validateTicket(makeTicket({ dependsOn: ['CORE-001'] }))
+    ).toThrow(/itself/);
+    expect(() =>
+      validateTicket(makeTicket({ dependsOn: ['CORE-002', 'CORE-002'] }))
+    ).toThrow(/unique/);
+  });
+
   it('validates dependencies against known ticket IDs', () => {
     const ticket = makeTicket({ id: 'CORE-002', dependsOn: ['CORE-001'] });
     expect(() => validateTicketDependencies(ticket, new Set(['CORE-001']))).not.toThrow();

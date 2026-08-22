@@ -65,6 +65,17 @@ project:
     expect(() => parseConfig(raw)).toThrow(/Unsupported shipgraph.yml major version/);
   });
 
+  it('rejects unknown configuration keys', () => {
+    const raw = `
+version: 1
+project:
+  name: strict
+  repository: owner/repo
+  unexpected: true
+`;
+    expect(() => parseConfig(raw)).toThrow();
+  });
+
   it('rejects unknown major version via validateConfig', () => {
     expect(() =>
       validateConfig({

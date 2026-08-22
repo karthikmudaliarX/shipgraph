@@ -1,5 +1,5 @@
-import { getShipgraphPaths } from '../utils/paths.js';
-import { openAndMigrate } from '../persistence/db.js';
+import { assertSafeShipgraphPaths } from '../utils/paths.js';
+import { openReadonlyDatabase } from '../persistence/db.js';
 import {
   createProjectRepository,
   createTicketRepository,
@@ -28,7 +28,7 @@ export function showStatus(
   projectDir: string,
   options: { json?: boolean } = {}
 ): StatusReport {
-  const paths = getShipgraphPaths(projectDir);
+  const paths = assertSafeShipgraphPaths(projectDir);
 
   try {
     loadConfig(projectDir);
@@ -44,7 +44,7 @@ export function showStatus(
     return report;
   }
 
-  const db = openAndMigrate(paths.dbPath);
+  const db = openReadonlyDatabase(paths.dbPath);
   const projectRepo = createProjectRepository(db);
   const ticketRepo = createTicketRepository(db);
   const eventRepo = createEventRepository(db);
@@ -67,7 +67,7 @@ export function showStatus(
   // For CORE-001, assume one project per directory.
   const project = projects[0];
   const ticketCount = ticketRepo.countByProjectId(project.id);
-  const events = eventRepo.findByProjectId(project.id);
+  const eventCount = eventRepo.countByProjectId(project.id);
 
   const status: ProjectStatus = {
     projectId: project.id,
@@ -75,7 +75,7 @@ export function showStatus(
     repository: project.repository,
     defaultBranch: project.defaultBranch,
     ticketCount,
-    eventCount: events.length,
+    eventCount,
   };
 
   db.close();
