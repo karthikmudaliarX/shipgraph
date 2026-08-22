@@ -1,5 +1,7 @@
 import { execa } from 'execa';
 
+const PROCESS_TIMEOUT_MS = 10_000;
+
 export type ProcessResult = {
   command: string;
   exitCode: number;
@@ -17,6 +19,7 @@ export const defaultProcessRunner: ProcessRunner = {
       const result = await execa(command, args, {
         reject: false,
         cleanup: true,
+        timeout: PROCESS_TIMEOUT_MS,
       });
       return {
         command: [command, ...args].join(' '),

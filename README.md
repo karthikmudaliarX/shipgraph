@@ -87,7 +87,10 @@ shipgraph doctor
 # Structured diagnostics
 shipgraph doctor --json
 
-# Initialize a project
+# First run writes shipgraph.yml and waits for a real project identity.
+shipgraph init
+
+# Edit project.name and project.repository, then initialize persistence.
 shipgraph init
 
 # Show project status
@@ -96,6 +99,10 @@ shipgraph status
 # Structured status
 shipgraph status --json
 ```
+
+`init` never persists the template's empty identity. Once a valid configuration
+has initialized the database, both `init` and `status` fail closed if the file's
+identity or validated configuration drifts from the persisted project.
 
 ## Installation
 

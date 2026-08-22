@@ -57,6 +57,32 @@ describe('state machine', () => {
     ).toBe(true);
   });
 
+  it('allows approval-required MERGING only with granted approval evidence', () => {
+    expect(
+      transition(TicketState.AWAITING_APPROVAL, TicketState.MERGING, {
+        releasePolicy: { requireHumanApproval: true },
+        releaseEvidence: { humanApprovalGranted: true },
+      }).ok
+    ).toBe(true);
+
+    for (const humanApprovalGranted of [false, undefined]) {
+      expect(
+        transition(TicketState.AWAITING_APPROVAL, TicketState.MERGING, {
+          releasePolicy: { requireHumanApproval: true },
+          releaseEvidence: { humanApprovalGranted },
+        }).ok
+      ).toBe(false);
+    }
+  });
+
+  it('allows RELEASE_READY to enter AWAITING_APPROVAL without approval evidence', () => {
+    expect(
+      transition(TicketState.RELEASE_READY, TicketState.AWAITING_APPROVAL, {
+        releasePolicy: { requireHumanApproval: true },
+      }).ok
+    ).toBe(true);
+  });
+
   it('lists legal next states', () => {
     const next = legalNextStates(TicketState.FAILED);
     expect(next).toContain(TicketState.REPAIRING);

@@ -4,6 +4,14 @@ ShipGraph is built on a small set of invariants that make autonomous releases
 safe and auditable. These are established in CORE-001 and enforced by later
 tickets.
 
+## Project-owned audit history
+
+Every immutable event belongs to one project. Any referenced ticket must belong
+to that project; any referenced run inherits its project through its ticket; and
+an event that carries both references must name the run's ticket. Dependency
+edges are likewise confined to one project. These checks happen before inserts,
+while SQLite triggers prevent later event updates or deletes.
+
 ## Exact-SHA review provenance
 
 A review or approval applies to **exactly one commit SHA**.

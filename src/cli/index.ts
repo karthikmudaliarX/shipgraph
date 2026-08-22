@@ -30,11 +30,19 @@ export function createProgram(): Command {
     .action((options: { projectDir?: string }) => {
       const projectDir = options.projectDir ?? process.cwd();
       const result = initProject(projectDir);
+      if (result.configurationRequired) {
+        console.log(
+          result.wroteConfigTemplate
+            ? 'ShipGraph configuration template written to shipgraph.yml.'
+            : 'ShipGraph is waiting for project identity in shipgraph.yml.'
+        );
+        console.log('Fill in project.name and project.repository, then run `shipgraph init` again.');
+        return;
+      }
       console.log('ShipGraph initialized:');
       console.log(`  projectId: ${result.projectId}`);
       console.log(`  state dir: ${result.createdStateDir ? 'created' : 'already exists'}`);
       console.log(`  global dir: ${result.createdGlobalDir ? 'created' : 'already exists'}`);
-      console.log(`  example config: ${result.wroteExampleConfig ? 'written' : 'skipped'}`);
     });
 
   program

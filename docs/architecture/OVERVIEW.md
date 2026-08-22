@@ -41,6 +41,22 @@ SQLite assigns each event's project-local sequence inside the append
 transaction. Ticket state mutation and its audit event share a compare-and-set
 transaction, so concurrent or partial transitions fail closed.
 
+Known event types have strict runtime payload schemas. Before an immutable event
+is inserted, ticket and run references are resolved through their owning ticket
+and must belong to the event's project. Dependency mutation enforces the same
+single-project boundary, so one project's DAG and audit history cannot acquire
+references to another project.
+The standalone dependency mutation boundary also rejects self-edges and cycles
+against the existing graph plus the full proposed batch.
+
+On a fresh directory, `shipgraph init` writes a configuration template and
+stops. Persistence is created only after the user supplies a valid project name
+and `owner/repository` identity. That identity and the validated configuration
+are immutable for CORE-001; both `init` and `status` fail closed on drift.
+Each project-local database must contain exactly one project row; CLI commands
+reject ambiguous multi-project state even though repository isolation is tested
+with multi-project databases.
+
 Migrations are forward-only and fail closed if the database records a version
 or migration name unknown to the running binary. Before upgrading, operators
 should copy `.shipgraph/shipgraph.db` while ShipGraph is stopped. Recovery is

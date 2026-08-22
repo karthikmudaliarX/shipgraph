@@ -180,8 +180,13 @@ export function migrate(db: DbConnection): void {
  */
 export function openAndMigrate(path: string): DbConnection {
   const db = createDatabase(path);
-  migrate(db);
-  return db;
+  try {
+    migrate(db);
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 }
 
 /** Open an initialized database without allowing status checks to mutate it. */

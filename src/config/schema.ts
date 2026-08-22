@@ -54,6 +54,13 @@ export type ExecutionConfig = z.infer<typeof executionConfigSchema>;
 export type ReleaseConfig = z.infer<typeof releaseConfigSchema>;
 export type AgentsConfig = z.infer<typeof agentsConfigSchema>;
 
+export type PersistedProjectIdentity = {
+  name: string;
+  repository: string;
+  defaultBranch: string;
+  config: unknown;
+};
+
 /**
  * Validate a parsed config object.
  * Throws if the major version is unsupported or the shape is invalid.
@@ -67,4 +74,18 @@ export function validateConfig(value: unknown): ShipgraphConfig {
     );
   }
   return parsed;
+}
+
+/** Compare a persisted project record with a validated configuration. */
+export function persistedProjectMatchesConfig(
+  project: PersistedProjectIdentity,
+  config: ShipgraphConfig
+): boolean {
+  const persistedConfig = validateConfig(project.config);
+  return (
+    project.name === config.project.name &&
+    project.repository === config.project.repository &&
+    project.defaultBranch === config.project.defaultBranch &&
+    JSON.stringify(persistedConfig) === JSON.stringify(config)
+  );
 }

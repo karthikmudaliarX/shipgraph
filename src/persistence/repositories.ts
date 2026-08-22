@@ -9,7 +9,6 @@ import {
 } from '../domain/ticket.js';
 import {
   eventSchema,
-  type EventTypeValue,
   type NewShipgraphEvent,
   type ShipgraphEvent,
 } from '../events/event.js';
@@ -227,6 +226,13 @@ export function createTicketRepository(db: DbConnection): TicketRepository {
 export function createTicketDependencyRepository(
   db: DbConnection
 ): TicketDependencyRepository {
+  const findDependencyProjects = db.prepare(
+    `SELECT ticket.project_id AS ticket_project_id,
+            dependency.project_id AS dependency_project_id
+     FROM tickets AS ticket
+     JOIN tickets AS dependency ON dependency.id = ?
+     WHERE ticket.id = ?`
+  );
   return {
     createMany(dependencies): void {
       const insert = db.prepare(
@@ -235,9 +241,28 @@ export function createTicketDependencyRepository(
       );
       const insertMany = db.transaction((items: readonly TicketDependencyRecord[]) => {
         for (const item of items) {
+          const projects = findDependencyProjects.get(
+            item.dependsOnTicketId,
+            item.ticketId
+          ) as
+            | { ticket_project_id: string; dependency_project_id: string }
+            | undefined;
+          if (!projects) {
+            throw new Error(
+              `Dependency ${item.ticketId} -> ${item.dependsOnTicketId} references a missing ticket`
+            );
+          }
+          if (projects.ticket_project_id !== projects.dependency_project_id) {
+            throw new Error(
+              `Dependency ${item.ticketId} -> ${item.dependsOnTicketId} crosses project boundaries`
+            );
+          }
+        }
+        assertAcyclicDependencies(db, items);
+        for (const item of items) {
           insert.run(item.ticketId, item.dependsOnTicketId, item.createdAt);
         }
-      });
+      }).immediate;
       insertMany(dependencies);
     },
     findByTicketId(ticketId): readonly TicketDependencyRecord[] {
@@ -249,6 +274,43 @@ export function createTicketDependencyRepository(
       return rows.map((row) => rowToDependency(row as Record<string, unknown>));
     },
   };
+}
+
+function assertAcyclicDependencies(
+  db: DbConnection,
+  proposed: readonly TicketDependencyRecord[]
+): void {
+  const existing = db
+    .prepare('SELECT ticket_id, depends_on_ticket_id FROM ticket_dependencies')
+    .all() as Array<{ ticket_id: string; depends_on_ticket_id: string }>;
+  const adjacency = new Map<string, Set<string>>();
+  const addEdge = (ticketId: string, dependencyId: string): void => {
+    if (ticketId === dependencyId) {
+      throw new Error(`Ticket ${ticketId} cannot depend on itself`);
+    }
+    const dependencies = adjacency.get(ticketId) ?? new Set<string>();
+    dependencies.add(dependencyId);
+    adjacency.set(ticketId, dependencies);
+  };
+  for (const edge of existing) addEdge(edge.ticket_id, edge.depends_on_ticket_id);
+  for (const edge of proposed) addEdge(edge.ticketId, edge.dependsOnTicketId);
+
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (ticketId: string): boolean => {
+    if (visiting.has(ticketId)) return true;
+    if (visited.has(ticketId)) return false;
+    visiting.add(ticketId);
+    for (const dependencyId of adjacency.get(ticketId) ?? []) {
+      if (visit(dependencyId)) return true;
+    }
+    visiting.delete(ticketId);
+    visited.add(ticketId);
+    return false;
+  };
+  for (const ticketId of adjacency.keys()) {
+    if (visit(ticketId)) throw new Error('Ticket dependency graph must remain acyclic');
+  }
 }
 
 export function createRunRepository(db: DbConnection): RunRepository {
@@ -292,7 +354,49 @@ export function createEventRepository(db: DbConnection): EventRepository {
     return (row.max_sequence ?? 0) + 1;
   };
 
+  const assertEventOwnership = (event: NewShipgraphEvent): void => {
+    let referencedTicketId: string | undefined;
+    const ticketId = 'ticketId' in event ? event.ticketId : undefined;
+    const runId = 'runId' in event ? event.runId : undefined;
+
+    if (ticketId !== undefined) {
+      const ticket = db
+        .prepare('SELECT project_id FROM tickets WHERE id = ?')
+        .get(ticketId) as { project_id: string } | undefined;
+      if (!ticket) throw new Error(`Event references missing ticket ${ticketId}`);
+      if (ticket.project_id !== event.projectId) {
+        throw new Error(
+          `Event ticket ${ticketId} does not belong to project ${event.projectId}`
+        );
+      }
+      referencedTicketId = ticketId;
+    }
+
+    if (runId !== undefined) {
+      const run = db
+        .prepare(
+          `SELECT runs.ticket_id, tickets.project_id
+           FROM runs
+           JOIN tickets ON tickets.id = runs.ticket_id
+           WHERE runs.id = ?`
+        )
+        .get(runId) as { ticket_id: string; project_id: string } | undefined;
+      if (!run) throw new Error(`Event references missing run ${runId}`);
+      if (run.project_id !== event.projectId) {
+        throw new Error(
+          `Event run ${runId} does not belong to project ${event.projectId}`
+        );
+      }
+      if (referencedTicketId !== undefined && run.ticket_id !== referencedTicketId) {
+        throw new Error(
+          `Event run ${runId} belongs to ticket ${run.ticket_id}, not ${referencedTicketId}`
+        );
+      }
+    }
+  };
+
   const appendEvent = db.transaction((event: NewShipgraphEvent): ShipgraphEvent => {
+    assertEventOwnership(event);
     const storedEvent = eventSchema.parse({
       ...event,
       sequence: nextSequence(event.projectId),
@@ -306,8 +410,8 @@ export function createEventRepository(db: DbConnection): EventRepository {
       storedEvent.sequence,
       storedEvent.timestamp,
       storedEvent.projectId,
-      storedEvent.ticketId ?? null,
-      storedEvent.runId ?? null,
+      'ticketId' in storedEvent ? storedEvent.ticketId : null,
+      'runId' in storedEvent ? storedEvent.runId : null,
       storedEvent.type,
       JSON.stringify(storedEvent.payload)
     );
@@ -393,14 +497,14 @@ function rowToRun(row: Record<string, unknown>): RunRecord {
 }
 
 function rowToEvent(row: Record<string, unknown>): ShipgraphEvent {
-  return {
+  return eventSchema.parse({
     id: String(row.id),
     sequence: Number(row.sequence),
     timestamp: String(row.timestamp),
     projectId: String(row.project_id),
-    ticketId: row.ticket_id ? String(row.ticket_id) : undefined,
-    runId: row.run_id ? String(row.run_id) : undefined,
-    type: String(row.type) as EventTypeValue,
+    ...(row.ticket_id ? { ticketId: String(row.ticket_id) } : {}),
+    ...(row.run_id ? { runId: String(row.run_id) } : {}),
+    type: String(row.type),
     payload: JSON.parse(String(row.payload_json)),
-  };
+  });
 }

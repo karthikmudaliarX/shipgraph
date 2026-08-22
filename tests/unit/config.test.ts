@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { validateConfig, parseConfig } from '../../src/config/loader.js';
+import { parseConfig } from '../../src/config/loader.js';
+import { validateConfig } from '../../src/config/schema.js';
 
 describe('config validation', () => {
   it('accepts a valid config', () => {
@@ -79,9 +80,9 @@ project:
   it('rejects unknown major version via validateConfig', () => {
     expect(() =>
       validateConfig({
-        version: 0,
+        version: 99,
         project: { name: 'bad', repository: 'owner/repo' },
       })
-    ).toThrow();
+    ).toThrow(/Unsupported shipgraph.yml major version: 99/);
   });
 });

@@ -49,9 +49,12 @@ are rejected. Self-transitions are also rejected.
 ## Policy-aware transitions
 
 Some transitions depend on policy. Any transition into `MERGING`, including
-`AWAITING_APPROVAL → MERGING`, requires either human approval or an explicit policy override. The state
-machine accepts a `TransitionContext` so callers can supply release policy
-without hard-coding it inside the machine.
+`AWAITING_APPROVAL → MERGING`, requires either granted human-approval evidence
+or an explicit policy override (`requireHumanApproval: false`). Policy states
+whether approval is required; `releaseEvidence.humanApprovalGranted` records
+whether it was granted for the attempted transition. `RELEASE_READY →
+AWAITING_APPROVAL` does not require evidence. Exact-SHA review evidence remains
+outside CORE-001.
 
 ## Persistence
 

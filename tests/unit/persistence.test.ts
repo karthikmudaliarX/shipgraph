@@ -71,7 +71,12 @@ describe('SQLite persistence', () => {
       timestamp: new Date().toISOString(),
       projectId,
       type: EventType.PROJECT_INITIALIZED,
-      payload: { projectId },
+      payload: {
+        projectId,
+        name: 'test',
+        repository: 'owner/repo',
+        defaultBranch: 'main',
+      },
     });
 
     expect(() =>
@@ -249,5 +254,173 @@ describe('SQLite persistence', () => {
     runRepo.create(run);
     const found = runRepo.findById(run.id);
     expect(found?.baseSha).toBe('abc123');
+  });
+
+  it('keeps a real two-project database isolated across tickets, dependencies, runs, events, and queries', () => {
+    const projectRepo = createProjectRepository(db);
+    const ticketRepo = createTicketRepository(db);
+    const dependencyRepo = createTicketDependencyRepository(db);
+    const runRepo = createRunRepository(db);
+    const eventRepo = createEventRepository(db);
+    const now = new Date().toISOString();
+
+    const firstProject: ProjectRecord = {
+      id: randomUUID(),
+      name: 'first',
+      repository: 'owner/first',
+      defaultBranch: 'main',
+      config: {
+        ...TEST_CONFIG,
+        project: { name: 'first', repository: 'owner/first', defaultBranch: 'main' },
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+    const secondProject: ProjectRecord = {
+      id: randomUUID(),
+      name: 'second',
+      repository: 'owner/second',
+      defaultBranch: 'trunk',
+      config: {
+        ...TEST_CONFIG,
+        project: { name: 'second', repository: 'owner/second', defaultBranch: 'trunk' },
+      },
+      createdAt: now,
+      updatedAt: now,
+    };
+    projectRepo.create(firstProject);
+    projectRepo.create(secondProject);
+
+    const ticket = (id: string, projectId: string): TicketRecord => ({
+      id,
+      projectId,
+      title: id,
+      description: `${id} ticket`,
+      priority: 'high',
+      risk: 'medium',
+      status: 'QUEUED',
+      scope: { allowedPaths: [], forbiddenPaths: [] },
+      acceptanceCriteria: [],
+      verification: { commands: [] },
+      agent: {},
+      release: {},
+      dependsOn: [],
+      createdAt: now,
+      updatedAt: now,
+    });
+    const firstTicket = ticket('FIRST-001', firstProject.id);
+    const firstDependency = ticket('FIRST-000', firstProject.id);
+    const firstDependencyTwo = ticket('FIRST-002', firstProject.id);
+    const secondTicket = ticket('SECOND-001', secondProject.id);
+    ticketRepo.create(firstTicket);
+    ticketRepo.create(firstDependency);
+    ticketRepo.create(firstDependencyTwo);
+    ticketRepo.create(secondTicket);
+
+    dependencyRepo.createMany([
+      { ticketId: firstTicket.id, dependsOnTicketId: firstDependency.id, createdAt: now },
+    ]);
+    expect(() =>
+      dependencyRepo.createMany([
+        { ticketId: firstTicket.id, dependsOnTicketId: secondTicket.id, createdAt: now },
+      ])
+    ).toThrow(/crosses project boundaries/);
+    expect(dependencyRepo.findByTicketId(firstTicket.id)).toHaveLength(1);
+    expect(() =>
+      dependencyRepo.createMany([
+        {
+          ticketId: firstDependency.id,
+          dependsOnTicketId: firstDependencyTwo.id,
+          createdAt: now,
+        },
+        { ticketId: firstTicket.id, dependsOnTicketId: secondTicket.id, createdAt: now },
+      ])
+    ).toThrow(/crosses project boundaries/);
+    expect(dependencyRepo.findByTicketId(firstDependency.id)).toHaveLength(0);
+    expect(() =>
+      dependencyRepo.createMany([
+        { ticketId: firstTicket.id, dependsOnTicketId: firstTicket.id, createdAt: now },
+      ])
+    ).toThrow(/cannot depend on itself/);
+    expect(() =>
+      dependencyRepo.createMany([
+        { ticketId: firstDependency.id, dependsOnTicketId: firstTicket.id, createdAt: now },
+      ])
+    ).toThrow(/must remain acyclic/);
+    expect(() =>
+      dependencyRepo.createMany([
+        { ticketId: firstDependency.id, dependsOnTicketId: firstDependencyTwo.id, createdAt: now },
+        { ticketId: firstDependencyTwo.id, dependsOnTicketId: firstDependency.id, createdAt: now },
+      ])
+    ).toThrow(/must remain acyclic/);
+    expect(dependencyRepo.findByTicketId(firstDependency.id)).toHaveLength(0);
+    expect(dependencyRepo.findByTicketId(firstDependencyTwo.id)).toHaveLength(0);
+
+    const firstRun: RunRecord = {
+      id: randomUUID(),
+      ticketId: firstTicket.id,
+      baseSha: 'first-sha',
+      branchName: 'agent/first',
+      status: 'running',
+      startedAt: now,
+    };
+    const secondRun: RunRecord = {
+      ...firstRun,
+      id: randomUUID(),
+      ticketId: secondTicket.id,
+      baseSha: 'second-sha',
+      branchName: 'agent/second',
+    };
+    runRepo.create(firstRun);
+    runRepo.create(secondRun);
+    expect(runRepo.findByTicketId(firstTicket.id).map((run) => run.id)).toEqual([
+      firstRun.id,
+    ]);
+
+    const appendInitialized = (project: ProjectRecord) =>
+      eventRepo.append({
+        id: randomUUID(),
+        timestamp: now,
+        projectId: project.id,
+        type: EventType.PROJECT_INITIALIZED,
+        payload: {
+          projectId: project.id,
+          name: project.name,
+          repository: project.repository,
+          defaultBranch: project.defaultBranch,
+        },
+      });
+    expect(appendInitialized(firstProject).sequence).toBe(1);
+    expect(appendInitialized(firstProject).sequence).toBe(2);
+    expect(appendInitialized(secondProject).sequence).toBe(1);
+
+    expect(() =>
+      eventRepo.append({
+        id: randomUUID(),
+        timestamp: now,
+        projectId: firstProject.id,
+        ticketId: firstTicket.id,
+        runId: secondRun.id,
+        type: EventType.RUN_CREATED,
+        payload: {
+          runId: secondRun.id,
+          ticketId: firstTicket.id,
+          baseSha: secondRun.baseSha,
+        },
+      })
+    ).toThrow(/run .* does not belong/);
+
+    expect(ticketRepo.findByProjectId(firstProject.id).map((item) => item.id).sort()).toEqual([
+      firstDependency.id,
+      firstDependencyTwo.id,
+      firstTicket.id,
+    ].sort());
+    expect(ticketRepo.findByProjectId(secondProject.id).map((item) => item.id)).toEqual([
+      secondTicket.id,
+    ]);
+    expect(ticketRepo.countByProjectId(firstProject.id)).toBe(3);
+    expect(ticketRepo.countByProjectId(secondProject.id)).toBe(1);
+    expect(eventRepo.countByProjectId(firstProject.id)).toBe(2);
+    expect(eventRepo.countByProjectId(secondProject.id)).toBe(1);
   });
 });

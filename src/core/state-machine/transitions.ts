@@ -6,6 +6,9 @@ export type TransitionContext = {
     requireCleanCI?: boolean;
     requireExactShaReviews?: boolean;
   };
+  releaseEvidence?: {
+    humanApprovalGranted?: boolean;
+  };
 };
 
 export type TransitionResult =
@@ -89,12 +92,16 @@ function evaluateTransition(
     };
   }
 
-  if (to === TicketState.MERGING && context?.releasePolicy?.requireHumanApproval !== false) {
+  if (
+    to === TicketState.MERGING &&
+    context?.releasePolicy?.requireHumanApproval !== false &&
+    context?.releaseEvidence?.humanApprovalGranted !== true
+  ) {
     return {
       ok: false,
       previous: from,
       next: to,
-      reason: 'MERGING requires human approval or explicit policy override',
+      reason: 'MERGING requires granted human approval evidence or an explicit policy override',
     };
   }
 
