@@ -40,47 +40,49 @@ export function syncApprovedBacklog(
   const createEventId = options.createEventId ?? randomUUID;
   const now = options.now ?? (() => new Date().toISOString());
   const sourcePath = options.sourcePath ?? 'shipgraph.backlog.yml';
-  const project = db
-    .prepare('SELECT id FROM projects WHERE id = ?')
-    .get(projectId) as { id: string } | undefined;
-  if (!project) throw new Error(`Project ${projectId} does not exist`);
-  const allExisting = ticketRepository.findByProjectId(projectId);
-  const approvedExisting = ticketRepository.findApprovedByProjectId(projectId);
-  const existingById = new Map(allExisting.map((ticket) => [ticket.id, ticket]));
   const backlogById = new Map(backlog.tickets.map((ticket) => [ticket.id, ticket]));
-
-  const removed = approvedExisting.filter((ticket) => !backlogById.has(ticket.id));
-  if (removed.length > 0) {
-    throw new Error(
-      `Approved backlog is missing persisted ticket(s): ${removed
-        .map((ticket) => ticket.id)
-        .sort(compareStableStrings)
-        .join(', ')}. Persisted work is never removed by YAML edits.`
-    );
-  }
-
-  const newDefinitions: TicketDefinition[] = [];
-  let unchanged = 0;
-  for (const definition of backlog.tickets) {
-    const persisted = existingById.get(definition.id);
-    if (!persisted) {
-      newDefinitions.push(definition);
-      continue;
-    }
-    if (!staticContractsMatch(persisted, definition)) {
-      throw new Error(
-        `Approved ticket ${definition.id} static contract drifted; amend through an authorized workflow`
-      );
-    }
-    unchanged += 1;
-  }
-
   const timestamp = now();
   const contentHash = createHash('sha256')
     .update(JSON.stringify(backlog))
     .digest('hex');
 
   const sync = db.transaction((): BacklogSyncReport => {
+    // Take the complete persisted snapshot after acquiring the write lock so
+    // concurrent suggestions/syncs cannot invalidate drift or removal checks.
+    const project = db
+      .prepare('SELECT id FROM projects WHERE id = ?')
+      .get(projectId) as { id: string } | undefined;
+    if (!project) throw new Error(`Project ${projectId} does not exist`);
+    const allExisting = ticketRepository.findByProjectId(projectId);
+    const approvedExisting = ticketRepository.findApprovedByProjectId(projectId);
+    const existingById = new Map(allExisting.map((ticket) => [ticket.id, ticket]));
+
+    const removed = approvedExisting.filter((ticket) => !backlogById.has(ticket.id));
+    if (removed.length > 0) {
+      throw new Error(
+        `Approved backlog is missing persisted ticket(s): ${removed
+          .map((ticket) => ticket.id)
+          .sort(compareStableStrings)
+          .join(', ')}. Persisted work is never removed by YAML edits.`
+      );
+    }
+
+    const newDefinitions: TicketDefinition[] = [];
+    let unchanged = 0;
+    for (const definition of backlog.tickets) {
+      const persisted = existingById.get(definition.id);
+      if (!persisted) {
+        newDefinitions.push(definition);
+        continue;
+      }
+      if (!staticContractsMatch(persisted, definition)) {
+        throw new Error(
+          `Approved ticket ${definition.id} static contract drifted; amend through an authorized workflow`
+        );
+      }
+      unchanged += 1;
+    }
+
     const created = ticketRepository.createMany(
       newDefinitions.map((definition) => ({
         ...definition,
