@@ -73,6 +73,19 @@ describe('CLI smoke tests', () => {
     ]);
   });
 
+  it('renders human-readable status output', () => {
+    initProject(projectDir);
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+
+    const report = showStatus(projectDir);
+
+    expect(report.error).toBeUndefined();
+    expect(consoleSpy).toHaveBeenCalledWith('Project: example (owner/repo)');
+    expect(consoleSpy).toHaveBeenCalledWith('Tickets: 0');
+    expect(consoleSpy).toHaveBeenCalledWith('Events: 1');
+    consoleSpy.mockRestore();
+  });
+
   it('initializes from an existing validated repository config', async () => {
     writeFileSync(
       join(projectDir, 'shipgraph.yml'),

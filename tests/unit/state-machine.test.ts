@@ -77,4 +77,33 @@ describe('state machine', () => {
       }
     }
   });
+
+  it('matches the complete expected transition graph', () => {
+    const expected = new Map([
+      [TicketState.QUEUED, [TicketState.ELIGIBLE, TicketState.BLOCKED, TicketState.CANCELLED]],
+      [TicketState.ELIGIBLE, [TicketState.PLANNING, TicketState.PAUSED, TicketState.CANCELLED]],
+      [TicketState.PLANNING, [TicketState.IMPLEMENTING, TicketState.PAUSED, TicketState.CANCELLED]],
+      [TicketState.IMPLEMENTING, [TicketState.VERIFYING, TicketState.PAUSED, TicketState.FAILED]],
+      [TicketState.VERIFYING, [TicketState.PR_OPEN, TicketState.REPAIRING, TicketState.FAILED]],
+      [TicketState.PR_OPEN, [TicketState.CI_WAIT, TicketState.NEEDS_HUMAN]],
+      [TicketState.CI_WAIT, [TicketState.REVIEWING, TicketState.REPAIRING, TicketState.FAILED]],
+      [TicketState.REVIEWING, [TicketState.CHANGES_REQUIRED, TicketState.RELEASE_READY, TicketState.NEEDS_HUMAN]],
+      [TicketState.CHANGES_REQUIRED, [TicketState.REPAIRING, TicketState.NEEDS_HUMAN]],
+      [TicketState.REPAIRING, [TicketState.VERIFYING, TicketState.FAILED]],
+      [TicketState.RELEASE_READY, [TicketState.AWAITING_APPROVAL, TicketState.MERGING, TicketState.NEEDS_HUMAN]],
+      [TicketState.AWAITING_APPROVAL, [TicketState.MERGING, TicketState.RELEASE_READY]],
+      [TicketState.MERGING, [TicketState.MERGED, TicketState.FAILED]],
+      [TicketState.MERGED, [TicketState.COMPLETE]],
+      [TicketState.COMPLETE, []],
+      [TicketState.BLOCKED, [TicketState.QUEUED, TicketState.CANCELLED]],
+      [TicketState.PAUSED, [TicketState.ELIGIBLE, TicketState.CANCELLED]],
+      [TicketState.FAILED, [TicketState.REPAIRING, TicketState.NEEDS_HUMAN]],
+      [TicketState.NEEDS_HUMAN, [TicketState.PAUSED, TicketState.CANCELLED]],
+      [TicketState.CANCELLED, []],
+    ]);
+
+    for (const state of Object.values(TicketState)) {
+      expect(legalNextStates(state)).toEqual(expected.get(state));
+    }
+  });
 });
