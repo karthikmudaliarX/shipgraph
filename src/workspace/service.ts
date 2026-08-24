@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { isAbsolute, join, relative } from 'node:path';
+import { isAbsolute, basename, dirname, join, relative } from 'node:path';
 import { existsSync, realpathSync } from 'node:fs';
 import {
   ensureOwnedDirectoryChain,
@@ -102,25 +102,48 @@ function defaults(options: WorkspaceServiceOptions): {
 }
 
 /**
+ * Canonicalize a worktree-root candidate WITHOUT creating anything: missing
+ * tail segments are appended to the deepest existing ancestor's real path.
+ * Callers can therefore validate containment before any directory is written.
+ */
+function canonicalizeRootPath(candidate: string): string {
+  const segments: string[] = [];
+  let existing = candidate;
+  for (;;) {
+    if (existsSync(existing)) break;
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    segments.unshift(basename(existing));
+    existing = parent;
+  }
+  return join(realpathSync(existing), ...segments);
+}
+
+/**
  * Resolve the ShipGraph-owned worktree root. The default lives outside any
  * repository at ~/.shipgraph/worktrees. Tests inject a temporary root.
+ *
+ * When `outsideOf` is provided, containment is enforced against the
+ * canonical path BEFORE any directory is created, so a failed attempt can
+ * never leave new directories inside the source repository — even when the
+ * candidate path travels through symlinks.
  */
-export function resolveWorktreeRoot(override?: string): string {
-  // The default root lives outside any repository and is built component-wise
-  // so no symlink anywhere in ~/.shipgraph is ever followed.
-  const root =
-    override ?? ensureOwnedDirectoryChain(homedir(), '.shipgraph', 'worktrees');
-  const existing = tryLstatSync(root);
+export function resolveWorktreeRoot(override?: string, outsideOf?: string): string {
+  const candidate = override ?? join(homedir(), '.shipgraph', 'worktrees');
+  const existing = tryLstatSync(candidate);
   if (existing?.isSymbolicLink()) {
-    throw new Error(`Refusing to use symbolic link for ShipGraph worktree root: ${root}`);
+    throw new Error(`Refusing to use symbolic link for ShipGraph worktree root: ${candidate}`);
   }
   if (existing && !existing.isDirectory()) {
-    throw new Error(`ShipGraph worktree root is not a directory: ${root}`);
+    throw new Error(`ShipGraph worktree root is not a directory: ${candidate}`);
   }
-  if (!existing) {
-    ensureOwnedDirectoryChain(root);
+  const canonicalCandidate =
+    existing !== undefined ? realpathSync(candidate) : canonicalizeRootPath(candidate);
+  if (outsideOf !== undefined) {
+    assertRootOutsideProject(canonicalCandidate, outsideOf);
   }
-  return realpathSync(root);
+  ensureOwnedDirectoryChain(canonicalCandidate);
+  return realpathSync(canonicalCandidate);
 }
 
 type ProjectContext = {
@@ -735,12 +758,8 @@ export async function createWorkspace(
     throw new Error(`Derived branch name failed git check-ref-format: ${branchName}`);
   }
   // Containment is enforced BEFORE the root is created so a failed attempt
-  // can never write inside the source repository.
-  assertRootOutsideProject(
-    options.worktreeRoot ?? join(homedir(), '.shipgraph', 'worktrees'),
-    context.canonicalProjectDir
-  );
-  const worktreeRoot = resolveWorktreeRoot(options.worktreeRoot);
+  // can never write inside the source repository — even through symlinks.
+  const worktreeRoot = resolveWorktreeRoot(options.worktreeRoot, context.canonicalProjectDir);
   assertRootOutsideProject(worktreeRoot, context.canonicalProjectDir);
   // Verify/create the project segment of the owned chain without ever
   // following symlinks (<root>/<project-id>).
@@ -876,6 +895,14 @@ export async function inspectWorkspace(
   if (!row) {
     throw new Error(`No ShipGraph workspace found for ticket ${ticketIdInput}`);
   }
+  // Read-only does not mean cross-repository: refuse to report on workspaces
+  // recorded against a different source repository than the invocation's.
+  if (row.sourceRepositoryPath !== context.canonicalProjectDir) {
+    throw new Error(
+      `Workspace ${row.id} belongs to source repository ${row.sourceRepositoryPath}, ` +
+        `not the current project directory`
+    );
+  }
 
   const stats = tryLstatSync(row.worktreePath);
   const exists = stats !== undefined && !stats.isSymbolicLink() && stats.isDirectory();
@@ -931,7 +958,19 @@ export function listWorkspacesForProject(
   options: WorkspaceServiceOptions
 ): readonly WorkspaceRecord[] {
   const context = resolveProjectContext(options);
-  return createWorkspaceRepository(options.db).listByProject(context.projectId);
+  // Fail closed when invoked from a checkout that does not match the
+  // recorded source repository: listing another repository's workspaces from
+  // here would only confuse operators.
+  const rows = createWorkspaceRepository(options.db).listByProject(context.projectId);
+  for (const row of rows) {
+    if (row.sourceRepositoryPath !== context.canonicalProjectDir) {
+      throw new Error(
+        `Workspace ${row.id} for ticket ${row.ticketId} belongs to source repository ` +
+          `${row.sourceRepositoryPath}, not the current project directory`
+      );
+    }
+  }
+  return rows;
 }
 
 /**
@@ -958,6 +997,13 @@ export async function removeWorkspace(
       `Workspace ${row.id} for ticket ${ticketIdInput} is ${row.status}; removal requires a READY workspace`
     );
   }
+  // Re-derive identity from the ticket id: a tampered row must not redirect
+  // destructive operations at an arbitrary branch.
+  if (deriveBranchName(row.ticketId) !== row.branchName) {
+    throw new Error(
+      `Recorded branch ${row.branchName} is not the deterministic branch of ticket ${row.ticketId}; refusing removal`
+    );
+  }
   if (row.sourceRepositoryPath !== context.canonicalProjectDir) {
     throw new Error(
       `Workspace ${row.id} belongs to source repository ${row.sourceRepositoryPath}, ` +
@@ -966,11 +1012,7 @@ export async function removeWorkspace(
   }
   // The recorded path must be exactly the deterministic location under the
   // current ShipGraph worktree root, with no symlink components anywhere.
-  assertRootOutsideProject(
-    options.worktreeRoot ?? join(homedir(), '.shipgraph', 'worktrees'),
-    context.canonicalProjectDir
-  );
-  const worktreeRoot = resolveWorktreeRoot(options.worktreeRoot);
+  const worktreeRoot = resolveWorktreeRoot(options.worktreeRoot, context.canonicalProjectDir);
   assertRootOutsideProject(worktreeRoot, context.canonicalProjectDir);
   const expectedPath = deriveWorktreePath(worktreeRoot, row.projectId, row.ticketId);
   if (row.worktreePath !== expectedPath) {

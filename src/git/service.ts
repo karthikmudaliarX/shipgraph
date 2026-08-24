@@ -28,42 +28,33 @@ export type GitRunner = (
 
 const GIT_TIMEOUT_MS = 30_000;
 
-/** Environment variables that could redirect git away from the cwd. */
+/**
+ * Environment variables that could redirect or observe git behavior and are
+ * therefore never inherited. GIT_* variables are stripped wholesale; this
+ * denylist additionally covers non-GIT-prefixed process-observation knobs.
+ */
 const GIT_ENV_OVERRIDES = [
-  'GIT_DIR',
-  'GIT_WORK_TREE',
-  'GIT_INDEX_FILE',
-  'GIT_OBJECT_DIRECTORY',
-  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-  'GIT_NAMESPACE',
-  'GIT_CEILING_DIRECTORIES',
-  'GIT_COMMON_DIR',
-  'GIT_CONFIG_PARAMETERS',
-  'GIT_CONFIG_COUNT',
-  'GIT_CONFIG_SYSTEM',
-  'GIT_CONFIG_GLOBAL',
+  'XDG_CONFIG_HOME',
+  'HOME',
 ] as const;
 
 function sanitizedEnv(): NodeJS.ProcessEnv {
+  // Strip EVERY inherited GIT_* variable: only the explicit cwd decides which
+  // repository is addressed, and no trace/config/worktree redirection may
+  // survive. Then pin deterministic behavior on top.
   const env: Record<string, string> = {
-    // Ignore refs/replace mappings: recorded SHAs must always denote the
-    // exact commit content they name.
     GIT_NO_REPLACE_OBJECTS: '1',
-    // Disable fsmonitor helpers: repository-configured monitors could hide
-    // modifications from status output.
     GIT_FSMONITOR_DAEMON: '',
-    // Pin system/global config to /dev/null: user or system configuration
-    // must never inject aliases, filters, or rewrites into deterministic
-    // management commands. Repository-local config remains authoritative
-    // for the repository being operated on (see WORKSPACES.md residuals).
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_SYSTEM: '/dev/null',
     GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_TERMINAL_PROMPT: '0',
   };
   for (const [key, value] of Object.entries(process.env)) {
     if (
       value !== undefined &&
-      !GIT_ENV_OVERRIDES.includes(key as (typeof GIT_ENV_OVERRIDES)[number])
+      !key.startsWith('GIT_') &&
+      !GIT_ENV_OVERRIDES.includes(key as never)
     ) {
       env[key] = value;
     }
