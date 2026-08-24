@@ -116,8 +116,8 @@ export function assertSafeBacklogPath(
  *
  * This binds the confinement check to the descriptor actually consumed,
  * closing a parent-directory swap between a pre-open realpath check and
- * openSync. On platforms without procfs the pre-open realpath and inode
- * identity checks remain the strongest available binding.
+ * openSync. Platforms without procfs fail closed: backlog consumption is
+ * refused rather than skipping this check.
  */
 export function assertOpenFileWithinProject(fd: number, canonicalProjectDir: string): void {
   let fdPath: string;
