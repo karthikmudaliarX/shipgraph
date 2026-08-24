@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   assertSafeTicketId,
   deriveBranchName,
   deriveWorktreePath,
+  ensureOwnedDirectoryChain,
 } from '../../src/workspace/model.js';
 import {
   eventSchema,
@@ -34,6 +38,22 @@ describe('WORK-001 workspace model', () => {
       deriveWorktreePath(root, 'not-a-uuid', 'TA-1')
     ).toThrow(/Invalid project id/);
     expect(() => deriveWorktreePath(root, '../outside', 'TA-1')).toThrow(/Invalid project id/);
+  });
+
+  it('rejects separator and traversal segments in owned directory chains', () => {
+    const base = mkdtempSync(join(tmpdir(), 'sg-chain-'));
+    try {
+      for (const hostile of ['../evil', 'a/b', '.', '..', '']) {
+        expect(() => ensureOwnedDirectoryChain(base, hostile)).toThrow(
+          /Invalid ShipGraph workspace path segment/
+        );
+      }
+      // Nothing was created for rejected segments.
+      expect(readdirSync(base)).toEqual([]);
+      expect(() => ensureOwnedDirectoryChain(base, 'ok-segment')).not.toThrow();
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it('runtime-validates workspace audit event payloads', () => {

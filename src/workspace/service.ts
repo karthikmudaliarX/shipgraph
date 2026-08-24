@@ -873,11 +873,10 @@ export async function createWorkspace(
   // can never write inside the source repository — even through symlinks.
   const worktreeRoot = resolveWorktreeRoot(options.worktreeRoot, context.canonicalProjectDir);
   assertRootOutsideProject(worktreeRoot, context.canonicalProjectDir);
-  // Verify/create the project segment of the owned chain without ever
-  // following symlinks (<root>/<project-id>).
-  ensureOwnedDirectoryChain(worktreeRoot, context.projectId);
+  // Validate the derived path (which asserts project/ticket id safety)
+  // BEFORE any directory is created.
   const worktreePath = deriveWorktreePath(worktreeRoot, context.projectId, ticketIdInput);
-
+  ensureOwnedDirectoryChain(worktreeRoot, context.projectId);
   // An existing active reservation always takes precedence: it enables
   // idempotent returns and restart-safe recovery before any new work.
   const repository = createWorkspaceRepository(options.db);

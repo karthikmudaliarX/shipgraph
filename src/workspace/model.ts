@@ -1,4 +1,4 @@
-import { join, relative } from 'node:path';
+import { basename, join, relative, sep } from 'node:path';
 import { lstatSync, mkdirSync } from 'node:fs';
 import type { WorkspaceStatus } from '../persistence/repositories.js';
 
@@ -72,10 +72,23 @@ export function deriveWorktreePath(root: string, projectId: string, ticketId: st
 
 /**
  * Create or verify a ShipGraph-owned directory chain without ever following
- * symlinks. Every component is checked with lstat: symlinks and non-directories
- * fail closed. Missing components are created with restrictive permissions.
+ * symlinks. Every segment is validated to be a bare name (no separators, no
+ * traversal) and every resulting component is checked with lstat: symlinks
+ * and non-directories fail closed. Missing components are created with
+ * restrictive permissions.
  */
 export function ensureOwnedDirectoryChain(base: string, ...segments: readonly string[]): string {
+  for (const segment of segments) {
+    if (
+      segment.length === 0 ||
+      segment !== basename(segment) ||
+      segment === '.' ||
+      segment === '..' ||
+      segment.includes(sep)
+    ) {
+      throw new Error(`Invalid ShipGraph workspace path segment: "${segment}"`);
+    }
+  }
   let current = base;
   for (const segment of segments) {
     current = join(current, segment);
