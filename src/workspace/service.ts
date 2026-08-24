@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
+import { isAbsolute, relative, sep } from 'node:path';
 import { realpathSync } from 'node:fs';
 import {
   ensureOwnedDirectoryChain,
@@ -127,6 +128,24 @@ type ProjectContext = {
   maxConcurrentTickets: number;
 };
 
+/**
+ * Ticket worktrees must live outside the source repository. Enforce mutual
+ * non-containment so neither a caller-supplied root inside the checkout nor
+ * the repository nested under a root is possible.
+ */
+function assertRootOutsideProject(worktreeRoot: string, canonicalProjectDir: string): void {
+  const rootFromProject = relative(canonicalProjectDir, worktreeRoot);
+  const projectFromRoot = relative(worktreeRoot, canonicalProjectDir);
+  const escapes = (candidate: string): boolean =>
+    candidate === '' || candidate === '..' || candidate.startsWith(`..${sep}`) || isAbsolute(candidate);
+  if (!escapes(rootFromProject) || !escapes(projectFromRoot)) {
+    throw new Error(
+      `ShipGraph worktree root ${worktreeRoot} must be outside the source repository ` +
+        `${canonicalProjectDir}`
+    );
+  }
+}
+
 /** Validate the common project/state boundary and the single-project invariant. */
 function resolveProjectContext(options: WorkspaceServiceOptions): ProjectContext {
   const canonicalProjectDir = realpathSync(options.projectDir);
@@ -211,8 +230,14 @@ function assertDispatchableAndClaimCapacityInTx(
     );
   }
   const ready = calculateReady(tickets, context.maxConcurrentTickets);
+  if (!ready.eligible.some((entry) => entry.ticket === ticketIdInput)) {
+    throw new Error(
+      `Ticket ${ticketIdInput} is not currently dependency-valid; workspace was not reserved`
+    );
+  }
   // Capacity includes workspaces already claimed by concurrent/reserved
-  // creations whose ticket transitions have not landed yet.
+  // creations whose ticket transitions have not landed yet. The reserved
+  // ticket itself is still ELIGIBLE and therefore not counted as active.
   const claimedRow = options.db
     .prepare(
       `SELECT COUNT(*) AS n
@@ -223,12 +248,12 @@ function assertDispatchableAndClaimCapacityInTx(
          AND t.status IN (${ACTIVE_CAPACITY_STATES.map(() => '?').join(', ')})`
     )
     .get(context.projectId, ...ACTIVE_CAPACITY_STATES) as { n: number };
-  const availableCapacity =
+  const effectiveAvailable =
     context.maxConcurrentTickets - ready.capacity.active - claimedRow.n;
-  const dispatchableIds = new Set(ready.dispatchable.map((entry) => entry.ticket));
-  if (!dispatchableIds.has(ticketIdInput) && availableCapacity <= 0) {
+  if (effectiveAvailable <= 0) {
     throw new Error(
-      `Dispatch capacity is full; no workspace was reserved for ${ticketIdInput}`
+      `Dispatch capacity is full (${ready.capacity.active} active + ${claimedRow.n} claimed / ` +
+        `${context.maxConcurrentTickets}); no workspace was reserved for ${ticketIdInput}`
     );
   }
 }
@@ -444,21 +469,24 @@ async function compensateCreation(
     return;
   }
   const provablyOurs = await creationBelongsToReservation(runner, row);
-  if (provablyOurs) {
-    await removeWorktree(runner, row.sourceRepositoryPath, row.worktreePath);
-    // The branch points exactly at baseSha (-d refuses anything unmerged),
-    // so deleting it loses no work.
-    await deleteBranch(runner, row.sourceRepositoryPath, row.branchName);
-    markWorkspaceStatus(options, row, 'FAILED', reason);
+  if (!provablyOurs) {
+    markWorkspaceStatus(
+      options,
+      row,
+      'NEEDS_HUMAN',
+      `${reason}; unproven workspace state was preserved for human inspection`,
+      { escalatedToHuman: true }
+    );
     return;
   }
-  markWorkspaceStatus(
-    options,
-    row,
-    'NEEDS_HUMAN',
-    `${reason}; unproven workspace state was preserved for human inspection`,
-    { escalatedToHuman: true }
-  );
+  // Re-prove ownership immediately before the destructive command to keep
+  // the window between proof and deletion as small as possible.
+  if (!(await creationBelongsToReservation(runner, row))) return;
+  await removeWorktree(runner, row.sourceRepositoryPath, row.worktreePath);
+  // The branch points exactly at baseSha (-d refuses anything unmerged),
+  // so deleting it loses no work.
+  await deleteBranch(runner, row.sourceRepositoryPath, row.branchName);
+  markWorkspaceStatus(options, row, 'FAILED', reason);
 }
 
 async function creationBelongsToReservation(
@@ -679,6 +707,7 @@ export async function createWorkspace(
     throw new Error(`Derived branch name failed git check-ref-format: ${branchName}`);
   }
   const worktreeRoot = resolveWorktreeRoot(options.worktreeRoot);
+  assertRootOutsideProject(worktreeRoot, context.canonicalProjectDir);
   // Verify/create the project segment of the owned chain without ever
   // following symlinks (<root>/<project-id>).
   ensureOwnedDirectoryChain(worktreeRoot, context.projectId);
@@ -897,6 +926,7 @@ export async function removeWorkspace(
   // The recorded path must be exactly the deterministic location under the
   // current ShipGraph worktree root, with no symlink components anywhere.
   const worktreeRoot = resolveWorktreeRoot(options.worktreeRoot);
+  assertRootOutsideProject(worktreeRoot, context.canonicalProjectDir);
   const expectedPath = deriveWorktreePath(worktreeRoot, row.projectId, row.ticketId);
   if (row.worktreePath !== expectedPath) {
     throw new Error(
@@ -929,6 +959,19 @@ export async function removeWorkspace(
   if (live.clean !== true) {
     throw new Error(
       `Workspace ${row.worktreePath} is dirty; dirty worktrees are never removed by WORK-001`
+    );
+  }
+
+  // Re-prove the invariants immediately before the destructive command so
+  // the window for a swap between proof and deletion stays minimal.
+  const finalLive = await inspectWorktreeState(runner, row.sourceRepositoryPath, row.worktreePath);
+  if (
+    !finalLive.registered ||
+    finalLive.branch !== `refs/heads/${row.branchName}` ||
+    finalLive.clean !== true
+  ) {
+    throw new Error(
+      `Workspace ${row.worktreePath} changed during removal validation; refusing to remove`
     );
   }
 

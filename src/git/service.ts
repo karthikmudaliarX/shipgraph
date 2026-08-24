@@ -6,6 +6,12 @@ import { execa } from 'execa';
  * Only deterministic repository/worktree management commands live here.
  * No agent logic, no remote synchronization (no fetch/pull/push), and no
  * destructive operations against the user's normal checkout.
+ *
+ * Commands are isolated from the surrounding process:
+ * - GIT_DIR/GIT_WORK_TREE and related environment overrides are stripped so
+ *   the explicit cwd always decides which repository is addressed.
+ * - Repository hooks are disabled: ShipGraph management commands must stay
+ *   deterministic and must never let a post-checkout hook mutate anything.
  */
 
 export type GitCommandResult = {
@@ -21,14 +27,40 @@ export type GitRunner = (
 
 const GIT_TIMEOUT_MS = 30_000;
 
+/** Environment variables that could redirect git away from the cwd. */
+const GIT_ENV_OVERRIDES = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_NAMESPACE',
+  'GIT_CEILING_DIRECTORIES',
+] as const;
+
+function sanitizedEnv(): NodeJS.ProcessEnv {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && !GIT_ENV_OVERRIDES.includes(key as (typeof GIT_ENV_OVERRIDES)[number])) {
+      env[key] = value;
+    }
+  }
+  return env;
+}
+
 export function createGitRunner(): GitRunner {
   return async (cwd, args) => {
-    const result = await execa('git', [...args], {
-      cwd,
-      reject: false,
-      cleanup: true,
-      timeout: GIT_TIMEOUT_MS,
-    });
+    const result = await execa(
+      'git',
+      ['-c', 'core.hooksPath=/dev/null', ...args],
+      {
+        cwd,
+        reject: false,
+        cleanup: true,
+        timeout: GIT_TIMEOUT_MS,
+        env: sanitizedEnv(),
+      }
+    );
     return {
       exitCode: result.exitCode ?? 1,
       stdout: result.stdout ?? '',
@@ -71,6 +103,7 @@ export async function resolveCommitSha(
     'rev-parse',
     '--verify',
     '--quiet',
+    '--end-of-options',
     `${ref}^{commit}`,
   ]);
   if (result.exitCode !== 0) return undefined;
