@@ -4,6 +4,7 @@ import {
   fstatSync,
   openSync,
   readFileSync,
+  realpathSync,
 } from 'node:fs';
 import YAML from 'yaml';
 import { z } from 'zod';
@@ -13,6 +14,7 @@ import {
 } from '../domain/ticket.js';
 import { validateDependencyGraph } from '../domain/dependency-graph.js';
 import { compareStableStrings } from '../utils/sorting.js';
+import { isWithinProject } from '../utils/paths.js';
 
 export const SUPPORTED_BACKLOG_MAJOR_VERSIONS = [1] as const;
 
@@ -79,9 +81,19 @@ export function parseBacklog(raw: string): ApprovedBacklog {
 }
 
 export function loadBacklog(
+  projectDir: string,
   path: string,
-  validatedIdentity?: { dev: number; ino: number }
+  validatedIdentity: { dev: number; ino: number }
 ): ApprovedBacklog {
+  // Re-verify confinement at consumption time: a validated inode that has
+  // been relocated outside the project (or reached through a swapped parent)
+  // must never be parsed.
+  const canonicalProjectDir = realpathSync(projectDir);
+  const resolvedPath = realpathSync(path);
+  if (!isWithinProject(canonicalProjectDir, resolvedPath)) {
+    throw new Error(`ShipGraph backlog escapes the project directory: ${path}`);
+  }
+
   const fileDescriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stats = fstatSync(fileDescriptor);
@@ -89,8 +101,8 @@ export function loadBacklog(
       throw new Error(`ShipGraph backlog must be a regular, unlinked file: ${path}`);
     }
     if (
-      validatedIdentity &&
-      (stats.dev !== validatedIdentity.dev || stats.ino !== validatedIdentity.ino)
+      Number(stats.dev) !== validatedIdentity.dev ||
+      Number(stats.ino) !== validatedIdentity.ino
     ) {
       throw new Error(`ShipGraph backlog changed between validation and read: ${path}`);
     }

@@ -78,14 +78,15 @@ export function assertSafeShipgraphPaths(projectDir: string): ReturnType<typeof 
  * shipgraph.backlog.yml or an explicit --file candidate). Only commands that
  * read or write a backlog file may call this.
  *
- * Returns the consumed path plus the on-disk identity captured at validation
- * time. Consumers must pass that identity to loadBacklog() so the descriptor
- * they read is provably the resource that was validated.
+ * The backlog must already exist as a regular, unlinked in-project file so a
+ * non-optional on-disk identity can be captured at validation time. Consumers
+ * must pass that identity (and re-verify confinement) when opening the file,
+ * so the descriptor they read is provably the resource that was validated.
  */
 export function assertSafeBacklogPath(
   projectDir: string,
   candidate?: string
-): { path: string; identity?: { dev: number; ino: number } } {
+): { path: string; identity: { dev: number; ino: number } } {
   const canonicalProjectDir = realpathSync(projectDir);
   const path = resolve(canonicalProjectDir, candidate ?? 'shipgraph.backlog.yml');
   assertWithinProject(canonicalProjectDir, path);
@@ -93,14 +94,14 @@ export function assertSafeBacklogPath(
     throw new Error(`Refusing to use symbolic link for ShipGraph path: ${path}`);
   }
   const stats = tryLstat(path);
-  let identity: { dev: number; ino: number } | undefined;
-  if (stats) {
-    assertWithinProject(canonicalProjectDir, realpathSync(path));
-    if (!stats.isFile() || stats.nlink !== 1) {
-      throw new Error(`ShipGraph backlog must be a regular, unlinked file: ${path}`);
-    }
-    identity = { dev: Number(stats.dev), ino: Number(stats.ino) };
+  if (!stats) {
+    throw new Error(`Approved backlog file not found: ${path}`);
   }
+  assertWithinProject(canonicalProjectDir, realpathSync(path));
+  if (!stats.isFile() || stats.nlink !== 1) {
+    throw new Error(`ShipGraph backlog must be a regular, unlinked file: ${path}`);
+  }
+  const identity = { dev: Number(stats.dev), ino: Number(stats.ino) };
   assertExistingPathConfinement(canonicalProjectDir, path);
   return { path, identity };
 }
@@ -117,10 +118,19 @@ export function assertSafeDatabaseFile(path: string): void {
 }
 
 function assertWithinProject(projectDir: string, candidate: string): void {
-  const pathFromProject = relative(projectDir, candidate);
-  if (pathFromProject === '..' || pathFromProject.startsWith(`..${sep}`) || isAbsolute(pathFromProject)) {
+  if (!isWithinProject(projectDir, candidate)) {
     throw new Error(`ShipGraph path escapes the project directory: ${candidate}`);
   }
+}
+
+/** True when candidate resolves lexically inside projectDir. */
+export function isWithinProject(projectDir: string, candidate: string): boolean {
+  const pathFromProject = relative(projectDir, candidate);
+  return !(
+    pathFromProject === '..' ||
+    pathFromProject.startsWith(`..${sep}`) ||
+    isAbsolute(pathFromProject)
+  );
 }
 
 function tryLstat(path: string): ReturnType<typeof lstatSync> | undefined {

@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -174,10 +176,36 @@ describe('CORE-002 path-safety boundary', () => {
 
     // The descriptor read must be the resource that was validated, not merely
     // a path that happens to pass validation.
-    expect(() => loadBacklog(approved.path, other.identity)).toThrow(
+    expect(() => loadBacklog(projectDir, approved.path, other.identity)).toThrow(
       /changed between validation and read/
     );
-    expect(() => loadBacklog(approved.path, approved.identity)).not.toThrow();
+    expect(() => loadBacklog(projectDir, approved.path, approved.identity)).not.toThrow();
+  });
+
+  it('refuses to consume a validated backlog that was relocated outside the project', () => {
+    mkdirSync(join(projectDir, 'controlled'));
+    writeFileSync(join(projectDir, 'controlled', 'approved.yml'), stringify(backlog));
+    const validated = assertSafeBacklogPath(projectDir, 'controlled/approved.yml');
+
+    // Simulate a parent swap: the same file (same dev/ino) now lives outside
+    // the project and is reached through an in-project symlinked directory.
+    const relocatedDir = join(externalDir, 'controlled');
+    renameSync(join(projectDir, 'controlled'), relocatedDir);
+    symlinkSync(relocatedDir, join(projectDir, 'controlled'));
+
+    expect(() =>
+      loadBacklog(projectDir, validated.path, validated.identity)
+    ).toThrow(/escapes the project directory/);
+    expect(() => validateBacklogProject(projectDir, 'controlled/approved.yml')).toThrow(
+      /escapes the project directory|symbolic link/
+    );
+  });
+
+  it('fails closed when the backlog candidate does not exist at validation time', () => {
+    initProject(projectDir, { config });
+    expect(() => validateBacklogProject(projectDir, 'missing.yml')).toThrow(/not found/);
+    expect(() => syncBacklogProject(projectDir, 'missing.yml')).toThrow(/not found/);
+    expect(showStatus(projectDir, { json: true }).project?.ticketCount ?? 0).toBe(0);
   });
 
   it('keeps database symlink protection intact for unrelated commands', () => {

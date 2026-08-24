@@ -24,7 +24,7 @@ export function validateBacklogProject(
   backlogFile?: string
 ): BacklogValidationReport {
   const validated = assertSafeBacklogPath(projectDir, backlogFile);
-  const backlog = loadBacklog(validated.path, validated.identity);
+  const backlog = loadBacklog(projectDir, validated.path, validated.identity);
   return {
     version: backlog.version,
     tickets: backlog.tickets.length,
@@ -39,11 +39,8 @@ export function syncBacklogProject(
   const paths = assertSafeShipgraphPaths(projectDir);
   const validated = assertSafeBacklogPath(projectDir, backlogFile);
   const backlogPath = validated.path;
-  if (!existsSync(backlogPath)) {
-    throw new Error(`Approved backlog file not found: ${backlogPath}`);
-  }
   // Validate before opening the database so malformed input cannot mutate state.
-  const backlog = loadBacklog(backlogPath, validated.identity);
+  const backlog = loadBacklog(projectDir, backlogPath, validated.identity);
   const config = loadConfig(projectDir);
   if (!existsSync(paths.dbPath)) {
     throw new Error('No initialized ShipGraph project found. Run `shipgraph init` first.');
