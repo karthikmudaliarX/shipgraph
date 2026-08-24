@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { isAbsolute, basename, dirname, join, relative } from 'node:path';
-import { existsSync, realpathSync } from 'node:fs';
+import { mkdirSync, existsSync, realpathSync } from 'node:fs';
 import {
   ensureOwnedDirectoryChain,
   deriveBranchName,
@@ -19,6 +19,8 @@ import {
   removeWorktree,
   inspectWorktreeState,
   isStrictlyClean,
+  hasGitlinkEntries,
+  findOtherWorktreesUsingBranch,
   resolveCommitSha,
   deleteBranchIfAt,
   type GitRunner,
@@ -141,6 +143,11 @@ export function resolveWorktreeRoot(override?: string, outsideOf?: string): stri
     existing !== undefined ? realpathSync(candidate) : canonicalizeRootPath(candidate);
   if (outsideOf !== undefined) {
     assertRootOutsideProject(canonicalCandidate, outsideOf);
+  }
+  if (!existsSync(canonicalCandidate)) {
+    // The canonical parent exists by construction; create the final segment
+    // with restrictive permissions.
+    mkdirSync(canonicalCandidate, { mode: 0o700 });
   }
   ensureOwnedDirectoryChain(canonicalCandidate);
   return realpathSync(canonicalCandidate);
@@ -336,15 +343,45 @@ function assertRepositoryProvenance(
       'SELECT DISTINCT source_repository_path FROM workspaces WHERE project_id = ?'
     )
     .all(projectId) as Array<{ source_repository_path: string }>;
-  if (
-    rows.length > 0 &&
-    !rows.some((row) => realpathSync(row.source_repository_path) === canonicalTopLevel)
-  ) {
-    const boundPaths = rows.map((row) => row.source_repository_path).join(', ');
+  if (rows.length === 0) return;
+  // Fail closed on ANY non-matching row: mixed-repository metadata must never
+  // allow workspace creation against either repository.
+  const mismatched = rows.filter(
+    (row) => realpathSync(row.source_repository_path) !== canonicalTopLevel
+  );
+  if (mismatched.length > 0) {
     throw new Error(
-      `ShipGraph project is bound to source repository ${boundPaths}; ` +
+      `ShipGraph project has workspace records bound to a different source repository ` +
+        `(${mismatched.map((row) => row.source_repository_path).join(', ')}); ` +
         `refusing to operate against ${canonicalTopLevel}`
     );
+  }
+}
+
+/**
+ * Independent immutable validation for destructive operations: the earliest
+ * append-only workspace.creating event records the base SHA at reservation
+ * time. A tampered or drifted row.base_sha can never pass as the deletion
+ * selector while its creation audit trail disagrees.
+ */
+function recordedCreationBaseSha(
+  options: WorkspaceServiceOptions,
+  projectId: string,
+  ticketId: string
+): string | undefined {
+  const row = options.db
+    .prepare(
+      `SELECT payload_json FROM events
+       WHERE project_id = ? AND ticket_id = ? AND type = 'workspace.creating'
+       ORDER BY sequence ASC LIMIT 1`
+    )
+    .get(projectId, ticketId) as { payload_json?: string } | undefined;
+  if (!row?.payload_json) return undefined;
+  try {
+    const payload = JSON.parse(row.payload_json) as { baseSha?: unknown };
+    return typeof payload.baseSha === 'string' ? payload.baseSha : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -520,8 +557,17 @@ async function compensateCreation(
   try {
     await removeWorktree(runner, row.sourceRepositoryPath, row.worktreePath);
     // Compare-and-delete on the ref itself: the deletion only lands while
-    // the branch still points exactly at the recorded base SHA.
-    await deleteBranchIfAt(runner, row.sourceRepositoryPath, row.branchName, row.baseSha);
+    // the branch still points exactly at the recorded base SHA, and only
+    // when no other worktree is using the branch.
+    const otherWorktrees = await findOtherWorktreesUsingBranch(
+      runner,
+      row.sourceRepositoryPath,
+      row.branchName,
+      row.worktreePath
+    );
+    if (otherWorktrees.length === 0) {
+      await deleteBranchIfAt(runner, row.sourceRepositoryPath, row.branchName, row.baseSha);
+    }
   } catch (cleanupError) {
     // The reservation is already FAILED; preserved leftovers are surfaced as
     // DRIFTED by `workspace inspect` for human resolution.
@@ -1070,11 +1116,31 @@ export async function removeWorkspace(
   }
   // Submodule contents live outside the superproject's cleanliness proof;
   // WORK-001 refuses to remove such worktrees rather than risk deleting
-  // nested user data.
+  // nested user data. Gitlinks are detected via the index (mode 160000), so
+  // a missing .gitmodules cannot bypass this.
+  if (await hasGitlinkEntries(runner, row.worktreePath)) {
+    throw new Error(
+      `Workspace ${row.worktreePath} contains submodule entries; ` +
+        `WORK-001 does not remove submodule worktrees`
+    );
+  }
   if (existsSync(join(row.worktreePath, '.gitmodules'))) {
     throw new Error(
       `Workspace ${row.worktreePath} contains submodules (.gitmodules present); ` +
         `WORK-001 does not remove submodule worktrees`
+    );
+  }
+  // The recorded base SHA is cross-checked against the append-only creation
+  // event: a tampered row must not turn the SHA into a destructive selector.
+  const originalBaseSha = recordedCreationBaseSha(
+    options,
+    context.projectId,
+    ticketIdInput
+  );
+  if (originalBaseSha !== undefined && originalBaseSha !== row.baseSha) {
+    throw new Error(
+      `Recorded base SHA ${row.baseSha} drifted from the immutable creation event ` +
+        `(${originalBaseSha}); refusing removal`
     );
   }
 
@@ -1086,13 +1152,23 @@ export async function removeWorkspace(
   // refuses to delete a checked-out branch's worktree binding implicitly via
   // the failed update above otherwise.
   let branchRetained = true;
-  const deleted = await deleteBranchIfAt(
+  // The branch must not be checked out in any OTHER registered worktree:
+  // deleting a shared ref would corrupt that checkout's branch state.
+  const otherWorktrees = await findOtherWorktreesUsingBranch(
     runner,
     row.sourceRepositoryPath,
     row.branchName,
-    row.baseSha
+    row.worktreePath
   );
-  if (deleted) branchRetained = false;
+  if (otherWorktrees.length === 0) {
+    const deleted = await deleteBranchIfAt(
+      runner,
+      row.sourceRepositoryPath,
+      row.branchName,
+      row.baseSha
+    );
+    if (deleted) branchRetained = false;
+  }
 
   const updated = markWorkspaceStatus(
     options,

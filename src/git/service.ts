@@ -128,7 +128,8 @@ export async function resolveCommitSha(
   ]);
   if (result.exitCode !== 0) return undefined;
   const sha = result.stdout.trim();
-  return /^[0-9a-f]{40}$/i.test(sha) ? sha : undefined;
+  // Accept SHA-1 (40) and SHA-256 (64) object names.
+  return /^[0-9a-f]{40}$|^[0-9a-f]{64}$/i.test(sha) ? sha : undefined;
 }
 
 /** Validate a branch name using Git's own reference rules. */
@@ -325,6 +326,7 @@ export async function inspectWorktreeState(
     'status',
     '--porcelain',
     '--untracked-files=all',
+    '--ignore-submodules=none',
   ]);
   const ambiguousFlags = await hasAmbiguousIndexFlags(runner, expectedPath);
   const symbolicRef = await runGit(runner, expectedPath, [
@@ -351,6 +353,39 @@ function realpathSyncSafe(path: string): string {
   } catch {
     return path;
   }
+}
+
+/**
+ * Detect gitlink (submodule, mode 160000) index entries: their nested
+ * contents are outside the superproject's cleanliness proof.
+ */
+export async function hasGitlinkEntries(
+  runner: GitRunner,
+  worktreePath: string
+): Promise<boolean> {
+  const result = await runGit(runner, worktreePath, ['ls-files', '-s']);
+  if (result.exitCode !== 0) return true; // fail closed
+  return result.stdout
+    .split('\n')
+    .some((line) => line.trimStart().startsWith('160000'));
+}
+
+/**
+ * List registered worktrees of the source repository that use the given
+ * branch, excluding the recorded path itself. A non-empty result means the
+ * branch is checked out somewhere else and must never be deleted.
+ */
+export async function findOtherWorktreesUsingBranch(
+  runner: GitRunner,
+  repoPath: string,
+  branchName: string,
+  excludePath: string
+): Promise<readonly string[]> {
+  const entries = await listWorktrees(runner, repoPath);
+  const expected = `refs/heads/${branchName}`;
+  return entries
+    .filter((entry) => entry.path !== excludePath && entry.branch === expected)
+    .map((entry) => entry.path);
 }
 
 /**
@@ -382,26 +417,35 @@ export async function isStrictlyClean(
 }
 
 /**
- * Detect tracked files marked assume-unchanged/skip-worktree: `git status`
- * reports them as clean even when modified, so a "clean" answer requires
- * that no such entries exist. Returns undefined when inspection fails.
+ * Detect tracked files that hide modifications from status
+ * (assume-unchanged / skip-worktree markers) AND gitlink entries
+ * (submodules, mode 160000). Both make a worktree unsafe to delete.
+ * Returns undefined when inspection fails.
  */
 async function hasAmbiguousIndexFlags(
   runner: GitRunner,
   worktreePath: string
 ): Promise<boolean | undefined> {
-  const result = await runGit(runner, worktreePath, ['ls-files', '-v']);
-  if (result.exitCode !== 0) return undefined;
-  // Lowercase letters mark assume-unchanged variants; uppercase S marks
-  // skip-worktree. All of them hide modifications from `git status`.
-  return result.stdout
+  const tagged = await runGit(runner, worktreePath, ['ls-files', '-v']);
+  if (tagged.exitCode !== 0) return undefined;
+  // Lowercase flag letters mark assume-unchanged variants and uppercase
+  // 'S' marks skip-worktree; all of them hide modifications from
+  // `git status`.
+  const hiddenModification = tagged.stdout
     .split('\n')
-    .some((line) => {
-      const flag = line[0];
-      return (
+    .some(
+      (line) =>
         line.length > 0 &&
-        flag >= 'a' &&
-        flag <= 'z'
-      ) || flag === 'S';
-    });
+        ((line[0] >= 'a' && line[0] <= 'z') || line[0] === 'S')
+    );
+
+  const staged = await runGit(runner, worktreePath, ['ls-files', '-s']);
+  if (staged.exitCode !== 0) return undefined;
+  // Gitlink entries (submodules) have index mode 160000; their nested
+  // contents are outside every superproject cleanliness proof.
+  const hasSubmodule = staged.stdout
+    .split('\n')
+    .some((line) => line.startsWith('160000 '));
+
+  return hiddenModification || hasSubmodule;
 }

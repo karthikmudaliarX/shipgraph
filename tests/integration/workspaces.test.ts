@@ -657,7 +657,7 @@ describe('WORK-001 isolated worktree lifecycle', () => {
     try {
       await expect(
         createWorkspace({ ...harness.options, projectDir: wrongDir }, 'TA-1')
-      ).rejects.toThrow(/is bound to source repository/);
+      ).rejects.toThrow(/bound to a different source repository|is bound to source repository/);
 
       // The real project is untouched by the failed attempt.
       expect(listWorkspacesForProject(harness.options)).toHaveLength(1);
