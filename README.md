@@ -149,6 +149,7 @@ Planned successor tickets (not yet implemented):
 
 - **WORK-001** — Isolated git worktree lifecycle
 - **AGENT-001** — OpenCode execution adapter
+- **MODEL-001** — Dynamic model routing and compute-aware execution policy
 - **GH-001** — GitHub PR and CI integration
 - **REV-001** — Independent correctness and adversarial review
 - **REPAIR-001** — Automated review/CI repair loop

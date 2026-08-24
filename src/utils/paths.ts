@@ -22,12 +22,20 @@ export function getShipgraphPaths(projectDir: string) {
   };
 }
 
-/** Reject repository-controlled symlinks before reading or writing state. */
+/**
+ * Validate only resources on the common ShipGraph project/state boundary:
+ * configuration, state directory, database, and its sidecars.
+ *
+ * Backlog files are NOT validated here. Backlog safety belongs exclusively
+ * to assertSafeBacklogPath(), invoked by commands that actually consume a
+ * backlog file. An unused shipgraph.backlog.yml must never block unrelated
+ * commands such as `status`, `ready`, or `init`.
+ */
 export function assertSafeShipgraphPaths(projectDir: string): ReturnType<typeof getShipgraphPaths> {
   const canonicalProjectDir = realpathSync(projectDir);
   const paths = getShipgraphPaths(canonicalProjectDir);
 
-  for (const path of [paths.configPath, paths.backlogPath, paths.stateDir, paths.dbPath]) {
+  for (const path of [paths.configPath, paths.stateDir, paths.dbPath]) {
     assertWithinProject(canonicalProjectDir, path);
     if (tryLstat(path)?.isSymbolicLink()) {
       throw new Error(`Refusing to use symbolic link for ShipGraph path: ${path}`);
@@ -65,7 +73,11 @@ export function assertSafeShipgraphPaths(projectDir: string): ReturnType<typeof 
   return paths;
 }
 
-/** Resolve an optional backlog path while keeping it inside the repository. */
+/**
+ * Validate the exact backlog resource a command consumes (default
+ * shipgraph.backlog.yml or an explicit --file candidate). Only commands that
+ * read or write a backlog file may call this.
+ */
 export function assertSafeBacklogPath(
   projectDir: string,
   candidate?: string
