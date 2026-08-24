@@ -77,11 +77,15 @@ export function assertSafeShipgraphPaths(projectDir: string): ReturnType<typeof 
  * Validate the exact backlog resource a command consumes (default
  * shipgraph.backlog.yml or an explicit --file candidate). Only commands that
  * read or write a backlog file may call this.
+ *
+ * Returns the consumed path plus the on-disk identity captured at validation
+ * time. Consumers must pass that identity to loadBacklog() so the descriptor
+ * they read is provably the resource that was validated.
  */
 export function assertSafeBacklogPath(
   projectDir: string,
   candidate?: string
-): string {
+): { path: string; identity?: { dev: number; ino: number } } {
   const canonicalProjectDir = realpathSync(projectDir);
   const path = resolve(canonicalProjectDir, candidate ?? 'shipgraph.backlog.yml');
   assertWithinProject(canonicalProjectDir, path);
@@ -89,14 +93,16 @@ export function assertSafeBacklogPath(
     throw new Error(`Refusing to use symbolic link for ShipGraph path: ${path}`);
   }
   const stats = tryLstat(path);
+  let identity: { dev: number; ino: number } | undefined;
   if (stats) {
     assertWithinProject(canonicalProjectDir, realpathSync(path));
     if (!stats.isFile() || stats.nlink !== 1) {
       throw new Error(`ShipGraph backlog must be a regular, unlinked file: ${path}`);
     }
+    identity = { dev: Number(stats.dev), ino: Number(stats.ino) };
   }
   assertExistingPathConfinement(canonicalProjectDir, path);
-  return path;
+  return { path, identity };
 }
 
 /** Reject writable database paths that can alias another inode or user. */

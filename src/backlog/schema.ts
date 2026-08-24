@@ -78,12 +78,21 @@ export function parseBacklog(raw: string): ApprovedBacklog {
   return validateBacklog(YAML.parse(raw));
 }
 
-export function loadBacklog(path: string): ApprovedBacklog {
+export function loadBacklog(
+  path: string,
+  validatedIdentity?: { dev: number; ino: number }
+): ApprovedBacklog {
   const fileDescriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stats = fstatSync(fileDescriptor);
     if (!stats.isFile() || stats.nlink !== 1) {
       throw new Error(`ShipGraph backlog must be a regular, unlinked file: ${path}`);
+    }
+    if (
+      validatedIdentity &&
+      (stats.dev !== validatedIdentity.dev || stats.ino !== validatedIdentity.ino)
+    ) {
+      throw new Error(`ShipGraph backlog changed between validation and read: ${path}`);
     }
     return parseBacklog(readFileSync(fileDescriptor, 'utf8'));
   } finally {

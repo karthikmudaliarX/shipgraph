@@ -14,6 +14,8 @@ import { initProject } from '../../src/cli/init.js';
 import { validateBacklogProject, syncBacklogProject } from '../../src/cli/backlog.js';
 import { showReady } from '../../src/cli/ready.js';
 import { showStatus } from '../../src/cli/status.js';
+import { loadBacklog } from '../../src/backlog/schema.js';
+import { assertSafeBacklogPath } from '../../src/utils/paths.js';
 import type { ShipgraphConfig } from '../../src/config/schema.js';
 
 const config: ShipgraphConfig = {
@@ -161,6 +163,21 @@ describe('CORE-002 path-safety boundary', () => {
     // Fail-closed means fail-closed: nothing was synced into SQLite.
     expect(showStatus(projectDir, { json: true }).project?.ticketCount ?? 0).toBe(0);
     expect(readFileSync(externalBacklogPath, 'utf8')).toBe(stringify(backlog));
+  });
+
+  it('binds backlog consumption to the exact validated inode', () => {
+    writeFileSync(join(projectDir, 'approved.yml'), stringify(backlog));
+    writeFileSync(join(projectDir, 'other.yml'), stringify(backlog));
+    const approved = assertSafeBacklogPath(projectDir, 'approved.yml');
+    const other = assertSafeBacklogPath(projectDir, 'other.yml');
+    expect(approved.identity).toBeDefined();
+
+    // The descriptor read must be the resource that was validated, not merely
+    // a path that happens to pass validation.
+    expect(() => loadBacklog(approved.path, other.identity)).toThrow(
+      /changed between validation and read/
+    );
+    expect(() => loadBacklog(approved.path, approved.identity)).not.toThrow();
   });
 
   it('keeps database symlink protection intact for unrelated commands', () => {
