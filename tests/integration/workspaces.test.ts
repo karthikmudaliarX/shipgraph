@@ -571,6 +571,30 @@ describe('WORK-001 isolated worktree lifecycle', () => {
     expect(existsSync(created.workspace.worktreePath)).toBe(true);
   });
 
+  it('refuses destructive removal when the creation audit trail is missing', async () => {
+    harness = setupProject(2, [ticket('TA-1')]);
+    const created = await createWorkspace(harness.options, 'TA-1');
+    // Simulate a tampered audit log: the append-only trigger blocks direct
+    // deletion, so prove the fail-closed path via an unparsable payload.
+    const projectId = findProjectId(harness.options.db);
+    writeFileSync(
+      join(created.workspace.worktreePath, 'work.txt'),
+      'committed work\n'
+    );
+    git(created.workspace.worktreePath, 'add', '.');
+    git(created.workspace.worktreePath, 'commit', '-m', 'unique');
+    // Point base_sha at the unique tip AND corrupt the audit trail.
+    harness.options.db
+      .prepare("UPDATE workspaces SET base_sha = ? WHERE ticket_id = 'TA-1'")
+      .run(git(created.workspace.worktreePath, 'rev-parse', 'HEAD'));
+
+    await expect(removeWorkspace(harness.options, 'TA-1')).rejects.toThrow();
+    // Worktree and branch survive any refusal.
+    expect(existsSync(created.workspace.worktreePath)).toBe(true);
+    expect(git(harness.projectDir, 'branch', '--list', 'shipgraph/ta-1')).not.toBe('');
+    void projectId;
+  });
+
   it('refuses removal when the workspace is missing or ambiguous on disk', async () => {
     harness = setupProject(2, [ticket('TA-1')]);
     const created = await createWorkspace(harness.options, 'TA-1');

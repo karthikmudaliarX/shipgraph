@@ -145,9 +145,9 @@ export function resolveWorktreeRoot(override?: string, outsideOf?: string): stri
     assertRootOutsideProject(canonicalCandidate, outsideOf);
   }
   if (!existsSync(canonicalCandidate)) {
-    // The canonical parent exists by construction; create the final segment
-    // with restrictive permissions.
-    mkdirSync(canonicalCandidate, { mode: 0o700 });
+    // Containment was already validated against the canonical path; create
+    // the remaining segments recursively.
+    mkdirSync(canonicalCandidate, { recursive: true, mode: 0o700 });
   }
   ensureOwnedDirectoryChain(canonicalCandidate);
   return realpathSync(canonicalCandidate);
@@ -359,30 +359,58 @@ function assertRepositoryProvenance(
 }
 
 /**
- * Independent immutable validation for destructive operations: the earliest
- * append-only workspace.creating event records the base SHA at reservation
- * time. A tampered or drifted row.base_sha can never pass as the deletion
- * selector while its creation audit trail disagrees.
+ * Independent immutable validation for destructive operations: the
+ * append-only workspace.creating event for THIS workspace records the base
+ * SHA at reservation time. A tampered or drifted row.base_sha can never pass
+ * as the deletion selector while its creation audit trail disagrees — and a
+ * missing/malformed audit trail fails closed rather than open.
  */
 function recordedCreationBaseSha(
   options: WorkspaceServiceOptions,
   projectId: string,
+  workspaceId: string,
   ticketId: string
-): string | undefined {
-  const row = options.db
+): { baseSha?: string; error?: string } {
+  const rows = options.db
     .prepare(
       `SELECT payload_json FROM events
        WHERE project_id = ? AND ticket_id = ? AND type = 'workspace.creating'
-       ORDER BY sequence ASC LIMIT 1`
+       ORDER BY sequence ASC`
     )
-    .get(projectId, ticketId) as { payload_json?: string } | undefined;
-  if (!row?.payload_json) return undefined;
-  try {
-    const payload = JSON.parse(row.payload_json) as { baseSha?: unknown };
-    return typeof payload.baseSha === 'string' ? payload.baseSha : undefined;
-  } catch {
-    return undefined;
+    .all(projectId, ticketId) as Array<{ payload_json?: string }>;
+  if (rows.length === 0) {
+    return {
+      error:
+        'No append-only workspace.creating audit event exists for this ticket; ' +
+        'refusing destructive operations without immutable provenance',
+    };
   }
+  let matched: string | undefined;
+  for (const row of rows) {
+    try {
+      const payload = JSON.parse(row.payload_json ?? '') as {
+        workspaceId?: unknown;
+        baseSha?: unknown;
+      };
+      if (payload.workspaceId !== workspaceId) continue;
+      if (typeof payload.baseSha !== 'string' || payload.baseSha.length === 0) {
+        return { error: 'creation audit event is malformed (baseSha missing)' };
+      }
+      if (matched !== undefined && matched !== payload.baseSha) {
+        return { error: 'conflicting creation audit events for this workspace' };
+      }
+      matched = payload.baseSha;
+    } catch {
+      return { error: 'creation audit event is malformed (unparsable payload)' };
+    }
+  }
+  if (matched === undefined) {
+    return {
+      error: 'No workspace.creating audit event references this workspace id; ' +
+        'refusing destructive operations without immutable provenance',
+    };
+  }
+  return { baseSha: matched };
 }
 
 function workspacePayload(row: WorkspaceRecord) {
@@ -949,6 +977,24 @@ export async function inspectWorkspace(
         `not the current project directory`
     );
   }
+  // Deterministic identity must reproduce the recorded path/branch, so a
+  // tampered row cannot redirect inspection at an arbitrary worktree.
+  if (deriveBranchName(row.ticketId) !== row.branchName) {
+    throw new Error(
+      `Recorded branch ${row.branchName} is not the deterministic branch of ticket ${row.ticketId}`
+    );
+  }
+  const expectedInspectPath = deriveWorktreePath(
+    resolveWorktreeRoot(options.worktreeRoot, context.canonicalProjectDir),
+    context.projectId,
+    row.ticketId
+  );
+  if (expectedInspectPath !== row.worktreePath) {
+    throw new Error(
+      `Recorded worktree path ${row.worktreePath} is not the deterministic location for ` +
+        `ticket ${row.ticketId}; refusing inspection`
+    );
+  }
 
   const stats = tryLstatSync(row.worktreePath);
   const exists = stats !== undefined && !stats.isSymbolicLink() && stats.isDirectory();
@@ -1131,16 +1177,15 @@ export async function removeWorkspace(
     );
   }
   // The recorded base SHA is cross-checked against the append-only creation
-  // event: a tampered row must not turn the SHA into a destructive selector.
-  const originalBaseSha = recordedCreationBaseSha(
-    options,
-    context.projectId,
-    ticketIdInput
-  );
-  if (originalBaseSha !== undefined && originalBaseSha !== row.baseSha) {
+  // event: a tampered or missing audit trail refuses destructive operations.
+  const audit = recordedCreationBaseSha(options, context.projectId, row.id, ticketIdInput);
+  if (audit.error !== undefined) {
+    throw new Error(`${audit.error}; refusing removal`);
+  }
+  if (audit.baseSha !== row.baseSha) {
     throw new Error(
       `Recorded base SHA ${row.baseSha} drifted from the immutable creation event ` +
-        `(${originalBaseSha}); refusing removal`
+        `(${audit.baseSha}); refusing removal`
     );
   }
 
