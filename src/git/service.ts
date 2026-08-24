@@ -414,7 +414,12 @@ export async function isStrictlyClean(
   if (status.exitCode !== 0) return false;
   const ambiguousFlags = await hasAmbiguousIndexFlags(runner, worktreePath);
   if (ambiguousFlags === undefined) return false;
-  return status.stdout.trim() === '' && !ambiguousFlags;
+  if (status.stdout.trim() !== '' || ambiguousFlags) return false;
+  // Git does not report empty untracked directories via status; a clean -n
+  // dry run catches them (and anything else removal would destroy).
+  const cleanDryRun = await runGit(runner, worktreePath, ['clean', '-ndx']);
+  if (cleanDryRun.exitCode !== 0) return false;
+  return cleanDryRun.stdout.trim() === '';
 }
 
 /**

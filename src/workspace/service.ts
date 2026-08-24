@@ -122,21 +122,23 @@ function canonicalizeRootPath(candidate: string): string {
 }
 
 /**
- * Fail closed when any ancestor of the path (up to the filesystem root) is
- * a symlink: ShipGraph-owned locations must be real directories, so a
- * symlinked ~/.shipgraph or similar cannot silently redirect writes.
+ * Fail closed when any ancestor of the path (up to the filesystem root,
+ * inclusive of every component between path and '/') is a symlink:
+ * ShipGraph-owned locations must be real directories, so a symlinked
+ * ~/.shipgraph or similar cannot silently redirect writes.
  */
 function assertNoSymlinkAncestors(path: string): void {
   let current = dirname(path);
-  const stop = dirname(current);
-  while (current !== stop) {
+  for (;;) {
     const stats = tryLstatSync(current);
     if (stats?.isSymbolicLink()) {
       throw new Error(
         `Refusing to use symbolic link for ShipGraph workspace ancestor: ${current}`
       );
     }
-    current = dirname(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
   }
 }
 
@@ -149,7 +151,11 @@ function assertNoSymlinkAncestors(path: string): void {
  * never leave new directories inside the source repository — even when the
  * candidate path travels through symlinks. Ancestor symlinks fail closed.
  */
-export function resolveWorktreeRoot(override?: string, outsideOf?: string): string {
+export function resolveWorktreeRoot(
+  override?: string,
+  outsideOf?: string,
+  createMissing = true
+): string {
   const candidate = override ?? join(homedir(), '.shipgraph', 'worktrees');
   assertNoSymlinkAncestors(candidate);
   const existing = tryLstatSync(candidate);
@@ -165,6 +171,11 @@ export function resolveWorktreeRoot(override?: string, outsideOf?: string): stri
     assertRootOutsideProject(canonicalCandidate, outsideOf);
   }
   if (!existsSync(canonicalCandidate)) {
+    if (!createMissing) {
+      throw new Error(
+        `ShipGraph worktree root does not exist: ${canonicalCandidate}`
+      );
+    }
     // Containment was already validated against the canonical path; create
     // the remaining segments recursively.
     mkdirSync(canonicalCandidate, { recursive: true, mode: 0o700 });
@@ -1012,7 +1023,7 @@ export async function inspectWorkspace(
     );
   }
   const expectedInspectPath = deriveWorktreePath(
-    resolveWorktreeRoot(options.worktreeRoot, context.canonicalProjectDir),
+    resolveWorktreeRoot(options.worktreeRoot, context.canonicalProjectDir, false),
     context.projectId,
     row.ticketId
   );

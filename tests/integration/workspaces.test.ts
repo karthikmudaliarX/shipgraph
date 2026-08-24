@@ -595,6 +595,41 @@ describe('WORK-001 isolated worktree lifecycle', () => {
     void projectId;
   });
 
+  it('refuses removal when the worktree contains user-created empty directories', async () => {
+    harness = setupProject(2, [ticket('TA-1')]);
+    const created = await createWorkspace(harness.options, 'TA-1');
+    // Git does not report empty directories via status at all.
+    mkdirSync(join(created.workspace.worktreePath, 'user-notes'), { recursive: true });
+
+    await expect(removeWorkspace(harness.options, 'TA-1')).rejects.toThrow(
+      /untracked or ignored/
+    );
+    expect(existsSync(join(created.workspace.worktreePath, 'user-notes'))).toBe(true);
+  });
+
+  it('fails closed when a root ancestor is a symlink into another repository', async () => {
+    harness = setupProject(2, [ticket('TA-1')]);
+    // ~/.shipgraph-style alias: an ancestor of the injected root is a
+    // symlink pointing at another Git checkout.
+    const foreignRepo = mkdtempSync(join(tmpdir(), 'sg-work-alias-target-'));
+    git(foreignRepo, 'init', '-b', 'main');
+    try {
+      const aliasDir = mkdtempSync(join(tmpdir(), 'sg-work-alias-'));
+      const alias = join(aliasDir, 'alias');
+      symlinkSync(foreignRepo, alias);
+      const hostileRoot = join(alias, 'worktrees');
+
+      await expect(
+        createWorkspace({ ...harness.options, worktreeRoot: hostileRoot }, 'TA-1')
+      ).rejects.toThrow(/symbolic link/);
+      // Nothing was written inside the foreign repository.
+      expect(existsSync(join(foreignRepo, 'worktrees'))).toBe(false);
+      rmSync(aliasDir, { recursive: true, force: true });
+    } finally {
+      rmSync(foreignRepo, { recursive: true, force: true });
+    }
+  });
+
   it('refuses removal when the workspace is missing or ambiguous on disk', async () => {
     harness = setupProject(2, [ticket('TA-1')]);
     const created = await createWorkspace(harness.options, 'TA-1');
