@@ -143,9 +143,15 @@ them narrow and documented instead of pretending they are atomic:
   directory afterwards. Later drift is reported by `workspace inspect` as
   `DRIFTED`; nothing auto-repairs.
 - **Provenance is path-based.** Repository binding compares canonical local
-  paths, and workspace uniqueness holds per SQLite database. Replacing a
-  repository at the same path, or using separate databases against one
-  repository, is outside what WORK-001 can distinguish.
+  paths, and workspace uniqueness holds per SQLite database. Once a project
+  has recorded workspace history, copied metadata in another checkout is
+  refused; a pristine metadata set that has never been used establishes its
+  binding on first use.
+- **Repository-local Git config is trusted for that repository.** System and
+  global configuration are pinned to /dev/null (no aliases, no global
+  filters), but repository-local config — including smudge/clean filters and
+  aliases defined in `.git/config` — executes with user privileges as it
+  would for any git operation in that repository.
 - **Checkout filters run with user privileges.** `git worktree add` performs a
   normal checkout: repository-defined smudge/clean filters (e.g. Git LFS)
   execute as they would for any git operation in that repository. ShipGraph
@@ -154,6 +160,9 @@ them narrow and documented instead of pretending they are atomic:
 - **Removal leaves the ticket PLANNING.** Removing a workspace does not roll
   back the ticket state machine; capacity stays consumed until an operator or
   a later ticket explicitly resolves the state.
+- **Submodule worktrees are refused.** Removal requires no `.gitmodules` in
+  the workspace: nested submodule contents are outside the superproject's
+  cleanliness proof, so WORK-001 declines rather than risk deleting them.
 
 ## CLI
 

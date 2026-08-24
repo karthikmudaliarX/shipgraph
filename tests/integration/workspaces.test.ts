@@ -555,6 +555,22 @@ describe('WORK-001 isolated worktree lifecycle', () => {
     expect(readFileSync(join(wsPath, 'hidden.txt'), 'utf8')).toBe('secret local edit\n');
   });
 
+  it('refuses removal of submodule-containing worktrees', async () => {
+    harness = setupProject(2, [ticket('TA-1')]);
+    const created = await createWorkspace(harness.options, 'TA-1');
+    writeFileSync(
+      join(created.workspace.worktreePath, '.gitmodules'),
+      '[submodule "x"]\n\tpath = x\n\turl = ../x.git\n'
+    );
+    git(created.workspace.worktreePath, 'add', '.gitmodules');
+    git(created.workspace.worktreePath, 'commit', '-m', 'add submodule');
+
+    await expect(removeWorkspace(harness.options, 'TA-1')).rejects.toThrow(
+      /submodule/
+    );
+    expect(existsSync(created.workspace.worktreePath)).toBe(true);
+  });
+
   it('refuses removal when the workspace is missing or ambiguous on disk', async () => {
     harness = setupProject(2, [ticket('TA-1')]);
     const created = await createWorkspace(harness.options, 'TA-1');

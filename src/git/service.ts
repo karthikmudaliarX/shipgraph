@@ -52,9 +52,19 @@ function sanitizedEnv(): NodeJS.ProcessEnv {
     // Disable fsmonitor helpers: repository-configured monitors could hide
     // modifications from status output.
     GIT_FSMONITOR_DAEMON: '',
+    // Pin system/global config to /dev/null: user or system configuration
+    // must never inject aliases, filters, or rewrites into deterministic
+    // management commands. Repository-local config remains authoritative
+    // for the repository being operated on (see WORKSPACES.md residuals).
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_SYSTEM: '/dev/null',
+    GIT_CONFIG_GLOBAL: '/dev/null',
   };
   for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && !GIT_ENV_OVERRIDES.includes(key as (typeof GIT_ENV_OVERRIDES)[number])) {
+    if (
+      value !== undefined &&
+      !GIT_ENV_OVERRIDES.includes(key as (typeof GIT_ENV_OVERRIDES)[number])
+    ) {
       env[key] = value;
     }
   }
@@ -241,8 +251,10 @@ export async function deleteBranch(
 
 /**
  * Atomically delete a branch ONLY while it still points at the expected SHA
- * (`git update-ref -d <ref> <old-oid>` is a kernel-side compare-and-delete).
- * If the ref moved, the deletion fails and the branch is retained.
+ * (`git update-ref -d --no-deref <ref> <old-oid>` is a kernel-side
+ * compare-and-delete). --no-deref guarantees a symbolic ref can never pull
+ * another branch into the deletion. If the ref moved, the deletion fails and
+ * the branch is retained.
  */
 export async function deleteBranchIfAt(
   runner: GitRunner,
@@ -253,6 +265,7 @@ export async function deleteBranchIfAt(
   const result = await runGit(runner, repoPath, [
     'update-ref',
     '-d',
+    '--no-deref',
     `refs/heads/${branchName}`,
     expectedSha,
   ]);
@@ -299,6 +312,20 @@ export async function inspectWorktreeState(
     realpathSyncSafe(worktreeCommonDir.stdout.trim()) ===
       realpathSyncSafe(sourceCommonDir.stdout.trim());
   if (!sameRepository) {
+    return { registered: false };
+  }
+  // The commands below must be inspecting the recorded directory itself:
+  // a per-worktree core.worktree redirect would otherwise report on some
+  // other clean directory while the recorded path holds user files.
+  const toplevel = await runGit(runner, expectedPath, [
+    'rev-parse',
+    '--path-format=absolute',
+    '--show-toplevel',
+  ]);
+  if (
+    toplevel.exitCode !== 0 ||
+    realpathSyncSafe(toplevel.stdout.trim()) !== realpathSyncSafe(expectedPath)
+  ) {
     return { registered: false };
   }
   const status = await runGit(runner, expectedPath, [

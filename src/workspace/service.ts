@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
-import { realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import {
   ensureOwnedDirectoryChain,
   deriveBranchName,
@@ -1024,6 +1024,15 @@ export async function removeWorkspace(
   if (!(await isStrictlyClean(runner, row.worktreePath))) {
     throw new Error(
       `Workspace ${row.worktreePath} contains untracked or ignored files; refusing removal`
+    );
+  }
+  // Submodule contents live outside the superproject's cleanliness proof;
+  // WORK-001 refuses to remove such worktrees rather than risk deleting
+  // nested user data.
+  if (existsSync(join(row.worktreePath, '.gitmodules'))) {
+    throw new Error(
+      `Workspace ${row.worktreePath} contains submodules (.gitmodules present); ` +
+        `WORK-001 does not remove submodule worktrees`
     );
   }
 
