@@ -122,6 +122,26 @@ and metadata copied into a different repository all fail closed. Once a
 project has recorded any workspace, its source repository binding is
 enforced; copied metadata in another checkout is refused.
 
+## Known residual windows
+
+Some races cannot be eliminated by userspace pathname tools; ShipGraph keeps
+them narrow and documented instead of pretending they are atomic:
+
+- **Symlink swaps between check and use.** Path components are validated with
+  `lstat`/`realpath` immediately before each git operation, but a concurrent
+  swap inside that window could redirect an operation. Deletion is bounded:
+  removal only ever targets the exact recorded path, requires the recorded
+  branch to be checked out, and `git worktree remove` itself refuses dirty
+  or foreign worktrees.
+- **READY records a verified instant.** Invariants (HEAD, branch, clean) are
+  verified before READY is committed, but the worktree is a normal user-owned
+  directory afterwards. Later drift is reported by `workspace inspect` as
+  `DRIFTED`; nothing auto-repairs.
+- **Provenance is path-based.** Repository binding compares canonical local
+  paths, and workspace uniqueness holds per SQLite database. Replacing a
+  repository at the same path, or using separate databases against one
+  repository, is outside what WORK-001 can distinguish.
+
 ## CLI
 
 ```

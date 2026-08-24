@@ -320,6 +320,35 @@ describe('WORK-001 isolated worktree lifecycle', () => {
     }
   });
 
+  it('never exceeds capacity under concurrent creation of different tickets', async () => {
+    harness = setupProject(1, [ticket('CAP-1'), ticket('CAP-2')]);
+    process.env.SHIPGRAPH_CREATION_POLL_TIMEOUT_MS = '500';
+    try {
+      const results = await Promise.allSettled([
+        createWorkspace(harness.options, 'CAP-1'),
+        createWorkspace(harness.options, 'CAP-2'),
+      ]);
+      const fulfilled = results.filter(
+        (result) => result.status === 'fulfilled'
+      ) as PromiseFulfilledResult<Awaited<ReturnType<typeof createWorkspace>>>[];
+      // At most one ticket may claim the single capacity slot; the loser
+      // either fails closed or is refused by the in-transaction capacity
+      // claim — never two PLANNING/CREATING tickets.
+      expect(fulfilled.length).toBeLessThanOrEqual(1);
+
+      const tickets = createTicketRepository(harness.options.db).findApprovedByProjectId(
+        findProjectId(harness.options.db)
+      );
+      const planningCount = tickets.filter((ticket) => ticket.status === 'PLANNING').length;
+      expect(planningCount).toBeLessThanOrEqual(1);
+
+      const ready = calculateReady(tickets, 1);
+      expect(ready.capacity.active).toBeLessThanOrEqual(1);
+    } finally {
+      delete process.env.SHIPGRAPH_CREATION_POLL_TIMEOUT_MS;
+    }
+  });
+
   it('fails closed on capacity without creating any resources', async () => {
     harness = setupProject(1, [ticket('CAP-1'), ticket('CAP-2')]);
     await createWorkspace(harness.options, 'CAP-1');
@@ -434,6 +463,24 @@ describe('WORK-001 isolated worktree lifecycle', () => {
     await expect(removeWorkspace(harness.options, 'TA-1')).rejects.toThrow(/dirty/);
     expect(readFileSync(join(created.workspace.worktreePath, 'dirty.txt'), 'utf8')).toBe(
       'in progress\n'
+    );
+  });
+
+  it('refuses removal when the recorded branch is no longer checked out', async () => {
+    harness = setupProject(2, [ticket('TA-1')]);
+    const created = await createWorkspace(harness.options, 'TA-1');
+    const wsPath = created.workspace.worktreePath;
+    // Clean, but switched to another branch — the checkout no longer matches
+    // the ShipGraph reservation.
+    git(harness.projectDir, 'branch', 'observer/main', harness.baseSha);
+    git(wsPath, 'switch', 'observer/main');
+
+    await expect(removeWorkspace(harness.options, 'TA-1')).rejects.toThrow(
+      /recorded branch/
+    );
+    expect(existsSync(wsPath)).toBe(true);
+    expect(git(harness.projectDir, 'rev-parse', '--verify', 'shipgraph/ta-1')).toBe(
+      created.workspace.baseSha
     );
   });
 

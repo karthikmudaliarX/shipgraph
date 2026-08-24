@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { realpathSync } from 'node:fs';
 import {
   ensureOwnedDirectoryChain,
@@ -43,7 +42,7 @@ import {
   type WorkspaceRemovedPayload,
 } from '../events/event.js';
 import { TicketState, type TicketStateValue } from '../core/state-machine/state.js';
-import { calculateReady } from '../scheduler/ready.js';
+import { calculateReady, ACTIVE_CAPACITY_STATES } from '../scheduler/ready.js';
 
 export type WorkspaceServiceOptions = {
   db: DbConnection;
@@ -105,7 +104,10 @@ function defaults(options: WorkspaceServiceOptions): {
  * repository at ~/.shipgraph/worktrees. Tests inject a temporary root.
  */
 export function resolveWorktreeRoot(override?: string): string {
-  const root = override ?? join(homedir(), '.shipgraph', 'worktrees');
+  // The default root lives outside any repository and is built component-wise
+  // so no symlink anywhere in ~/.shipgraph is ever followed.
+  const root =
+    override ?? ensureOwnedDirectoryChain(homedir(), '.shipgraph', 'worktrees');
   const existing = tryLstatSync(root);
   if (existing?.isSymbolicLink()) {
     throw new Error(`Refusing to use symbolic link for ShipGraph worktree root: ${root}`);
@@ -113,7 +115,9 @@ export function resolveWorktreeRoot(override?: string): string {
   if (existing && !existing.isDirectory()) {
     throw new Error(`ShipGraph worktree root is not a directory: ${root}`);
   }
-  ensureOwnedDirectoryChain(root);
+  if (!existing) {
+    ensureOwnedDirectoryChain(root);
+  }
   return realpathSync(root);
 }
 
@@ -182,6 +186,49 @@ function assertTicketDispatchable(
     throw new Error(
       `Dispatch capacity is full (${ready.capacity.active}/${context.maxConcurrentTickets} active); ` +
         `no workspace was created for ${ticketIdInput}`
+    );
+  }
+}
+
+/**
+ * Re-validate dispatchability INSIDE the reservation transaction and claim
+ * capacity by counting active workspaces. SQLite serializes immediate
+ * transactions, so two concurrent creations of different tickets can never
+ * both pass this check when capacity is exhausted.
+ */
+function assertDispatchableAndClaimCapacityInTx(
+  options: WorkspaceServiceOptions,
+  context: ProjectContext,
+  ticketIdInput: string
+): void {
+  const tickets = createTicketRepository(options.db).findApprovedByProjectId(
+    context.projectId
+  );
+  const ticket = tickets.find((candidate) => candidate.id === ticketIdInput);
+  if (!ticket || ticket.status !== TicketState.ELIGIBLE) {
+    throw new Error(
+      `Ticket ${ticketIdInput} is no longer ELIGIBLE; workspace was not reserved`
+    );
+  }
+  const ready = calculateReady(tickets, context.maxConcurrentTickets);
+  // Capacity includes workspaces already claimed by concurrent/reserved
+  // creations whose ticket transitions have not landed yet.
+  const claimedRow = options.db
+    .prepare(
+      `SELECT COUNT(*) AS n
+       FROM workspaces w
+       JOIN tickets t ON t.id = w.ticket_id
+       WHERE w.project_id = ?
+         AND w.status IN ('CREATING', 'READY', 'NEEDS_HUMAN')
+         AND t.status IN (${ACTIVE_CAPACITY_STATES.map(() => '?').join(', ')})`
+    )
+    .get(context.projectId, ...ACTIVE_CAPACITY_STATES) as { n: number };
+  const availableCapacity =
+    context.maxConcurrentTickets - ready.capacity.active - claimedRow.n;
+  const dispatchableIds = new Set(ready.dispatchable.map((entry) => entry.ticket));
+  if (!dispatchableIds.has(ticketIdInput) && availableCapacity <= 0) {
+    throw new Error(
+      `Dispatch capacity is full; no workspace was reserved for ${ticketIdInput}`
     );
   }
 }
@@ -257,10 +304,17 @@ function workspacePayload(row: WorkspaceRecord) {
 }
 
 /** Reserve the workspace as CREATING together with its audit event. */
-function reserveWorkspace(options: WorkspaceServiceOptions, row: WorkspaceRecord): WorkspaceRecord {
+function reserveWorkspace(
+  options: WorkspaceServiceOptions,
+  context: ProjectContext,
+  row: WorkspaceRecord
+): WorkspaceRecord {
   const timestamp = options.now ? options.now() : new Date().toISOString();
   const createEventId = options.createEventId ?? randomUUID;
   const reserve = options.db.transaction((): WorkspaceRecord => {
+    // Claim capacity atomically: immediate transactions serialize concurrent
+    // creators, so the count below cannot be observed stale.
+    assertDispatchableAndClaimCapacityInTx(options, context, row.ticketId);
     const inserted = createWorkspaceRepository(options.db).insert({ ...row });
     const payload: WorkspaceCreatingPayload = workspacePayload(inserted);
     createEventRepository(options.db).append({
@@ -373,8 +427,9 @@ function markWorkspaceStatus(
 
 /**
  * Prove freshly created resources belong to this exact reservation and hold
- * nothing beyond the base commit; then roll them back. Anything that cannot
- * be proven is preserved and escalated to NEEDS_HUMAN instead.
+ * nothing beyond the base commit; then roll them back. Called only while the
+ * reservation is still CREATING and only after our own `git worktree add`
+ * succeeded, so the resources were provably created by this process.
  */
 async function compensateCreation(
   options: WorkspaceServiceOptions,
@@ -382,6 +437,12 @@ async function compensateCreation(
   row: WorkspaceRecord,
   reason: string
 ): Promise<void> {
+  const current = createWorkspaceRepository(options.db).findById(row.id);
+  if (current?.status !== 'CREATING') {
+    // Another invocation finalized (or claimed) this reservation in the
+    // meantime; its resources are no longer ours to delete.
+    return;
+  }
   const provablyOurs = await creationBelongsToReservation(runner, row);
   if (provablyOurs) {
     await removeWorktree(runner, row.sourceRepositoryPath, row.worktreePath);
@@ -407,6 +468,7 @@ async function creationBelongsToReservation(
   try {
     const stats = tryLstatSync(row.worktreePath);
     if (!stats || stats.isSymbolicLink() || !stats.isDirectory()) return false;
+    if (realpathSync(row.worktreePath) !== row.worktreePath) return false;
     const live = await inspectWorktreeState(runner, row.sourceRepositoryPath, row.worktreePath);
     return (
       live.registered &&
@@ -660,7 +722,7 @@ export async function createWorkspace(
 
   let row: WorkspaceRecord;
   try {
-    row = reserveWorkspace(options, {
+    row = reserveWorkspace(options, context, {
       id: randomUUID().replace(/-/g, ''),
       projectId: context.projectId,
       ticketId: ticketIdInput,
@@ -690,6 +752,10 @@ export async function createWorkspace(
     throw new Error(`Simulated crash after reserving workspace ${row.id}`);
   }
 
+  // Track whether OUR git command created the resources. Deletion during
+  // compensation is only ever applied to resources this process provably
+  // created; a failed `git worktree add` leaves nothing of ours behind.
+  let gitResourcesCreated = false;
   try {
     await addWorktreeWithNewBranch(
       runner,
@@ -698,6 +764,7 @@ export async function createWorkspace(
       branchName,
       baseSha
     );
+    gitResourcesCreated = true;
     await verifyReadyWorkspace(runner, row, worktreeRoot);
     const result = finalizeReadyWorkspace(options, row);
     return {
@@ -707,12 +774,15 @@ export async function createWorkspace(
       ticketState: result.ticketState,
     };
   } catch (creationError) {
-    await compensateCreation(
-      options,
-      runner,
-      row,
-      creationError instanceof Error ? creationError.message : String(creationError)
-    );
+    const reason =
+      creationError instanceof Error ? creationError.message : String(creationError);
+    if (!gitResourcesCreated) {
+      // Nothing was created by us; record the failure without deleting
+      // anything that could belong to someone else.
+      markWorkspaceStatus(options, row, 'FAILED', reason);
+      throw creationError;
+    }
+    await compensateCreation(options, runner, row, reason);
     throw creationError;
   }
 }
@@ -848,6 +918,12 @@ export async function removeWorkspace(
   if (!live.registered) {
     throw new Error(
       `Workspace ${row.worktreePath} is not a registered Git worktree of the source repository`
+    );
+  }
+  if (live.branch !== `refs/heads/${row.branchName}`) {
+    throw new Error(
+      `Workspace ${row.worktreePath} does not have the recorded branch ` +
+        `${row.branchName} checked out (${live.branch ?? 'detached'}); refusing removal`
     );
   }
   if (live.clean !== true) {
