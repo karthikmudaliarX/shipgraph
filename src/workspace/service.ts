@@ -17,10 +17,10 @@ import {
   isInsideWorkTree,
   addWorktreeWithNewBranch,
   removeWorktree,
-  deleteBranch,
   inspectWorktreeState,
   isStrictlyClean,
   resolveCommitSha,
+  deleteBranchIfAt,
   type GitRunner,
 } from '../git/service.js';
 import { assertSafeShipgraphPaths } from '../utils/paths.js';
@@ -496,9 +496,9 @@ async function compensateCreation(
   if (!claimed) return;
   try {
     await removeWorktree(runner, row.sourceRepositoryPath, row.worktreePath);
-    // The branch points exactly at baseSha (-d refuses anything unmerged),
-    // so deleting it loses no work.
-    await deleteBranch(runner, row.sourceRepositoryPath, row.branchName);
+    // Compare-and-delete on the ref itself: the deletion only lands while
+    // the branch still points exactly at the recorded base SHA.
+    await deleteBranchIfAt(runner, row.sourceRepositoryPath, row.branchName, row.baseSha);
   } catch (cleanupError) {
     // The reservation is already FAILED; preserved leftovers are surfaced as
     // DRIFTED by `workspace inspect` for human resolution.
@@ -1029,19 +1029,19 @@ export async function removeWorkspace(
 
   await removeWorktree(runner, row.sourceRepositoryPath, row.worktreePath);
 
-  // Branch deletion only when provably empty of unique work. `-d` adds
-  // defense in depth: git itself refuses branches that are not merged. The
-  // worktree must be gone first; git refuses to delete a checked-out branch.
+  // Branch deletion only when provably empty of unique work, enforced by an
+  // atomic compare-and-delete: the ref is removed only while it still points
+  // exactly at the recorded base SHA. The worktree must be gone first; git
+  // refuses to delete a checked-out branch's worktree binding implicitly via
+  // the failed update above otherwise.
   let branchRetained = true;
-  const branchTip = await resolveCommitSha(
+  const deleted = await deleteBranchIfAt(
     runner,
     row.sourceRepositoryPath,
-    `refs/heads/${row.branchName}`
+    row.branchName,
+    row.baseSha
   );
-  if (branchTip === row.baseSha) {
-    const deleted = await deleteBranch(runner, row.sourceRepositoryPath, row.branchName);
-    if (deleted) branchRetained = false;
-  }
+  if (deleted) branchRetained = false;
 
   const updated = markWorkspaceStatus(
     options,

@@ -45,7 +45,14 @@ const GIT_ENV_OVERRIDES = [
 ] as const;
 
 function sanitizedEnv(): NodeJS.ProcessEnv {
-  const env: Record<string, string> = {};
+  const env: Record<string, string> = {
+    // Ignore refs/replace mappings: recorded SHAs must always denote the
+    // exact commit content they name.
+    GIT_NO_REPLACE_OBJECTS: '1',
+    // Disable fsmonitor helpers: repository-configured monitors could hide
+    // modifications from status output.
+    GIT_FSMONITOR_DAEMON: '',
+  };
   for (const [key, value] of Object.entries(process.env)) {
     if (value !== undefined && !GIT_ENV_OVERRIDES.includes(key as (typeof GIT_ENV_OVERRIDES)[number])) {
       env[key] = value;
@@ -58,7 +65,13 @@ export function createGitRunner(): GitRunner {
   return async (cwd, args) => {
     const result = await execa(
       'git',
-      ['-c', 'core.hooksPath=/dev/null', ...args],
+      [
+        '-c',
+        'core.hooksPath=/dev/null',
+        '-c',
+        'core.fsmonitor=false',
+        ...args,
+      ],
       {
         cwd,
         reject: false,
@@ -223,6 +236,26 @@ export async function deleteBranch(
   branchName: string
 ): Promise<boolean> {
   const result = await runGit(runner, repoPath, ['branch', '-d', branchName]);
+  return result.exitCode === 0;
+}
+
+/**
+ * Atomically delete a branch ONLY while it still points at the expected SHA
+ * (`git update-ref -d <ref> <old-oid>` is a kernel-side compare-and-delete).
+ * If the ref moved, the deletion fails and the branch is retained.
+ */
+export async function deleteBranchIfAt(
+  runner: GitRunner,
+  repoPath: string,
+  branchName: string,
+  expectedSha: string
+): Promise<boolean> {
+  const result = await runGit(runner, repoPath, [
+    'update-ref',
+    '-d',
+    `refs/heads/${branchName}`,
+    expectedSha,
+  ]);
   return result.exitCode === 0;
 }
 

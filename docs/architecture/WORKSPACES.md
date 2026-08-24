@@ -88,10 +88,15 @@ explicit about this:
 If ShipGraph crashes after the reservation but before finalization, the next
 invocation finds the persisted `CREATING` row and inspects it. If the
 recorded path exists as a plain directory, is a registered worktree of the
-expected repository, has the expected branch checked out at exactly the
-recorded base SHA, and is clean, the reservation is safely finalized.
-Anything else fails closed into `NEEDS_HUMAN`. Ambiguous state is never
-deleted automatically.
+expected repository bound to its git common dir, has the expected branch
+checked out at exactly the recorded base SHA, and is strictly clean, the
+reservation is safely finalized. Anything else fails closed into
+`NEEDS_HUMAN`. Ambiguous state is never deleted automatically.
+
+Adoption note: recovery deliberately adopts any state that provably matches
+the reservation. Such state is indistinguishable from — and equivalent to —
+what ShipGraph itself would have created; constructing it deliberately
+yields an equally valid workspace for that ticket at that base.
 
 ### Compensation
 
