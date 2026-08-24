@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { execa } from 'execa';
 
 /**
@@ -246,6 +247,27 @@ export async function inspectWorktreeState(
   if (!entry) {
     return { registered: false };
   }
+  // Bind the directory to the expected repository: its resolved git common
+  // dir must equal the source repository's. A swapped .git file pointing at
+  // another repository fails closed here.
+  const worktreeCommonDir = await runGit(runner, expectedPath, [
+    'rev-parse',
+    '--path-format=absolute',
+    '--git-common-dir',
+  ]);
+  const sourceCommonDir = await runGit(runner, repoPath, [
+    'rev-parse',
+    '--path-format=absolute',
+    '--git-common-dir',
+  ]);
+  const sameRepository =
+    worktreeCommonDir.exitCode === 0 &&
+    sourceCommonDir.exitCode === 0 &&
+    realpathSyncSafe(worktreeCommonDir.stdout.trim()) ===
+      realpathSyncSafe(sourceCommonDir.stdout.trim());
+  if (!sameRepository) {
+    return { registered: false };
+  }
   const status = await runGit(runner, expectedPath, ['status', '--porcelain']);
   const ambiguousFlags = await hasAmbiguousIndexFlags(runner, expectedPath);
   const symbolicRef = await runGit(runner, expectedPath, [
@@ -262,17 +284,52 @@ export async function inspectWorktreeState(
   };
 }
 
+function realpathSyncSafe(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/**
+ * Strict cleanliness for destructive operations: untracked and ignored files
+ * are surfaced (defeating status.showUntrackedFiles=no), and any inspection
+ * error counts as NOT strictly clean.
+ */
+export async function isStrictlyClean(
+  runner: GitRunner,
+  worktreePath: string
+): Promise<boolean> {
+  const status = await runGit(
+    runner,
+    worktreePath,
+    [
+      '-c',
+      'status.showUntrackedFiles=all',
+      'status',
+      '--porcelain',
+      '--untracked-files=all',
+      '--ignored',
+    ]
+  );
+  if (status.exitCode !== 0) return false;
+  const ambiguousFlags = await hasAmbiguousIndexFlags(runner, worktreePath);
+  if (ambiguousFlags === undefined) return false;
+  return status.stdout.trim() === '' && !ambiguousFlags;
+}
+
 /**
  * Detect tracked files marked assume-unchanged/skip-worktree: `git status`
  * reports them as clean even when modified, so a "clean" answer requires
- * that no such entries exist.
+ * that no such entries exist. Returns undefined when inspection fails.
  */
 async function hasAmbiguousIndexFlags(
   runner: GitRunner,
   worktreePath: string
-): Promise<boolean> {
+): Promise<boolean | undefined> {
   const result = await runGit(runner, worktreePath, ['ls-files', '-v']);
-  if (result.exitCode !== 0) return false;
+  if (result.exitCode !== 0) return undefined;
   // Lowercase status letters mark assume-unchanged (h) / skip-worktree (s).
   return result.stdout
     .split('\n')

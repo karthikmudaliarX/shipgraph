@@ -502,6 +502,42 @@ describe('WORK-001 isolated worktree lifecycle', () => {
     );
   });
 
+  it('refuses removal when the worktree contains ignored or untracked files', async () => {
+    harness = setupProject(2, [ticket('TA-1')]);
+    const created = await createWorkspace(harness.options, 'TA-1');
+    const wsPath = created.workspace.worktreePath;
+    // Ignored files never show in plain `git status --porcelain`.
+    writeFileSync(join(wsPath, '.gitignore'), 'secret.local\n');
+    writeFileSync(join(wsPath, 'secret.local'), 'do not lose me\n');
+    git(wsPath, 'add', '.gitignore');
+    git(wsPath, 'commit', '-m', 'ignore secrets');
+
+    await expect(removeWorkspace(harness.options, 'TA-1')).rejects.toThrow(
+      /untracked or ignored/
+    );
+    expect(readFileSync(join(wsPath, 'secret.local'), 'utf8')).toBe('do not lose me\n');
+  });
+
+  it('treats a worktree whose repository binding was swapped as unregistered', async () => {
+    harness = setupProject(2, [ticket('TA-1')]);
+    const created = await createWorkspace(harness.options, 'TA-1');
+    const wsPath = created.workspace.worktreePath;
+
+    // Point the worktree's .git file at a completely different repository.
+    const foreignRepo = mkdtempSync(join(tmpdir(), 'sg-work-foreign-'));
+    git(foreignRepo, 'init', '-b', 'main');
+    try {
+      rmSync(join(wsPath, '.git'));
+      symlinkSync(foreignRepo, join(wsPath, '.git'));
+
+      const report = await inspectWorkspace(harness.options, 'TA-1');
+      expect(report.health).toBe('DRIFTED');
+      await expect(removeWorkspace(harness.options, 'TA-1')).rejects.toThrow();
+    } finally {
+      rmSync(foreignRepo, { recursive: true, force: true });
+    }
+  });
+
   it('refuses removal when the workspace is missing or ambiguous on disk', async () => {
     harness = setupProject(2, [ticket('TA-1')]);
     const created = await createWorkspace(harness.options, 'TA-1');

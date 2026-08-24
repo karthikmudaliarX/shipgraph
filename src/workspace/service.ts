@@ -19,6 +19,7 @@ import {
   removeWorktree,
   deleteBranch,
   inspectWorktreeState,
+  isStrictlyClean,
   resolveCommitSha,
   type GitRunner,
 } from '../git/service.js';
@@ -665,7 +666,14 @@ async function reconcileWithExistingRow(
           }`
         );
       }
-      return { created: false, recovered: false, workspace: row, ticketState: TicketState.PLANNING };
+      // Report the ticket's actual persisted state rather than assuming.
+      const ticket = createTicketRepository(options.db).findById(row.ticketId);
+      return {
+        created: false,
+        recovered: false,
+        workspace: row,
+        ticketState: ticket?.status ?? TicketState.PLANNING,
+      };
     }
     case 'CREATING': {
       // Another process may be mid-creation. Wait for it to reach a terminal
@@ -998,6 +1006,13 @@ export async function removeWorkspace(
   ) {
     throw new Error(
       `Workspace ${row.worktreePath} changed during removal validation; refusing to remove`
+    );
+  }
+  // Strict cleanliness including untracked and ignored files: removal must
+  // never destroy anything a user (or a tool) left behind.
+  if (!(await isStrictlyClean(runner, row.worktreePath))) {
+    throw new Error(
+      `Workspace ${row.worktreePath} contains untracked or ignored files; refusing removal`
     );
   }
 
