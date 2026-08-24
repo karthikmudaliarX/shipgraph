@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
+  closeSync,
+  constants,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -17,7 +21,7 @@ import { validateBacklogProject, syncBacklogProject } from '../../src/cli/backlo
 import { showReady } from '../../src/cli/ready.js';
 import { showStatus } from '../../src/cli/status.js';
 import { loadBacklog } from '../../src/backlog/schema.js';
-import { assertSafeBacklogPath } from '../../src/utils/paths.js';
+import { assertOpenFileWithinProject, assertSafeBacklogPath } from '../../src/utils/paths.js';
 import type { ShipgraphConfig } from '../../src/config/schema.js';
 
 const config: ShipgraphConfig = {
@@ -206,6 +210,30 @@ describe('CORE-002 path-safety boundary', () => {
     expect(() => validateBacklogProject(projectDir, 'missing.yml')).toThrow(/not found/);
     expect(() => syncBacklogProject(projectDir, 'missing.yml')).toThrow(/not found/);
     expect(showStatus(projectDir, { json: true }).project?.ticketCount ?? 0).toBe(0);
+  });
+
+  it('binds confinement to the opened descriptor itself, not just the path', () => {
+    // An fd opened through an out-of-project pathname must be rejected even
+    // though identity checks alone would pass.
+    const externalFd = openSync(externalBacklogPath, constants.O_RDONLY);
+    try {
+      expect(() => assertOpenFileWithinProject(externalFd, realpathSync(projectDir))).toThrow(
+        /escapes the project directory/
+      );
+    } finally {
+      closeSync(externalFd);
+    }
+
+    const insidePath = join(projectDir, 'inside.yml');
+    writeFileSync(insidePath, stringify(backlog));
+    const insideFd = openSync(insidePath, constants.O_RDONLY);
+    try {
+      expect(() =>
+        assertOpenFileWithinProject(insideFd, realpathSync(projectDir))
+      ).not.toThrow();
+    } finally {
+      closeSync(insideFd);
+    }
   });
 
   it('keeps database symlink protection intact for unrelated commands', () => {

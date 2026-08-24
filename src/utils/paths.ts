@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync } from 'node:fs';
+import { lstatSync, readlinkSync, realpathSync, type BigIntStats } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 
@@ -86,24 +86,47 @@ export function assertSafeShipgraphPaths(projectDir: string): ReturnType<typeof 
 export function assertSafeBacklogPath(
   projectDir: string,
   candidate?: string
-): { path: string; identity: { dev: number; ino: number } } {
+): { path: string; identity: { dev: bigint; ino: bigint } } {
   const canonicalProjectDir = realpathSync(projectDir);
   const path = resolve(canonicalProjectDir, candidate ?? 'shipgraph.backlog.yml');
   assertWithinProject(canonicalProjectDir, path);
   if (tryLstat(path)?.isSymbolicLink()) {
     throw new Error(`Refusing to use symbolic link for ShipGraph path: ${path}`);
   }
-  const stats = tryLstat(path);
+  // Bigint stats keep dev/ino exact on filesystems whose identifiers exceed
+  // JavaScript's safe integer range.
+  const stats = tryBigLstat(path);
   if (!stats) {
     throw new Error(`Approved backlog file not found: ${path}`);
   }
   assertWithinProject(canonicalProjectDir, realpathSync(path));
-  if (!stats.isFile() || stats.nlink !== 1) {
+  if (!stats.isFile() || stats.nlink !== 1n) {
     throw new Error(`ShipGraph backlog must be a regular, unlinked file: ${path}`);
   }
-  const identity = { dev: Number(stats.dev), ino: Number(stats.ino) };
+  const identity = { dev: stats.dev, ino: stats.ino };
   assertExistingPathConfinement(canonicalProjectDir, path);
   return { path, identity };
+}
+
+/**
+ * Verify confinement of an already-open descriptor via /proc (Linux).
+ *
+ * This binds the confinement check to the descriptor actually consumed,
+ * closing a parent-directory swap between a pre-open realpath check and
+ * openSync. On platforms without procfs the pre-open realpath and inode
+ * identity checks remain the strongest available binding.
+ */
+export function assertOpenFileWithinProject(fd: number, canonicalProjectDir: string): void {
+  let fdPath: string;
+  try {
+    fdPath = readlinkSync(`/proc/self/fd/${fd}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+  if (!isWithinProject(canonicalProjectDir, fdPath)) {
+    throw new Error(`ShipGraph backlog escapes the project directory: ${fdPath}`);
+  }
 }
 
 /** Reject writable database paths that can alias another inode or user. */
@@ -136,6 +159,15 @@ export function isWithinProject(projectDir: string, candidate: string): boolean 
 function tryLstat(path: string): ReturnType<typeof lstatSync> | undefined {
   try {
     return lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+function tryBigLstat(path: string): BigIntStats | undefined {
+  try {
+    return lstatSync(path, { bigint: true });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw error;

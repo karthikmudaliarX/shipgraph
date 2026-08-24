@@ -14,7 +14,7 @@ import {
 } from '../domain/ticket.js';
 import { validateDependencyGraph } from '../domain/dependency-graph.js';
 import { compareStableStrings } from '../utils/sorting.js';
-import { isWithinProject } from '../utils/paths.js';
+import { isWithinProject, assertOpenFileWithinProject } from '../utils/paths.js';
 
 export const SUPPORTED_BACKLOG_MAJOR_VERSIONS = [1] as const;
 
@@ -83,7 +83,7 @@ export function parseBacklog(raw: string): ApprovedBacklog {
 export function loadBacklog(
   projectDir: string,
   path: string,
-  validatedIdentity: { dev: number; ino: number }
+  validatedIdentity: { dev: bigint; ino: bigint }
 ): ApprovedBacklog {
   // Re-verify confinement at consumption time: a validated inode that has
   // been relocated outside the project (or reached through a swapped parent)
@@ -100,12 +100,14 @@ export function loadBacklog(
     if (!stats.isFile() || stats.nlink !== 1) {
       throw new Error(`ShipGraph backlog must be a regular, unlinked file: ${path}`);
     }
-    if (
-      Number(stats.dev) !== validatedIdentity.dev ||
-      Number(stats.ino) !== validatedIdentity.ino
-    ) {
+    const bigStats = fstatSync(fileDescriptor, { bigint: true });
+    if (bigStats.dev !== validatedIdentity.dev || bigStats.ino !== validatedIdentity.ino) {
       throw new Error(`ShipGraph backlog changed between validation and read: ${path}`);
     }
+    // Bind confinement to the descriptor being consumed, not just the path:
+    // this catches a parent-directory swap that happened after the pre-open
+    // realpath check above.
+    assertOpenFileWithinProject(fileDescriptor, canonicalProjectDir);
     return parseBacklog(readFileSync(fileDescriptor, 'utf8'));
   } finally {
     closeSync(fileDescriptor);
