@@ -236,6 +236,15 @@ describe('CORE-002 path-safety boundary', () => {
     }
   });
 
+  it('rejects prepared database sidecars even when shipgraph.db does not exist yet', () => {
+    mkdirSync(join(projectDir, '.shipgraph'), { recursive: true });
+    symlinkSync(externalBacklogPath, join(projectDir, '.shipgraph', 'shipgraph.db-wal'));
+
+    expect(() => initProject(projectDir, { config })).toThrow(/sidecar/);
+    // Fail-closed: the external sidecar target was never adopted or modified.
+    expect(readFileSync(externalBacklogPath, 'utf8')).toBe(stringify(backlog));
+  });
+
   it('keeps database symlink protection intact for unrelated commands', () => {
     initProject(projectDir, { config });
     const target = join(externalDir, 'external.db');

@@ -48,26 +48,29 @@ export function assertSafeShipgraphPaths(projectDir: string): ReturnType<typeof 
     throw new Error(`ShipGraph state path is not a directory: ${paths.stateDir}`);
   }
   if (stateStats) assertWithinProject(canonicalProjectDir, realpathSync(paths.stateDir));
+  // Sidecars are inspected independently of the main database: a prepared
+  // -wal/-shm/-journal must never be followed into SQLite, including during
+  // first initialization when shipgraph.db does not exist yet.
+  for (const sidecarPath of [
+    `${paths.dbPath}-wal`,
+    `${paths.dbPath}-shm`,
+    `${paths.dbPath}-journal`,
+  ]) {
+    const sidecarStats = tryLstat(sidecarPath);
+    if (!sidecarStats) continue;
+    if (sidecarStats.isSymbolicLink()) {
+      throw new Error(`Refusing to use symbolic link for ShipGraph database sidecar: ${sidecarPath}`);
+    }
+    assertWithinProject(canonicalProjectDir, realpathSync(sidecarPath));
+    if (!sidecarStats.isFile() || sidecarStats.nlink !== 1) {
+      throw new Error(`ShipGraph database sidecar must be a regular, unlinked file: ${sidecarPath}`);
+    }
+    if (process.getuid !== undefined && sidecarStats.uid !== process.getuid()) {
+      throw new Error(`ShipGraph database sidecar must be owned by the current user: ${sidecarPath}`);
+    }
+  }
   if (tryLstat(paths.dbPath)) {
     assertSafeDatabaseFile(paths.dbPath);
-    for (const sidecarPath of [
-      `${paths.dbPath}-wal`,
-      `${paths.dbPath}-shm`,
-      `${paths.dbPath}-journal`,
-    ]) {
-      const sidecarStats = tryLstat(sidecarPath);
-      if (!sidecarStats) continue;
-      if (sidecarStats.isSymbolicLink()) {
-        throw new Error(`Refusing to use symbolic link for ShipGraph database sidecar: ${sidecarPath}`);
-      }
-      assertWithinProject(canonicalProjectDir, realpathSync(sidecarPath));
-      if (!sidecarStats.isFile() || sidecarStats.nlink !== 1) {
-        throw new Error(`ShipGraph database sidecar must be a regular, unlinked file: ${sidecarPath}`);
-      }
-      if (process.getuid !== undefined && sidecarStats.uid !== process.getuid()) {
-        throw new Error(`ShipGraph database sidecar must be owned by the current user: ${sidecarPath}`);
-      }
-    }
   }
 
   return paths;
@@ -121,7 +124,13 @@ export function assertOpenFileWithinProject(fd: number, canonicalProjectDir: str
   try {
     fdPath = readlinkSync(`/proc/self/fd/${fd}`);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      // Fail closed: without procfs the consumed descriptor's location cannot
+      // be proven, so backlog consumption must not proceed.
+      throw new Error(
+        'ShipGraph backlog confinement requires procfs (/proc/self/fd) to verify the consumed file'
+      );
+    }
     throw error;
   }
   if (!isWithinProject(canonicalProjectDir, fdPath)) {
