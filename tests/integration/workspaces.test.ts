@@ -538,6 +538,23 @@ describe('WORK-001 isolated worktree lifecycle', () => {
     }
   });
 
+  it('refuses removal when a tracked file is marked skip-worktree', async () => {
+    harness = setupProject(2, [ticket('TA-1')]);
+    const created = await createWorkspace(harness.options, 'TA-1');
+    const wsPath = created.workspace.worktreePath;
+    writeFileSync(join(wsPath, 'hidden.txt'), 'original\n');
+    git(wsPath, 'add', '.');
+    git(wsPath, 'commit', '-m', 'tracked file');
+
+    // Hide local modifications from git status via skip-worktree.
+    writeFileSync(join(wsPath, 'hidden.txt'), 'secret local edit\n');
+    git(wsPath, 'update-index', '--skip-worktree', 'hidden.txt');
+    expect(git(wsPath, 'status', '--porcelain')).toBe('');
+
+    await expect(removeWorkspace(harness.options, 'TA-1')).rejects.toThrow();
+    expect(readFileSync(join(wsPath, 'hidden.txt'), 'utf8')).toBe('secret local edit\n');
+  });
+
   it('refuses removal when the workspace is missing or ambiguous on disk', async () => {
     harness = setupProject(2, [ticket('TA-1')]);
     const created = await createWorkspace(harness.options, 'TA-1');

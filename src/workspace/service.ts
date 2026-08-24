@@ -515,12 +515,16 @@ async function creationBelongsToReservation(
     if (!stats || stats.isSymbolicLink() || !stats.isDirectory()) return false;
     if (realpathSync(row.worktreePath) !== row.worktreePath) return false;
     const live = await inspectWorktreeState(runner, row.sourceRepositoryPath, row.worktreePath);
-    return (
-      live.registered &&
-      live.head === row.baseSha &&
-      live.branch === `refs/heads/${row.branchName}` &&
-      live.clean === true
-    );
+    if (
+      !live.registered ||
+      live.head !== row.baseSha ||
+      live.branch !== `refs/heads/${row.branchName}` ||
+      live.clean !== true
+    ) {
+      return false;
+    }
+    // Deletion must never destroy untracked or ignored content either.
+    return isStrictlyClean(runner, row.worktreePath);
   } catch {
     return false;
   }
@@ -816,6 +820,13 @@ export async function createWorkspace(
   // created; a failed `git worktree add` leaves nothing of ours behind.
   let gitResourcesCreated = false;
   try {
+    // Final pre-flight: the reservation window is the last chance for a
+    // concurrent process to plant a conflicting path.
+    if (tryLstatSync(worktreePath)) {
+      throw new Error(
+        `Conflicting path appeared at the workspace location before creation: ${worktreePath}`
+      );
+    }
     await addWorktreeWithNewBranch(
       runner,
       sourceRepositoryPath,

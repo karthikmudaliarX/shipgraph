@@ -268,7 +268,13 @@ export async function inspectWorktreeState(
   if (!sameRepository) {
     return { registered: false };
   }
-  const status = await runGit(runner, expectedPath, ['status', '--porcelain']);
+  const status = await runGit(runner, expectedPath, [
+    '-c',
+    'status.showUntrackedFiles=all',
+    'status',
+    '--porcelain',
+    '--untracked-files=all',
+  ]);
   const ambiguousFlags = await hasAmbiguousIndexFlags(runner, expectedPath);
   const symbolicRef = await runGit(runner, expectedPath, [
     'symbolic-ref',
@@ -279,7 +285,11 @@ export async function inspectWorktreeState(
     head: entry.head,
     branch:
       symbolicRef.exitCode === 0 ? `refs/heads/${symbolicRef.stdout.trim()}` : undefined,
-    clean: status.exitCode === 0 && status.stdout.trim() === '' && !ambiguousFlags,
+    // Fail closed: unknown index-flag state (undefined) counts as not clean.
+    clean:
+      status.exitCode === 0 &&
+      status.stdout.trim() === '' &&
+      ambiguousFlags === false,
     registered: true,
   };
 }
@@ -311,6 +321,7 @@ export async function isStrictlyClean(
       '--porcelain',
       '--untracked-files=all',
       '--ignored',
+      '--ignore-submodules=none',
     ]
   );
   if (status.exitCode !== 0) return false;
@@ -330,8 +341,16 @@ async function hasAmbiguousIndexFlags(
 ): Promise<boolean | undefined> {
   const result = await runGit(runner, worktreePath, ['ls-files', '-v']);
   if (result.exitCode !== 0) return undefined;
-  // Lowercase status letters mark assume-unchanged (h) / skip-worktree (s).
+  // Lowercase letters mark assume-unchanged variants; uppercase S marks
+  // skip-worktree. All of them hide modifications from `git status`.
   return result.stdout
     .split('\n')
-    .some((line) => line.length > 0 && line[0] >= 'a' && line[0] <= 'z');
+    .some((line) => {
+      const flag = line[0];
+      return (
+        line.length > 0 &&
+        flag >= 'a' &&
+        flag <= 'z'
+      ) || flag === 'S';
+    });
 }
