@@ -1,0 +1,22 @@
+version: 1
+
+tickets:
+  - id: CORE-001
+    title: Establish foundation
+    description: Establish the ShipGraph foundation.
+    priority: high
+    dependsOn: []
+    scope:
+      allowedPaths:
+        - src/**
+      forbiddenPaths: []
+    acceptanceCriteria:
+      - id: AC-1
+        description: Foundation is operational.
+    verification:
+      commands:
+        - pnpm test
+    risk: medium
+    agent: {}
+    release:
+      humanApprovalRequired: true

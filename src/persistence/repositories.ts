@@ -1,12 +1,15 @@
 import type { DbConnection } from './db.js';
 import type { ShipgraphConfig } from '../config/schema.js';
 import type { TicketStateValue } from '../core/state-machine/state.js';
+import { TicketState } from '../core/state-machine/state.js';
 import {
   validateTicket,
   type TicketContract,
   type TicketPriority,
   type TicketRisk,
 } from '../domain/ticket.js';
+import { validateDependencyGraph } from '../domain/dependency-graph.js';
+import { compareStableStrings } from '../utils/sorting.js';
 import {
   eventSchema,
   type NewShipgraphEvent,
@@ -53,8 +56,10 @@ export interface ProjectRepository {
 
 export interface TicketRepository {
   create(ticket: TicketRecord): TicketRecord;
+  createMany(tickets: readonly TicketRecord[]): readonly TicketRecord[];
   findById(id: string): TicketRecord | undefined;
   findByProjectId(projectId: string): readonly TicketRecord[];
+  findApprovedByProjectId(projectId: string): readonly TicketRecord[];
   countByProjectId(projectId: string): number;
 }
 
@@ -139,62 +144,143 @@ export function createTicketRepository(db: DbConnection): TicketRepository {
     return grouped;
   };
 
-  const createTicket = db.transaction((ticket: TicketRecord): TicketRecord => {
-    const { projectId, createdAt, updatedAt, ...contract } = ticket;
-    const validated = validateTicket(contract);
+  const createMany = db.transaction(
+    (tickets: readonly TicketRecord[]): readonly TicketRecord[] => {
+      const normalized = tickets.map((ticket) => {
+        const { projectId, createdAt, updatedAt, ...contract } = ticket;
+        const validated = validateTicket(contract);
+        if (validated.status !== TicketState.QUEUED) {
+          throw new Error(
+            `New ticket ${validated.id} must start in QUEUED until it is imported from the approved backlog`
+          );
+        }
+        return {
+          ...validated,
+          dependsOn: [...validated.dependsOn].sort(compareStableStrings),
+          projectId,
+          createdAt,
+          updatedAt,
+        };
+      });
 
-    if (validated.dependsOn.length > 0) {
-      const placeholders = validated.dependsOn.map(() => '?').join(', ');
-      const row = db
-        .prepare(
-          `SELECT COUNT(*) AS count FROM tickets
-           WHERE project_id = ? AND id IN (${placeholders})`
-        )
-        .get(projectId, ...validated.dependsOn) as { count: number };
-      if (row.count !== validated.dependsOn.length) {
+      const inputIds = new Set<string>();
+      for (const ticket of normalized) {
+        if (inputIds.has(ticket.id)) {
+          throw new Error(`Ticket ${ticket.id} is duplicated in the create batch`);
+        }
+        inputIds.add(ticket.id);
+      }
+
+      if (normalized.length === 0) return [];
+
+      const placeholders = normalized.map(() => '?').join(', ');
+      const existingRows = db
+        .prepare(`SELECT id, project_id FROM tickets WHERE id IN (${placeholders})`)
+        .all(...normalized.map((ticket) => ticket.id)) as Array<{
+        id: string;
+        project_id: string;
+      }>;
+      if (existingRows.length > 0) {
         throw new Error(
-          `Ticket ${validated.id} has dependencies that do not exist in project ${projectId}`
+          `Ticket ${existingRows[0].id} already exists and cannot be created again`
         );
       }
+
+      const projectByTicket = new Map<string, string>();
+      for (const ticket of normalized) projectByTicket.set(ticket.id, ticket.projectId);
+
+      const existingEdges = db
+        .prepare('SELECT ticket_id, depends_on_ticket_id FROM ticket_dependencies')
+        .all() as Array<{ ticket_id: string; depends_on_ticket_id: string }>;
+      const knownIds = new Set<string>(
+        (db.prepare('SELECT id FROM tickets').all() as Array<{ id: string }>).map(
+          (row) => row.id
+        )
+      );
+      for (const ticket of normalized) knownIds.add(ticket.id);
+
+      const proposedEdges = normalized.flatMap((ticket) =>
+        ticket.dependsOn.map((dependsOnTicketId) => ({
+          ticketId: ticket.id,
+          dependsOnTicketId,
+        }))
+      );
+      validateDependencyGraph(knownIds, [
+        ...existingEdges.map((edge) => ({
+          ticketId: edge.ticket_id,
+          dependsOnTicketId: edge.depends_on_ticket_id,
+        })),
+        ...proposedEdges,
+      ]);
+
+      for (const edge of proposedEdges) {
+        const dependencyProject = projectByTicket.get(edge.dependsOnTicketId);
+        if (dependencyProject === undefined) {
+          const row = db
+            .prepare('SELECT project_id FROM tickets WHERE id = ?')
+            .get(edge.dependsOnTicketId) as { project_id: string } | undefined;
+          if (row) projectByTicket.set(edge.dependsOnTicketId, row.project_id);
+        }
+        const sourceProject = projectByTicket.get(edge.ticketId);
+        const resolvedDependencyProject = projectByTicket.get(edge.dependsOnTicketId);
+        if (
+          sourceProject === undefined ||
+          resolvedDependencyProject === undefined ||
+          sourceProject !== resolvedDependencyProject
+        ) {
+          throw new Error(
+            `Dependency ${edge.ticketId} -> ${edge.dependsOnTicketId} crosses project boundaries`
+          );
+        }
+      }
+
+      const insertTicket = db.prepare(
+        `INSERT INTO tickets (
+          id, project_id, title, description, priority, risk, status,
+          scope_json, acceptance_criteria_json, verification_json,
+          agent_json, release_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      for (const ticket of normalized) {
+        insertTicket.run(
+          ticket.id,
+          ticket.projectId,
+          ticket.title,
+          ticket.description,
+          ticket.priority,
+          ticket.risk,
+          ticket.status,
+          JSON.stringify(ticket.scope),
+          JSON.stringify(ticket.acceptanceCriteria),
+          JSON.stringify(ticket.verification),
+          JSON.stringify(ticket.agent),
+          JSON.stringify(ticket.release),
+          ticket.createdAt,
+          ticket.updatedAt
+        );
+      }
+
+      const insertDependency = db.prepare(
+        `INSERT INTO ticket_dependencies (ticket_id, depends_on_ticket_id, created_at)
+         VALUES (?, ?, ?)`
+      );
+      for (const ticket of normalized) {
+        for (const dependencyId of ticket.dependsOn) {
+          insertDependency.run(ticket.id, dependencyId, ticket.createdAt);
+        }
+      }
+
+      return normalized;
     }
-
-    db.prepare(
-      `INSERT INTO tickets (
-        id, project_id, title, description, priority, risk, status,
-        scope_json, acceptance_criteria_json, verification_json,
-        agent_json, release_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      validated.id,
-      projectId,
-      validated.title,
-      validated.description,
-      validated.priority,
-      validated.risk,
-      validated.status,
-      JSON.stringify(validated.scope),
-      JSON.stringify(validated.acceptanceCriteria),
-      JSON.stringify(validated.verification),
-      JSON.stringify(validated.agent),
-      JSON.stringify(validated.release),
-      createdAt,
-      updatedAt
-    );
-
-    const insertDependency = db.prepare(
-      `INSERT INTO ticket_dependencies (ticket_id, depends_on_ticket_id, created_at)
-       VALUES (?, ?, ?)`
-    );
-    for (const dependencyId of validated.dependsOn) {
-      insertDependency.run(validated.id, dependencyId, createdAt);
-    }
-
-    return { ...validated, projectId, createdAt, updatedAt };
-  }).immediate;
+  ).immediate;
 
   return {
     create(ticket): TicketRecord {
-      return createTicket(ticket);
+      const created = createMany([ticket]);
+      return created[0];
+    },
+    createMany(tickets): readonly TicketRecord[] {
+      return createMany(tickets);
     },
     findById(id): TicketRecord | undefined {
       const row = db.prepare('SELECT * FROM tickets WHERE id = ?').get(id) as
@@ -204,15 +290,10 @@ export function createTicketRepository(db: DbConnection): TicketRepository {
       return { ...rowToTicket(row), dependsOn: loadDependencies(id) };
     },
     findByProjectId(projectId): readonly TicketRecord[] {
-      const rows = db
-        .prepare('SELECT * FROM tickets WHERE project_id = ? ORDER BY created_at')
-        .all(projectId);
-      const tickets = rows.map((row) => rowToTicket(row as Record<string, unknown>));
-      const dependencies = loadDependenciesForTickets(tickets.map((ticket) => ticket.id));
-      return tickets.map((ticket) => ({
-        ...ticket,
-        dependsOn: dependencies.get(ticket.id) ?? [],
-      }));
+      return findTicketsByProjectId(projectId, false);
+    },
+    findApprovedByProjectId(projectId): readonly TicketRecord[] {
+      return findTicketsByProjectId(projectId, true);
     },
     countByProjectId(projectId): number {
       const row = db
@@ -221,6 +302,33 @@ export function createTicketRepository(db: DbConnection): TicketRepository {
       return row.count;
     },
   };
+
+  function findTicketsByProjectId(
+    projectId: string,
+    approvedOnly: boolean
+  ): readonly TicketRecord[] {
+    const rows = approvedOnly
+      ? db
+          .prepare(
+            `SELECT tickets.*
+             FROM tickets
+             INNER JOIN approved_backlog_tickets AS approved
+               ON approved.project_id = tickets.project_id
+              AND approved.ticket_id = tickets.id
+             WHERE tickets.project_id = ?
+             ORDER BY tickets.created_at`
+          )
+          .all(projectId)
+      : db
+          .prepare('SELECT * FROM tickets WHERE project_id = ? ORDER BY created_at')
+          .all(projectId);
+      const tickets = rows.map((row) => rowToTicket(row as Record<string, unknown>));
+      const dependencies = loadDependenciesForTickets(tickets.map((ticket) => ticket.id));
+      return tickets.map((ticket) => ({
+        ...ticket,
+        dependsOn: dependencies.get(ticket.id) ?? [],
+      }));
+  }
 }
 
 export function createTicketDependencyRepository(
@@ -258,7 +366,24 @@ export function createTicketDependencyRepository(
             );
           }
         }
-        assertAcyclicDependencies(db, items);
+        const existingEdges = db
+          .prepare('SELECT ticket_id, depends_on_ticket_id FROM ticket_dependencies')
+          .all() as Array<{ ticket_id: string; depends_on_ticket_id: string }>;
+        const knownIds = new Set<string>(
+          (db.prepare('SELECT id FROM tickets').all() as Array<{ id: string }>).map(
+            (row) => row.id
+          )
+        );
+        validateDependencyGraph(knownIds, [
+          ...existingEdges.map((edge) => ({
+            ticketId: edge.ticket_id,
+            dependsOnTicketId: edge.depends_on_ticket_id,
+          })),
+          ...items.map((item) => ({
+            ticketId: item.ticketId,
+            dependsOnTicketId: item.dependsOnTicketId,
+          })),
+        ]);
         for (const item of items) {
           insert.run(item.ticketId, item.dependsOnTicketId, item.createdAt);
         }
@@ -274,43 +399,6 @@ export function createTicketDependencyRepository(
       return rows.map((row) => rowToDependency(row as Record<string, unknown>));
     },
   };
-}
-
-function assertAcyclicDependencies(
-  db: DbConnection,
-  proposed: readonly TicketDependencyRecord[]
-): void {
-  const existing = db
-    .prepare('SELECT ticket_id, depends_on_ticket_id FROM ticket_dependencies')
-    .all() as Array<{ ticket_id: string; depends_on_ticket_id: string }>;
-  const adjacency = new Map<string, Set<string>>();
-  const addEdge = (ticketId: string, dependencyId: string): void => {
-    if (ticketId === dependencyId) {
-      throw new Error(`Ticket ${ticketId} cannot depend on itself`);
-    }
-    const dependencies = adjacency.get(ticketId) ?? new Set<string>();
-    dependencies.add(dependencyId);
-    adjacency.set(ticketId, dependencies);
-  };
-  for (const edge of existing) addEdge(edge.ticket_id, edge.depends_on_ticket_id);
-  for (const edge of proposed) addEdge(edge.ticketId, edge.dependsOnTicketId);
-
-  const visiting = new Set<string>();
-  const visited = new Set<string>();
-  const visit = (ticketId: string): boolean => {
-    if (visiting.has(ticketId)) return true;
-    if (visited.has(ticketId)) return false;
-    visiting.add(ticketId);
-    for (const dependencyId of adjacency.get(ticketId) ?? []) {
-      if (visit(dependencyId)) return true;
-    }
-    visiting.delete(ticketId);
-    visited.add(ticketId);
-    return false;
-  };
-  for (const ticketId of adjacency.keys()) {
-    if (visit(ticketId)) throw new Error('Ticket dependency graph must remain acyclic');
-  }
 }
 
 export function createRunRepository(db: DbConnection): RunRepository {

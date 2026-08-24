@@ -117,6 +117,8 @@ describe('CLI smoke tests', () => {
       'doctor',
       'init',
       'status',
+      'backlog',
+      'ready',
     ]);
   });
 

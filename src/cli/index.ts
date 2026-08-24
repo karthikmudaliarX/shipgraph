@@ -5,6 +5,8 @@ import { pathToFileURL } from 'node:url';
 import { runDoctor } from './doctor.js';
 import { initProject } from './init.js';
 import { showStatus } from './status.js';
+import { syncBacklogProject, validateBacklogProject } from './backlog.js';
+import { emitReady, showReady } from './ready.js';
 
 export function createProgram(): Command {
   const program = new Command();
@@ -56,7 +58,97 @@ export function createProgram(): Command {
       if (report.error) process.exitCode = 1;
     });
 
+  const backlog = program
+    .command('backlog')
+    .description('Validate and synchronize the approved backlog');
+
+  backlog
+    .command('validate')
+    .description('Validate shipgraph.backlog.yml without changing SQLite')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--file <path>', 'approved backlog path')
+    .option('--path <path>', 'approved backlog path')
+    .option('--json', 'output structured validation as JSON')
+    .action((options: {
+      projectDir?: string;
+      file?: string;
+      path?: string;
+      json?: boolean;
+    }) => {
+      try {
+        const report = validateBacklogProject(
+          options.projectDir ?? process.cwd(),
+          options.file ?? options.path
+        );
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          console.log(
+            `Approved backlog is valid: ${report.tickets} ticket(s), version ${report.version}.`
+          );
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      }
+    });
+
+  backlog
+    .command('sync')
+    .description('Synchronize the approved backlog into SQLite')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--file <path>', 'approved backlog path')
+    .option('--path <path>', 'approved backlog path')
+    .option('--json', 'output structured sync results as JSON')
+    .action((options: {
+      projectDir?: string;
+      file?: string;
+      path?: string;
+      json?: boolean;
+    }) => {
+      try {
+        const report = syncBacklogProject(
+          options.projectDir ?? process.cwd(),
+          options.file ?? options.path
+        );
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          console.log('ShipGraph backlog synchronized:');
+          console.log(`  new: ${report.new}`);
+          console.log(`  unchanged: ${report.unchanged}`);
+          console.log(`  eligible: ${report.eligible}`);
+          console.log(`  queued: ${report.queued}`);
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      }
+    });
+
+  program
+    .command('ready')
+    .description('Show deterministic tickets that could be dispatched')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--json', 'output structured ready queue as JSON')
+    .action((options: { projectDir?: string; json?: boolean }) => {
+      try {
+        const report = showReady(options.projectDir ?? process.cwd());
+        emitReady(report, options.json);
+      } catch (error) {
+        emitCommandError(error, options.json);
+      }
+    });
+
   return program;
+}
+
+function emitCommandError(error: unknown, json = false): void {
+  const message = error instanceof Error ? error.message : String(error);
+  if (json) {
+    console.log(JSON.stringify({ error: message }, null, 2));
+  } else {
+    console.error(message);
+  }
+  process.exitCode = 1;
 }
 
 function readPackageVersion(): string {

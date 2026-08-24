@@ -55,6 +55,92 @@ describe('SQLite persistence', () => {
     expect(() => migrate(db)).toThrow(/not supported/);
   });
 
+  it('upgrades a version-one database without losing existing data', () => {
+    const legacyPath = join(databaseDir, 'legacy.db');
+    const legacy = createDatabase(legacyPath);
+    legacy.exec(MIGRATIONS[0].up);
+    legacy
+      .prepare(
+        'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)'
+      )
+      .run(1, MIGRATIONS[0].name, new Date().toISOString());
+    createProjectRepository(legacy).create({
+      id: 'legacy-project',
+      name: 'test',
+      repository: 'owner/repo',
+      defaultBranch: 'main',
+      config: TEST_CONFIG,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    legacy.close();
+
+    const upgraded = createDatabase(legacyPath);
+    migrate(upgraded);
+    expect(upgraded.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
+      { version: 1 },
+      { version: 2 },
+      { version: 3 },
+    ]);
+    expect(createProjectRepository(upgraded).findById('legacy-project')?.name).toBe('test');
+    migrate(upgraded);
+    expect(upgraded.prepare('SELECT COUNT(*) AS count FROM backlog_syncs').get()).toEqual({ count: 0 });
+    expect(upgraded.prepare('SELECT COUNT(*) AS count FROM approved_backlog_tickets').get()).toEqual({ count: 0 });
+    upgraded.close();
+  });
+
+  it('rejects direct creation of a ticket that skips the queued approval boundary', () => {
+    const projectId = randomUUID();
+    createProjectRepository(db).create({
+      id: projectId,
+      name: 'test',
+      repository: 'owner/repo',
+      defaultBranch: 'main',
+      config: TEST_CONFIG,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    expect(() =>
+      createTicketRepository(db).create({
+        id: 'UNAPPROVED-001',
+        projectId,
+        title: 'Unapproved',
+        description: 'Must not skip approval.',
+        priority: 'high',
+        risk: 'medium',
+        status: 'ELIGIBLE',
+        scope: { allowedPaths: [], forbiddenPaths: [] },
+        acceptanceCriteria: [],
+        verification: { commands: [] },
+        agent: {},
+        release: {},
+        dependsOn: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+    ).toThrow(/must start in QUEUED/);
+
+    createTicketRepository(db).create({
+      id: 'UNAPPROVED-002',
+      projectId,
+      title: 'Queued suggestion',
+      description: 'Still outside the approved backlog.',
+      priority: 'high',
+      risk: 'medium',
+      status: 'QUEUED',
+      scope: { allowedPaths: [], forbiddenPaths: [] },
+      acceptanceCriteria: [],
+      verification: { commands: [] },
+      agent: {},
+      release: {},
+      dependsOn: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    db.prepare('UPDATE tickets SET status = ? WHERE id = ?').run('ELIGIBLE', 'UNAPPROVED-002');
+    expect(createTicketRepository(db).findApprovedByProjectId(projectId)).toHaveLength(0);
+  });
+
   it('enforces append-only events at the database boundary', () => {
     const projectId = randomUUID();
     createProjectRepository(db).create({
