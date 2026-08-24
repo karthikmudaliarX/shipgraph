@@ -45,6 +45,7 @@ function sanitizedEnv(): NodeJS.ProcessEnv {
   const env: Record<string, string> = {
     GIT_NO_REPLACE_OBJECTS: '1',
     GIT_FSMONITOR_DAEMON: '',
+    GIT_OPTIONAL_LOCKS: '0',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_SYSTEM: '/dev/null',
     GIT_CONFIG_GLOBAL: '/dev/null',

@@ -122,16 +122,36 @@ function canonicalizeRootPath(candidate: string): string {
 }
 
 /**
+ * Fail closed when any ancestor of the path (up to the filesystem root) is
+ * a symlink: ShipGraph-owned locations must be real directories, so a
+ * symlinked ~/.shipgraph or similar cannot silently redirect writes.
+ */
+function assertNoSymlinkAncestors(path: string): void {
+  let current = dirname(path);
+  const stop = dirname(current);
+  while (current !== stop) {
+    const stats = tryLstatSync(current);
+    if (stats?.isSymbolicLink()) {
+      throw new Error(
+        `Refusing to use symbolic link for ShipGraph workspace ancestor: ${current}`
+      );
+    }
+    current = dirname(current);
+  }
+}
+
+/**
  * Resolve the ShipGraph-owned worktree root. The default lives outside any
  * repository at ~/.shipgraph/worktrees. Tests inject a temporary root.
  *
  * When `outsideOf` is provided, containment is enforced against the
  * canonical path BEFORE any directory is created, so a failed attempt can
  * never leave new directories inside the source repository — even when the
- * candidate path travels through symlinks.
+ * candidate path travels through symlinks. Ancestor symlinks fail closed.
  */
 export function resolveWorktreeRoot(override?: string, outsideOf?: string): string {
   const candidate = override ?? join(homedir(), '.shipgraph', 'worktrees');
+  assertNoSymlinkAncestors(candidate);
   const existing = tryLstatSync(candidate);
   if (existing?.isSymbolicLink()) {
     throw new Error(`Refusing to use symbolic link for ShipGraph worktree root: ${candidate}`);
@@ -665,6 +685,13 @@ async function verifyReadyWorkspace(
   }
   if (live.clean !== true) {
     throw new Error(`New worktree is not clean: ${row.worktreePath}`);
+  }
+  // READY workspaces are handed to future agents: even ignored or hidden
+  // content must be absent, matching removal-grade strictness.
+  if (!(await isStrictlyClean(runner, row.worktreePath))) {
+    throw new Error(
+      `New worktree contains untracked or ignored files: ${row.worktreePath}`
+    );
   }
 }
 
