@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { isAbsolute, relative, sep } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { realpathSync } from 'node:fs';
 import {
   ensureOwnedDirectoryChain,
@@ -130,15 +130,17 @@ type ProjectContext = {
 
 /**
  * Ticket worktrees must live outside the source repository. Enforce mutual
- * non-containment so neither a caller-supplied root inside the checkout nor
- * the repository nested under a root is possible.
+ * non-containment (including exact equality) so neither a caller-supplied
+ * root inside the checkout nor the repository nested under a root is
+ * possible.
  */
 function assertRootOutsideProject(worktreeRoot: string, canonicalProjectDir: string): void {
-  const rootFromProject = relative(canonicalProjectDir, worktreeRoot);
-  const projectFromRoot = relative(worktreeRoot, canonicalProjectDir);
-  const escapes = (candidate: string): boolean =>
-    candidate === '' || candidate === '..' || candidate.startsWith(`..${sep}`) || isAbsolute(candidate);
-  if (!escapes(rootFromProject) || !escapes(projectFromRoot)) {
+  const contained = (parent: string, child: string): boolean => {
+    if (parent === child) return true;
+    const childFromParent = relative(parent, child);
+    return !childFromParent.startsWith('..') && !isAbsolute(childFromParent);
+  };
+  if (contained(canonicalProjectDir, worktreeRoot) || contained(worktreeRoot, canonicalProjectDir)) {
     throw new Error(
       `ShipGraph worktree root ${worktreeRoot} must be outside the source repository ` +
         `${canonicalProjectDir}`
@@ -235,17 +237,21 @@ function assertDispatchableAndClaimCapacityInTx(
       `Ticket ${ticketIdInput} is not currently dependency-valid; workspace was not reserved`
     );
   }
-  // Capacity includes workspaces already claimed by concurrent/reserved
-  // creations whose ticket transitions have not landed yet. The reserved
-  // ticket itself is still ELIGIBLE and therefore not counted as active.
+  // Capacity accounting without double counting:
+  // - activeCapacityStates: persisted ticket states that consume CORE-002
+  //   capacity (PLANNING and beyond).
+  // - claimedNotTransitioned: workspaces reserved (CREATING/READY/NEEDS_HUMAN)
+  //   whose tickets have NOT yet transitioned (still ELIGIBLE/QUEUED) — these
+  //   are claims held by concurrent or crashed creators.
+  const activeCapacityPlaceholders = ACTIVE_CAPACITY_STATES.map(() => '?').join(', ');
   const claimedRow = options.db
     .prepare(
       `SELECT COUNT(*) AS n
        FROM workspaces w
-       JOIN tickets t ON t.id = w.ticket_id
+       LEFT JOIN tickets t ON t.id = w.ticket_id
        WHERE w.project_id = ?
          AND w.status IN ('CREATING', 'READY', 'NEEDS_HUMAN')
-         AND t.status IN (${ACTIVE_CAPACITY_STATES.map(() => '?').join(', ')})`
+         AND (t.id IS NULL OR t.status IS NULL OR t.status NOT IN (${activeCapacityPlaceholders}))`
     )
     .get(context.projectId, ...ACTIVE_CAPACITY_STATES) as { n: number };
   const effectiveAvailable =
@@ -456,18 +462,22 @@ function markWorkspaceStatus(
  * reservation is still CREATING and only after our own `git worktree add`
  * succeeded, so the resources were provably created by this process.
  */
+/**
+ * Roll back freshly created resources after a failed creation.
+ *
+ * Exclusive cleanup rights are claimed with a compare-and-set transition
+ * (CREATING → FAILED) inside SQLite. Only the process that wins that CAS may
+ * delete: a concurrent invocation that finalized the reservation to READY
+ * first makes the CAS fail, so its resources are never touched by the loser.
+ * The proof runs BEFORE the claim; deletion follows the winning claim, at
+ * which point no other process can finalize anymore.
+ */
 async function compensateCreation(
   options: WorkspaceServiceOptions,
   runner: GitRunner,
   row: WorkspaceRecord,
   reason: string
 ): Promise<void> {
-  const current = createWorkspaceRepository(options.db).findById(row.id);
-  if (current?.status !== 'CREATING') {
-    // Another invocation finalized (or claimed) this reservation in the
-    // meantime; its resources are no longer ours to delete.
-    return;
-  }
   const provablyOurs = await creationBelongsToReservation(runner, row);
   if (!provablyOurs) {
     markWorkspaceStatus(
@@ -479,14 +489,20 @@ async function compensateCreation(
     );
     return;
   }
-  // Re-prove ownership immediately before the destructive command to keep
-  // the window between proof and deletion as small as possible.
-  if (!(await creationBelongsToReservation(runner, row))) return;
-  await removeWorktree(runner, row.sourceRepositoryPath, row.worktreePath);
-  // The branch points exactly at baseSha (-d refuses anything unmerged),
-  // so deleting it loses no work.
-  await deleteBranch(runner, row.sourceRepositoryPath, row.branchName);
-  markWorkspaceStatus(options, row, 'FAILED', reason);
+  // Claim exclusive cleanup rights; losing means another process owns the
+  // reservation now and this process must not delete anything.
+  const claimed = markWorkspaceStatus(options, row, 'FAILED', reason);
+  if (!claimed) return;
+  try {
+    await removeWorktree(runner, row.sourceRepositoryPath, row.worktreePath);
+    // The branch points exactly at baseSha (-d refuses anything unmerged),
+    // so deleting it loses no work.
+    await deleteBranch(runner, row.sourceRepositoryPath, row.branchName);
+  } catch (cleanupError) {
+    // The reservation is already FAILED; preserved leftovers are surfaced as
+    // DRIFTED by `workspace inspect` for human resolution.
+    void cleanupError;
+  }
 }
 
 async function creationBelongsToReservation(
@@ -706,6 +722,12 @@ export async function createWorkspace(
   if (!(await isBranchNameValid(runner, sourceRepositoryPath, branchName))) {
     throw new Error(`Derived branch name failed git check-ref-format: ${branchName}`);
   }
+  // Containment is enforced BEFORE the root is created so a failed attempt
+  // can never write inside the source repository.
+  assertRootOutsideProject(
+    options.worktreeRoot ?? join(homedir(), '.shipgraph', 'worktrees'),
+    context.canonicalProjectDir
+  );
   const worktreeRoot = resolveWorktreeRoot(options.worktreeRoot);
   assertRootOutsideProject(worktreeRoot, context.canonicalProjectDir);
   // Verify/create the project segment of the owned chain without ever
@@ -925,6 +947,10 @@ export async function removeWorkspace(
   }
   // The recorded path must be exactly the deterministic location under the
   // current ShipGraph worktree root, with no symlink components anywhere.
+  assertRootOutsideProject(
+    options.worktreeRoot ?? join(homedir(), '.shipgraph', 'worktrees'),
+    context.canonicalProjectDir
+  );
   const worktreeRoot = resolveWorktreeRoot(options.worktreeRoot);
   assertRootOutsideProject(worktreeRoot, context.canonicalProjectDir);
   const expectedPath = deriveWorktreePath(worktreeRoot, row.projectId, row.ticketId);

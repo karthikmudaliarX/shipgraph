@@ -349,6 +349,24 @@ describe('WORK-001 isolated worktree lifecycle', () => {
     }
   });
 
+  it('counts un-transitioned CREATING reservations against capacity', async () => {
+    harness = setupProject(1, [ticket('CAP-1'), ticket('CAP-2')]);
+    // CAP-1's reservation stays CREATING (crash before finalize), so its
+    // ticket is still ELIGIBLE — the claimed slot must still count.
+    await expect(
+      createWorkspace(harness.options, 'CAP-1', { crashAfterReserve: true })
+    ).rejects.toThrow(/Simulated crash/);
+
+    await expect(createWorkspace(harness.options, 'CAP-2')).rejects.toThrow(
+      /Dispatch capacity is full/
+    );
+    const projectId = findProjectId(harness.options.db);
+    expect(
+      createWorkspaceRepository(harness.options.db).findActiveByTicket(projectId, 'CAP-2')
+    ).toBeUndefined();
+    expect(existsSync(join(harness.worktreeRoot, projectId, 'CAP-2'))).toBe(false);
+  });
+
   it('fails closed on capacity without creating any resources', async () => {
     harness = setupProject(1, [ticket('CAP-1'), ticket('CAP-2')]);
     await createWorkspace(harness.options, 'CAP-1');

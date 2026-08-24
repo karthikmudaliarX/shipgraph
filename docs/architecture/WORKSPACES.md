@@ -141,6 +141,14 @@ them narrow and documented instead of pretending they are atomic:
   paths, and workspace uniqueness holds per SQLite database. Replacing a
   repository at the same path, or using separate databases against one
   repository, is outside what WORK-001 can distinguish.
+- **Checkout filters run with user privileges.** `git worktree add` performs a
+  normal checkout: repository-defined smudge/clean filters (e.g. Git LFS)
+  execute as they would for any git operation in that repository. ShipGraph
+  disables hooks and strips environment overrides but does not alter filter
+  configuration.
+- **Removal leaves the ticket PLANNING.** Removing a workspace does not roll
+  back the ticket state machine; capacity stays consumed until an operator or
+  a later ticket explicitly resolves the state.
 
 ## CLI
 

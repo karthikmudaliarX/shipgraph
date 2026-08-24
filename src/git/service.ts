@@ -36,6 +36,11 @@ const GIT_ENV_OVERRIDES = [
   'GIT_ALTERNATE_OBJECT_DIRECTORIES',
   'GIT_NAMESPACE',
   'GIT_CEILING_DIRECTORIES',
+  'GIT_COMMON_DIR',
+  'GIT_CONFIG_PARAMETERS',
+  'GIT_CONFIG_COUNT',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_CONFIG_GLOBAL',
 ] as const;
 
 function sanitizedEnv(): NodeJS.ProcessEnv {
@@ -227,8 +232,7 @@ export type WorktreeLiveState = {
   registered: boolean;
 };
 
-/**
- * Inspect the live state of one recorded worktree without mutating anything.
+/** Inspect the live state of one recorded worktree without mutating anything.
  * Returns registered=false when the path is not a registered worktree of the
  * expected repository.
  */
@@ -243,6 +247,7 @@ export async function inspectWorktreeState(
     return { registered: false };
   }
   const status = await runGit(runner, expectedPath, ['status', '--porcelain']);
+  const ambiguousFlags = await hasAmbiguousIndexFlags(runner, expectedPath);
   const symbolicRef = await runGit(runner, expectedPath, [
     'symbolic-ref',
     '--short',
@@ -252,7 +257,24 @@ export async function inspectWorktreeState(
     head: entry.head,
     branch:
       symbolicRef.exitCode === 0 ? `refs/heads/${symbolicRef.stdout.trim()}` : undefined,
-    clean: status.exitCode === 0 && status.stdout.trim() === '',
+    clean: status.exitCode === 0 && status.stdout.trim() === '' && !ambiguousFlags,
     registered: true,
   };
+}
+
+/**
+ * Detect tracked files marked assume-unchanged/skip-worktree: `git status`
+ * reports them as clean even when modified, so a "clean" answer requires
+ * that no such entries exist.
+ */
+async function hasAmbiguousIndexFlags(
+  runner: GitRunner,
+  worktreePath: string
+): Promise<boolean> {
+  const result = await runGit(runner, worktreePath, ['ls-files', '-v']);
+  if (result.exitCode !== 0) return false;
+  // Lowercase status letters mark assume-unchanged (h) / skip-worktree (s).
+  return result.stdout
+    .split('\n')
+    .some((line) => line.length > 0 && line[0] >= 'a' && line[0] <= 'z');
 }
