@@ -145,11 +145,23 @@ pnpm build
 
 ## Roadmap
 
-Planned successor tickets (not yet implemented):
+Shipped:
 
-- **WORK-001** — Isolated git worktree lifecycle
+- **CORE-001 ✅** — Project foundation and safe state boundary
+- **CORE-002 ✅** — Persistent backlog DAG and eligibility scheduler
+
+Active in this PR:
+
+- **WORK-001** — Safe isolated git worktree lifecycle
+  ([design](docs/architecture/WORKSPACES.md))
+
+Next up:
+
 - **AGENT-001** — OpenCode execution adapter
 - **MODEL-001** — Dynamic model routing and compute-aware execution policy
+
+Planned successor tickets (not yet implemented):
+
 - **GH-001** — GitHub PR and CI integration
 - **REV-001** — Independent correctness and adversarial review
 - **REPAIR-001** — Automated review/CI repair loop

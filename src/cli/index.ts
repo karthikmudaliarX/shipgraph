@@ -1,12 +1,30 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { runDoctor } from './doctor.js';
 import { initProject } from './init.js';
 import { showStatus } from './status.js';
 import { syncBacklogProject, validateBacklogProject } from './backlog.js';
 import { emitReady, showReady } from './ready.js';
+import { assertSafeShipgraphPaths } from '../utils/paths.js';
+import { openAndMigrate, type DbConnection } from '../persistence/db.js';
+import {
+  runWorkspaceCreate,
+  runWorkspaceInspect,
+  runWorkspaceList,
+  runWorkspaceRemove,
+  workspaceServiceOptions,
+} from './workspace.js';
+
+/** Open the project database for workspace commands (fail closed when absent). */
+function openInitializedDatabase(projectDir: string): DbConnection {
+  const paths = assertSafeShipgraphPaths(projectDir);
+  if (!existsSync(paths.dbPath)) {
+    throw new Error('No initialized ShipGraph project found. Run `shipgraph init` first.');
+  }
+  return openAndMigrate(paths.dbPath);
+}
 
 export function createProgram(): Command {
   const program = new Command();
@@ -135,6 +153,130 @@ export function createProgram(): Command {
         emitReady(report, options.json);
       } catch (error) {
         emitCommandError(error, options.json);
+      }
+    });
+
+  const workspace = program
+    .command('workspace')
+    .description('Manage isolated Git workspaces for eligible tickets');
+
+  workspace
+    .command('create <ticket-id>')
+    .description('Reserve an isolated worktree for an ELIGIBLE ticket')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--json', 'output structured result as JSON')
+    .action(async (ticketId: string, options: { projectDir?: string; json?: boolean }) => {
+      let db: DbConnection | undefined;
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        db = openInitializedDatabase(projectDir);
+        const report = await runWorkspaceCreate(
+          workspaceServiceOptions(db, projectDir),
+          ticketId
+        );
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          console.log(report.created || report.recovered ? 'Workspace ready' : 'Workspace ready');
+          console.log('');
+          const ws = report.workspace as Record<string, string>;
+          console.log(`Ticket: ${ws.ticketId}`);
+          console.log(`Branch: ${ws.branchName}`);
+          console.log(`Base: ${ws.baseSha}`);
+          console.log(`Path: ${ws.worktreePath}`);
+          console.log(`State: ${(report.ticket as Record<string, string>).state}`);
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
+        db?.close();
+      }
+    });
+
+  workspace
+    .command('inspect <ticket-id>')
+    .description('Show recorded and live state of a ticket workspace (read-only)')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--json', 'output structured inspection as JSON')
+    .action(async (ticketId: string, options: { projectDir?: string; json?: boolean }) => {
+      let db: DbConnection | undefined;
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        db = openInitializedDatabase(projectDir);
+        const report = await runWorkspaceInspect(workspaceServiceOptions(db, projectDir), ticketId);
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          const recorded = report.recorded as Record<string, string>;
+          const live = report.live as Record<string, unknown>;
+          console.log(`Ticket: ${ticketId}`);
+          console.log(`Status: ${recorded.status}`);
+          console.log(`Branch: ${recorded.branchName}`);
+          console.log(`Base: ${recorded.baseSha}`);
+          console.log(`Path: ${recorded.worktreePath}`);
+          console.log(`Live HEAD: ${live.headSha ?? '<missing>'}`);
+          console.log(`Live branch: ${live.branch ?? '<none>'}`);
+          console.log(`Clean: ${live.clean === true ? 'yes' : 'no'}`);
+          console.log(`Health: ${report.health}`);
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
+        db?.close();
+      }
+    });
+
+  workspace
+    .command('list')
+    .description('List ShipGraph workspaces for the current project')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--json', 'output structured list as JSON')
+    .action((options: { projectDir?: string; json?: boolean }) => {
+      let db: DbConnection | undefined;
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        db = openInitializedDatabase(projectDir);
+        const report = runWorkspaceList(workspaceServiceOptions(db, projectDir));
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          const workspaces = report.workspaces as Array<Record<string, string>>;
+          if (workspaces.length === 0) {
+            console.log('No ShipGraph workspaces for this project.');
+            return;
+          }
+          for (const entry of workspaces) {
+            console.log(`${entry.ticketId}  ${entry.status}  ${entry.branchName}  ${entry.worktreePath}`);
+          }
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
+        db?.close();
+      }
+    });
+
+  workspace
+    .command('remove <ticket-id>')
+    .description('Remove a clean READY workspace (dirty worktrees are refused)')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--json', 'output structured result as JSON')
+    .action(async (ticketId: string, options: { projectDir?: string; json?: boolean }) => {
+      let db: DbConnection | undefined;
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        db = openInitializedDatabase(projectDir);
+        const report = await runWorkspaceRemove(workspaceServiceOptions(db, projectDir), ticketId);
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          console.log(`Workspace removed: ${report.ticketId}`);
+          console.log(`Branch ${report.branchRetained ? 'retained' : 'deleted'}`);
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
+        db?.close();
       }
     });
 

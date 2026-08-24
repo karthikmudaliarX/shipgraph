@@ -12,6 +12,10 @@ export const EVENT_TYPES = [
   'ticket.suggested',
   'run.created',
   'run.completed',
+  'workspace.creating',
+  'workspace.ready',
+  'workspace.removed',
+  'workspace.failed',
 ] as const;
 
 export const EventType = {
@@ -21,6 +25,10 @@ export const EventType = {
   TICKET_SUGGESTED: EVENT_TYPES[3],
   RUN_CREATED: EVENT_TYPES[4],
   RUN_COMPLETED: EVENT_TYPES[5],
+  WORKSPACE_CREATING: EVENT_TYPES[6],
+  WORKSPACE_READY: EVENT_TYPES[7],
+  WORKSPACE_REMOVED: EVENT_TYPES[8],
+  WORKSPACE_FAILED: EVENT_TYPES[9],
 } as const;
 
 export type EventTypeValue = (typeof EVENT_TYPES)[number];
@@ -71,6 +79,34 @@ export const runCompletedPayloadSchema = z.object({
   completedAt: timestampSchema,
 }).strict();
 
+const workspaceIdentityShape = {
+  workspaceId: identitySchema,
+  ticketId: identitySchema,
+  baseSha: z.string().min(1),
+  branchName: z.string().min(1),
+  worktreePath: z.string().min(1),
+};
+
+export const workspaceCreatingPayloadSchema = z.object({
+  ...workspaceIdentityShape,
+}).strict();
+
+export const workspaceReadyPayloadSchema = z.object({
+  ...workspaceIdentityShape,
+}).strict();
+
+export const workspaceRemovedPayloadSchema = z.object({
+  ...workspaceIdentityShape,
+  reason: z.string().min(1).optional(),
+  branchRetained: z.boolean().optional(),
+}).strict();
+
+export const workspaceFailedPayloadSchema = z.object({
+  ...workspaceIdentityShape,
+  reason: z.string().min(1),
+  escalatedToHuman: z.boolean().optional(),
+}).strict();
+
 const baseEnvelopeShape = {
   id: z.string().uuid(),
   sequence: z.number().int().positive(),
@@ -114,6 +150,30 @@ const eventUnionSchema = z.discriminatedUnion('type', [
     runId: identitySchema,
     type: z.literal(EventType.RUN_COMPLETED),
     payload: runCompletedPayloadSchema,
+  }).strict(),
+  z.object({
+    ...baseEnvelopeShape,
+    ticketId: identitySchema,
+    type: z.literal(EventType.WORKSPACE_CREATING),
+    payload: workspaceCreatingPayloadSchema,
+  }).strict(),
+  z.object({
+    ...baseEnvelopeShape,
+    ticketId: identitySchema,
+    type: z.literal(EventType.WORKSPACE_READY),
+    payload: workspaceReadyPayloadSchema,
+  }).strict(),
+  z.object({
+    ...baseEnvelopeShape,
+    ticketId: identitySchema,
+    type: z.literal(EventType.WORKSPACE_REMOVED),
+    payload: workspaceRemovedPayloadSchema,
+  }).strict(),
+  z.object({
+    ...baseEnvelopeShape,
+    ticketId: identitySchema,
+    type: z.literal(EventType.WORKSPACE_FAILED),
+    payload: workspaceFailedPayloadSchema,
   }).strict(),
 ]);
 
@@ -161,6 +221,10 @@ export type TicketStateChangedPayload = z.infer<typeof ticketStateChangedPayload
 export type TicketSuggestedPayload = z.infer<typeof ticketSuggestedPayloadSchema>;
 export type RunCreatedPayload = z.infer<typeof runCreatedPayloadSchema>;
 export type RunCompletedPayload = z.infer<typeof runCompletedPayloadSchema>;
+export type WorkspaceCreatingPayload = z.infer<typeof workspaceCreatingPayloadSchema>;
+export type WorkspaceReadyPayload = z.infer<typeof workspaceReadyPayloadSchema>;
+export type WorkspaceRemovedPayload = z.infer<typeof workspaceRemovedPayloadSchema>;
+export type WorkspaceFailedPayload = z.infer<typeof workspaceFailedPayloadSchema>;
 
 export function isValidStateValue(value: string): value is TicketStateValue {
   return ticketStateSchema.safeParse(value).success;
