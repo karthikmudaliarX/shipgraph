@@ -24,6 +24,7 @@ export type ProviderSnapshotPersistence = {
 export type RoutingReservationLookup = {
   decision: ModelRoutingDecision;
   hasReservation: boolean;
+  reservationStatus?: 'active' | 'released';
   runId?: string;
 };
 
@@ -389,17 +390,23 @@ export function createModelRepository(db: DbConnection): ModelRepository {
         }
         const existingReservationRow = db
           .prepare(
-            `SELECT routing_decision_id, run_id FROM provider_capacity_reservations
+            `SELECT routing_decision_id, run_id, status FROM provider_capacity_reservations
              WHERE project_id = ? AND request_id = ?`
           )
           .get(parsed.projectId, parsed.requestId) as {
             routing_decision_id: string;
             run_id: string | null;
+            status: 'active' | 'released';
           } | undefined;
         if (existingReservationRow !== undefined) {
           if (existingReservationRow.run_id !== parsedRunId) {
             throw new Error(
               `Routing request ${parsed.requestId} is already reserved by another durable run`
+            );
+          }
+          if (existingReservationRow.status !== 'active') {
+            throw new Error(
+              `Routing request ${parsed.requestId} has a released capacity reservation; use a new request ID to retry`
             );
           }
           const existingDecisionRow = db
@@ -527,7 +534,8 @@ export function createModelRepository(db: DbConnection): ModelRepository {
       .prepare(
         `SELECT decisions.*,
                 reservations.run_id,
-                reservations.routing_decision_id AS reservation_id
+                reservations.routing_decision_id AS reservation_id,
+                reservations.status AS reservation_status
          FROM routing_decisions AS decisions
          LEFT JOIN provider_capacity_reservations AS reservations
            ON reservations.routing_decision_id = decisions.id
@@ -554,7 +562,8 @@ export function createModelRepository(db: DbConnection): ModelRepository {
       .prepare(
         `SELECT decisions.*,
                 reservations.run_id,
-                reservations.routing_decision_id AS reservation_id
+                reservations.routing_decision_id AS reservation_id,
+                reservations.status AS reservation_status
          FROM routing_decisions AS decisions
          INNER JOIN provider_capacity_reservations AS reservations
            ON reservations.routing_decision_id = decisions.id
@@ -580,6 +589,9 @@ export function createModelRepository(db: DbConnection): ModelRepository {
     return {
       decision: rowToRoutingDecision(row),
       hasReservation: row.reservation_id !== null && row.reservation_id !== undefined,
+      ...(row.reservation_status === null || row.reservation_status === undefined
+        ? {}
+        : { reservationStatus: parseReservationStatus(row.reservation_status) }),
       ...(row.run_id === null || row.run_id === undefined
         ? {}
         : { runId: validateRunId(row.run_id) }),
@@ -754,6 +766,13 @@ export function createModelRepository(db: DbConnection): ModelRepository {
       throw new Error('Routing run ID is invalid');
     }
     return runId;
+  }
+
+  function parseReservationStatus(value: unknown): 'active' | 'released' {
+    if (value !== 'active' && value !== 'released') {
+      throw new Error('Routing reservation has an invalid status');
+    }
+    return value;
   }
 }
 

@@ -68,7 +68,8 @@ its reason, and atomically reserves the selected provider's known capacity when
 the caller supplies a durable execution run. A route without a run ID is a
 non-persistent decision preview and does not claim provider capacity.
 When no separate request ID is supplied, the durable run ID is the stable
-replay key for that reservation.
+replay key for that reservation until it is finalized; a new attempt after
+finalization must use a new request ID.
 The global ticket count in that envelope is a Scheduler-owned snapshot; MODEL-001
 does not claim or mutate global ticket capacity.
 Review routing prefers a different provider family from the implementation when

@@ -315,6 +315,9 @@ describe('MODEL-001 service', () => {
       routingDecisionId: first.id,
     });
     expect(service.listHealth()[0]?.activeRuns).toBe(0);
+    await expect(service.route(request)).rejects.toThrow(/released capacity reservation/);
+    expect(service.listRoutingDecisions()).toHaveLength(1);
+    expect(service.listHealth()[0]?.activeRuns).toBe(0);
   });
 
   it('keeps previews non-persistent so the same request can become execution-bound', async () => {

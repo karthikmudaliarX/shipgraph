@@ -142,7 +142,8 @@ shipgraph providers refresh --json
 
 # Preview a route; --run-id <run-id> binds it to a durable execution reservation
 # Retries without --request-id use the durable run ID as their stable key
-shipgraph providers route implementation --risk medium --mode balanced --json
+shipgraph providers route implementation --risk medium --mode balanced --run-id <run-id> --json
+# After usage finalizes that reservation, use a new request ID for a new attempt.
 
 # Inspect persisted provider health and discovered models
 shipgraph providers list --json

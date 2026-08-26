@@ -96,6 +96,11 @@ export class ModelRoutingService {
       : this.repository.findRoutingDecisionByRequest(this.options.projectId, request.requestId);
     if (existing !== undefined) {
       const requestKey = request.requestId ?? request.runId ?? existing.decision.requestId;
+      if (existing.reservationStatus === 'released') {
+        throw new Error(
+          `Routing request ${requestKey} has a released capacity reservation; use a new request ID to retry`
+        );
+      }
       if (existing.hasReservation && existing.runId === undefined) {
         throw new Error(
           `Routing request ${requestKey} has an unbound capacity reservation; refusing replay`
