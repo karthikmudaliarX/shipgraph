@@ -37,18 +37,35 @@ Capabilities:
 - `review` — review a change for correctness or adversarial concerns.
 - `repair` — fix a change after review feedback.
 
-Current provider:
+Current execution provider:
 
 - OpenCode (AGENT-001)
 
-Future providers:
+Future execution providers:
 
 - Codex
 - ACP (Agent Client Protocol)
 
-KAR-6 owns provider registries, discovery, health, usage accounting and model
-routing. AGENT-001 intentionally accepts an explicit provider/model and does
-not select one automatically.
+MODEL-001 adds a separate metadata boundary for the paid engineering pools:
+OpenCode Go, Codex, Grok and Gemini. `ModelProviderAdapter` implementations
+capability-probe their local/provider surface and may expose a current model
+catalog. Catalog discovery uses provider commands or machine-readable output;
+it never asks a model to describe itself and never embeds a list of unstable
+model names. A missing quota, token count or cost is stored as `unknown`, not
+estimated.
+
+`ProviderRegistry` persists the latest probe/catalog snapshot and
+`ProviderHealth` state. `ModelRouter` receives only an explicit execution
+envelope (Eco, Balanced or Max plus the caller's budget/concurrency values),
+selects a discovered usable model for implementation, review or repair, and
+persists its reason. Review routing prefers a different provider family from
+the implementation when one is available. `UsageLedger` is append-only, accepts
+only durable run IDs from the current project, and records
+per-run/provider/model telemetry without raw provider output or credentials.
+
+The existing AGENT-001 execution command still accepts an explicit provider and
+model. MODEL-001 does not dispatch Linear work or turn the metadata adapters
+into post-KAR-6 PR, CI, merge or scheduler automation.
 
 ## GitHostAdapter
 

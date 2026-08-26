@@ -89,9 +89,10 @@ WORK-001 shipped:
 - Persistent, provenance-checked isolated Git worktrees
 - Deterministic workspace lifecycle and fail-closed cleanup
 
-AGENT-001 (this PR) adds one bounded provider execution in an already verified
-workspace. It does not choose work, select models, create pull requests, review
-changes, or merge code.
+AGENT-001 shipped one bounded provider execution in an already verified
+workspace. MODEL-001 (this PR) adds deterministic provider discovery, health,
+usage telemetry and model routing. Neither ticket chooses work, creates pull
+requests, reviews changes, or merges code.
 
 ## CLI examples
 
@@ -127,7 +128,16 @@ shipgraph ready
 shipgraph ready --json
 
 # Execute one explicitly supplied task with the OpenCode adapter
-shipgraph agent run AG-001 --model openai/gpt-5 --instructions "Implement the approved task"
+shipgraph agent run AG-001 --model <discovered-provider/model> --instructions "Implement the approved task"
+
+# Refresh capability-probed provider and model metadata
+shipgraph providers refresh --json
+
+# Choose a provider/model for one explicitly supplied engineering step
+shipgraph providers route implementation --risk medium --mode balanced --json
+
+# Inspect persisted provider health and discovered models
+shipgraph providers list --json
 
 # Inspect durable execution state
 shipgraph agent inspect <run-id> --json
@@ -137,6 +147,12 @@ shipgraph agent list --json
 `init` never persists the template's empty identity. Once a valid configuration
 has initialized the database, both `init` and `status` fail closed if the file's
 identity or validated configuration drifts from the persisted project.
+
+Provider settings identify executable and catalog surfaces, not model names.
+OpenCode and Codex have conservative command defaults; configure a provider's
+machine-readable `catalogArgs` when its surface is available, and leave a
+provider disabled when it is not. Unsupported quota, token and cost values stay
+`unknown`.
 
 ## Installation
 
@@ -163,15 +179,16 @@ Shipped:
 - **CORE-001 ✅** — Project foundation and safe state boundary
 - **CORE-002 ✅** — Persistent backlog DAG and eligibility scheduler
 - **WORK-001 ✅** — Safe isolated git worktree lifecycle
+- **AGENT-001 ✅** — Provider-neutral bounded agent execution and OpenCode adapter
 
 Active in this PR:
 
-- **AGENT-001** — Provider-neutral bounded agent execution and OpenCode adapter
-  ([design](docs/architecture/EXECUTION.md))
+- **MODEL-001** — Provider registry, dynamic model catalog, health, usage ledger
+  and deterministic routing ([design](docs/architecture/ADAPTERS.md))
 
 Next up:
 
-- **MODEL-001** — Dynamic model routing and compute-aware execution policy
+- **KAR-7** — Execution budgets and human safety gates
 
 Planned successor tickets (not yet implemented):
 

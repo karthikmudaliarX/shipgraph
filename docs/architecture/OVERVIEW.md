@@ -28,6 +28,7 @@ src/
   persistence/      SQLite repositories, transitions, and migrations
   adapters/
     agent/          Provider-neutral adapter contract and OpenCode execution
+    model/          Capability-probed provider/model metadata adapters
     git-host/       Git-host adapter interface (GitHub)
   events/           Append-only audit-event contract
   config/           Configuration schema and loader
@@ -118,10 +119,11 @@ ShipGraph's differentiator is the combination of a deterministic outer loop,
 agentic inner loop, exact-SHA release provenance, and approved-backlog
 auto-advancement.
 
-## Current status (AGENT-001)
+## Current status (MODEL-001)
 
-CORE-001, CORE-002 and WORK-001 establish the foundation, backlog scheduler and
-safe isolated workspaces. AGENT-001 adds one bounded OpenCode execution in an
-already verified workspace. It does **not** select models, open PRs, perform
-reviews, repair changes, or merge code; those capabilities remain in successor
-tickets.
+CORE-001, CORE-002, WORK-001 and AGENT-001 establish the foundation, backlog
+scheduler, safe isolated workspaces and one bounded explicit OpenCode execution.
+MODEL-001 adds current provider/model metadata, health, append-only usage
+telemetry and deterministic routing for one explicitly supplied engineering
+step. It does **not** select product work, poll Linear, open PRs, perform
+autonomous reviews, repair changes, enforce release gates or merge code.

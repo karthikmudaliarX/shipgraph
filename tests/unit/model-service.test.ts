@@ -1,0 +1,179 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createDatabase, migrate, type DbConnection } from '../../src/persistence/db.js';
+import { createProjectRepository, createTicketRepository } from '../../src/persistence/repositories.js';
+import type { ShipgraphConfig } from '../../src/config/schema.js';
+import type {
+  ModelProviderAdapter,
+  ModelDiscoveryResult,
+  ProviderProbeResult,
+} from '../../src/adapters/model/adapter.js';
+import { ModelRoutingService } from '../../src/model/service.js';
+
+const projectId = 'project-1';
+const now = '2026-08-27T00:00:00.000Z';
+
+function createProject(db: DbConnection): void {
+  const config: ShipgraphConfig = {
+    version: 1,
+    project: { name: 'project', repository: 'owner/repo', defaultBranch: 'main' },
+    execution: { maxConcurrentTickets: 1, maxRepairIterations: 6 },
+    release: { requireHumanApproval: true, requireCleanCI: true, requireExactShaReviews: true },
+    agents: { implementer: 'opencode', reviewers: ['correctness'] },
+  };
+  createProjectRepository(db).create({
+    id: projectId,
+    name: config.project.name,
+    repository: config.project.repository,
+    defaultBranch: config.project.defaultBranch,
+    config,
+    createdAt: now,
+    updatedAt: now,
+  });
+  createTicketRepository(db).create({
+    id: 'KAR-1',
+    projectId,
+    title: 'Model telemetry fixture',
+    description: 'Fixture for the append-only usage ledger.',
+    priority: 'medium',
+    dependsOn: [],
+    scope: { allowedPaths: [], forbiddenPaths: [] },
+    acceptanceCriteria: [],
+    verification: { commands: [] },
+    risk: 'medium',
+    agent: {},
+    release: {},
+    status: 'QUEUED',
+    createdAt: now,
+    updatedAt: now,
+  });
+  db.prepare(
+    `INSERT INTO runs (
+      id, ticket_id, base_sha, branch_name, status, started_at, project_id, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run('run-1', 'KAR-1', '0'.repeat(40), 'agent/model-telemetry', 'SUCCEEDED', now, projectId, now, now);
+}
+
+function adapter(
+  providerId: 'opencode-go' | 'codex' | 'grok' | 'gemini',
+  family: string,
+  calls: { probe: number; discover: number }
+): ModelProviderAdapter {
+  const probeResult: ProviderProbeResult = {
+    availability: 'available',
+    auth: 'authenticated',
+    version: 'test-provider',
+    capabilities: ['implementation', 'review', 'repair'],
+  };
+  const discoveryResult: ModelDiscoveryResult = {
+    status: 'known',
+    models: [{ modelId: `${providerId}/dynamic`, capabilities: ['implementation', 'review', 'repair'] }],
+  };
+  return {
+    providerId,
+    family,
+    displayName: providerId,
+    probe: async () => {
+      calls.probe += 1;
+      return probeResult;
+    },
+    discoverModels: async () => {
+      calls.discover += 1;
+      return discoveryResult;
+    },
+  };
+}
+
+describe('MODEL-001 service', () => {
+  let db: DbConnection;
+
+  beforeEach(() => {
+    db = createDatabase(':memory:');
+    migrate(db);
+    createProject(db);
+  });
+
+  afterEach(() => db.close());
+
+  it('refreshes all providers, persists routing reasons, and records unknown usage literally', async () => {
+    const calls = { probe: 0, discover: 0 };
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [
+        adapter('opencode-go', 'opencode', calls),
+        adapter('codex', 'openai', calls),
+        adapter('grok', 'xai', calls),
+        adapter('gemini', 'google', calls),
+      ],
+      now: () => now,
+      createId: (() => {
+        let count = 0;
+        return () => `id-${++count}`;
+      })(),
+    });
+
+    await service.refresh();
+    const decision = await service.route({
+      task: 'implementation',
+      risk: 'medium',
+      requestId: 'request-1',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 1,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    });
+    const usage = await service.recordUsage({
+      runId: 'run-1',
+      providerId: decision.providerId,
+      modelId: decision.modelId,
+      task: 'implementation',
+      retryCount: 0,
+      elapsedMs: 200,
+      outcome: 'succeeded',
+      outcomeQuality: 'unknown',
+    });
+
+    expect(calls).toEqual({ probe: 4, discover: 4 });
+    expect(service.listRoutingDecisions()[0]?.reason).toBe(decision.reason);
+    expect(usage.entry.inputTokens).toBe('unknown');
+    expect(usage.entry.outputTokens).toBe('unknown');
+    expect(usage.entry.cost).toBe('unknown');
+    expect(usage.entry.quotaRemaining).toBe('unknown');
+    expect(usage.health.quotaRemaining).toBe('unknown');
+  });
+
+  it('refreshes immediately after a provider error while retaining the ledger entry', async () => {
+    const calls = { probe: 0, discover: 0 };
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [
+        adapter('opencode-go', 'opencode', calls),
+        adapter('codex', 'openai', calls),
+        adapter('grok', 'xai', calls),
+        adapter('gemini', 'google', calls),
+      ],
+      now: () => now,
+    });
+    await service.refresh();
+    const result = await service.recordUsage({
+      runId: 'run-1',
+      providerId: 'codex',
+      modelId: 'codex/dynamic',
+      task: 'implementation',
+      retryCount: 1,
+      elapsedMs: 100,
+      outcome: 'failed',
+      outcomeQuality: 'poor',
+      providerError: 'model_not_found',
+    });
+
+    expect(result.refreshed).toBe(true);
+    expect(calls.probe).toBe(5);
+    expect(calls.discover).toBe(5);
+    expect(service.listUsage()).toHaveLength(1);
+    expect(service.listHealth().find((health) => health.providerId === 'codex')?.recentFailureCount).toBe(1);
+  });
+});

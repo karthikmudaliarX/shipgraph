@@ -62,9 +62,11 @@ JSONL events are reduced to session ID, event types/count and a bounded summary;
 raw event objects are not persisted as structured fields; retained stdout is
 bounded and redacted process text.
 
-Provider registries, discovery, health, quota/usage ledgers, automatic routing,
-additional providers and all post-execution PR/review/release automation remain
-deferred to later tickets.
+MODEL-001 now owns provider metadata discovery, health, quota/usage ledger
+records and deterministic model routing in a separate control-plane subsystem.
+The AGENT-001 command remains explicit-provider execution; MODEL-001 does not
+automatically dispatch a ticket, replace that execution contract, or add
+post-execution PR/review/release automation.
 
 ## Known limitations
 
@@ -72,8 +74,9 @@ deferred to later tickets.
   run remains durable and blocks duplicate execution until an operator invokes
   `shipgraph agent recover`, which records `NEEDS_HUMAN` without killing a
   process whose ownership cannot be proven.
-- This ticket exposes only the OpenCode adapter. Provider discovery, routing,
-  usage/health policy and additional providers belong to KAR-6/MODEL-001.
+- The explicit AGENT-001 execution command exposes only the OpenCode execution
+  adapter. MODEL-001 exposes metadata probes and routing separately; it does not
+  automatically dispatch those choices into this command.
 - A terminal run describes the bounded provider execution only. The ticket
   remains in the existing implementation lifecycle for later verification,
   review, repair, release and merge tickets to advance.
