@@ -226,10 +226,121 @@ describe('MODEL-001 service', () => {
       elapsedMs: 10,
       outcome: 'succeeded',
       outcomeQuality: 'good',
+      routingDecisionId: winner.id,
     });
     expect(service.listHealth()[0]?.activeRuns).toBe(0);
     await expect(service.route(request)).resolves.toMatchObject({
       providerId: 'codex',
     });
+  });
+
+  it('replays a request idempotently without creating another reservation', async () => {
+    const calls = { probe: 0, discover: 0 };
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [adapter('codex', 'openai', calls)],
+      now: () => now,
+    });
+    await service.refresh();
+    const currentHealth = service.listHealth()[0];
+    if (currentHealth === undefined) throw new Error('missing provider health fixture');
+    service.getRepository().upsertProviderHealth({
+      ...currentHealth,
+      maxConcurrentRuns: 1,
+    });
+
+    const request = {
+      requestId: 'stable-route-request',
+      task: 'implementation' as const,
+      risk: 'medium' as const,
+      envelope: {
+        mode: 'balanced' as const,
+        maxConcurrentTickets: 4,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown' as const,
+      },
+    };
+    const first = await service.route(request);
+    const replay = await service.route(request);
+
+    expect(replay).toEqual(first);
+    expect(service.listRoutingDecisions()).toHaveLength(1);
+    expect(service.listHealth()[0]?.activeRuns).toBe(1);
+
+    await service.recordUsage({
+      runId: 'run-1',
+      providerId: first.providerId,
+      modelId: first.modelId,
+      task: 'implementation',
+      retryCount: 0,
+      elapsedMs: 10,
+      outcome: 'succeeded',
+      outcomeQuality: 'good',
+      routingDecisionId: first.id,
+    });
+    expect(service.listHealth()[0]?.activeRuns).toBe(0);
+  });
+
+  it('does not release provider capacity for usage without its routing decision', async () => {
+    const calls = { probe: 0, discover: 0 };
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [adapter('codex', 'openai', calls)],
+      now: () => now,
+    });
+    await service.refresh();
+    const currentHealth = service.listHealth()[0];
+    if (currentHealth === undefined) throw new Error('missing provider health fixture');
+    service.getRepository().upsertProviderHealth({
+      ...currentHealth,
+      maxConcurrentRuns: 1,
+    });
+    const decision = await service.route({
+      task: 'implementation',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 4,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    });
+
+    await service.recordUsage({
+      runId: 'run-1',
+      providerId: decision.providerId,
+      modelId: decision.modelId,
+      task: 'implementation',
+      retryCount: 0,
+      elapsedMs: 10,
+      outcome: 'succeeded',
+      outcomeQuality: 'good',
+    });
+    expect(service.listHealth()[0]?.activeRuns).toBe(1);
+    await expect(service.route({
+      task: 'implementation',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 4,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    })).rejects.toThrow(/No usable provider\/model|capacity/);
+
+    await service.recordUsage({
+      runId: 'run-1',
+      providerId: decision.providerId,
+      modelId: decision.modelId,
+      task: 'implementation',
+      retryCount: 1,
+      elapsedMs: 10,
+      outcome: 'succeeded',
+      outcomeQuality: 'good',
+      routingDecisionId: decision.id,
+    });
+    expect(service.listHealth()[0]?.activeRuns).toBe(0);
   });
 });

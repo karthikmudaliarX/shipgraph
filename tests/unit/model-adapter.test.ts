@@ -113,6 +113,33 @@ describe('MODEL-001 provider adapters', () => {
     ]);
   });
 
+  it('uses an explicit machine-readable capability surface when configured', async () => {
+    const runner: ModelProviderProcessRunner = {
+      run: async (spec) => {
+        if (spec.args[0] === '--version') return result({ stdout: 'provider-cli 2.0.0\n' });
+        if (spec.args[0] === 'capabilities') {
+          return result({ stdout: '{"capabilities":["implementation","review"]}\n' });
+        }
+        return result({ stdout: '[{"id":"provider/discovered"}]\n' });
+      },
+    };
+    const adapter = createCommandModelProviderAdapter({
+      providerId: 'gemini',
+      family: 'google',
+      displayName: 'Gemini',
+      executable: '/tmp/provider',
+      capabilityArgs: ['capabilities', '--json'],
+      catalogArgs: ['models', '--json'],
+      processRunner: runner,
+      cwd: '/tmp/project',
+    });
+
+    await expect(adapter.probe()).resolves.toMatchObject({
+      availability: 'available',
+      capabilities: ['implementation', 'review'],
+    });
+  });
+
   it('returns the four bounded provider adapters in stable order', () => {
     const adapters = createModelProviderAdapters({
       configuration: {

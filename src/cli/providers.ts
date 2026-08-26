@@ -107,7 +107,9 @@ export async function runProvidersRoute(
       maxConcurrentTickets: parseKnownInteger(
         input.maxConcurrentTickets ?? String(config?.execution.maxConcurrentTickets ?? 'unknown')
       ),
-      activeConcurrentTickets: parseKnownInteger(input.activeConcurrentTickets ?? '0'),
+      // Global ticket capacity is owned by Scheduler. An omitted count is not
+      // evidence that a global slot is free.
+      activeConcurrentTickets: parseKnownInteger(input.activeConcurrentTickets ?? 'unknown'),
       budgetRemaining: parseKnownNumber(input.budgetRemaining ?? 'unknown'),
     },
     ...(input.implementationProvider === undefined

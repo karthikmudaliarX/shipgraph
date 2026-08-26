@@ -94,6 +94,11 @@ workspace. MODEL-001 (this PR) adds deterministic provider discovery, health,
 usage telemetry and model routing. Neither ticket chooses work, creates pull
 requests, reviews changes, or merges code.
 
+The execution envelope is a Scheduler-owned snapshot: MODEL-001 validates the
+supplied global mode, budget and ticket counts but does not claim global ticket
+capacity. A successful model route reserves a provider run slot when that limit
+is known; usage finalization releases it using the returned routing decision ID.
+
 ## CLI examples
 
 ```bash

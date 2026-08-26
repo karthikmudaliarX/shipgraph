@@ -19,6 +19,7 @@ import {
 const PROBE_TIMEOUT_MS = 5_000;
 const CATALOG_TIMEOUT_MS = 15_000;
 const PROBE_OUTPUT_BYTES = 8 * 1024;
+const CAPABILITY_OUTPUT_BYTES = 8 * 1024;
 const CATALOG_OUTPUT_BYTES = 256 * 1024;
 const MAX_CATALOG_MODELS = 10_000;
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/u;
@@ -35,6 +36,10 @@ export type ProviderProbeResult = {
   quotaResetAt?: KnownTimestamp;
   reason?: string;
 };
+
+type CapabilityProbeResult =
+  | { status: 'known'; capabilities: readonly ModelCapability[] }
+  | { status: 'unknown'; reason: string };
 
 export type DiscoveredModel = {
   modelId: string;
@@ -60,6 +65,7 @@ export type CommandModelProviderAdapterOptions = {
   displayName: string;
   enabled?: boolean;
   executable?: string;
+  capabilityArgs?: readonly string[];
   catalogArgs?: readonly string[];
   processRunner?: ModelProviderProcessRunner;
   cwd?: string;
@@ -70,6 +76,7 @@ export type CommandModelProviderAdapterOptions = {
 export type ModelProviderAdapterConfiguration = {
   enabled?: boolean;
   executable?: string;
+  capabilityArgs?: readonly string[];
   catalogArgs?: readonly string[];
 };
 
@@ -91,6 +98,7 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
 
   private readonly enabled: boolean;
   private readonly executable: string | undefined;
+  private readonly capabilityArgs: readonly string[] | undefined;
   private readonly catalogArgs: readonly string[] | undefined;
   private readonly processRunner: ModelProviderProcessRunner;
   private readonly cwd: string;
@@ -103,6 +111,7 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
     this.displayName = validateText(options.displayName, 'provider display name', 128);
     this.enabled = options.enabled ?? true;
     this.executable = validateExecutable(options.executable);
+    this.capabilityArgs = options.capabilityArgs?.map((arg) => validateArgument(arg));
     this.catalogArgs = options.catalogArgs?.map((arg) => validateArgument(arg));
     this.processRunner = options.processRunner ?? createAgentProcessRunner();
     this.cwd = options.cwd ?? process.cwd();
@@ -174,12 +183,23 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
     }
 
     const version = firstOutputLine(result.stdout);
+    const capabilities = this.capabilityArgs === undefined
+      ? { status: 'known' as const, capabilities: this.capabilities }
+      : await this.probeCapabilities();
+    if (capabilities.status === 'unknown') {
+      return {
+        availability: 'unknown',
+        auth: 'unknown',
+        capabilities: [],
+        reason: capabilities.reason,
+      };
+    }
     return {
       availability: 'available',
       // A version command proves an installed surface, not login state.
       auth: 'unknown',
       ...(version === undefined ? {} : { version }),
-      capabilities: this.capabilities,
+      capabilities: capabilities.capabilities,
     };
   }
 
@@ -223,6 +243,28 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
       maxOutputBytes,
     });
   }
+
+  private async probeCapabilities(): Promise<CapabilityProbeResult> {
+    const result = await this.run(
+      this.capabilityArgs ?? [],
+      PROBE_TIMEOUT_MS,
+      CAPABILITY_OUTPUT_BYTES
+    );
+    if (result.spawnErrorCode !== undefined || result.startError !== undefined) {
+      return { status: 'unknown', reason: 'provider capability surface could not be started' };
+    }
+    if (result.timedOut) return { status: 'unknown', reason: 'provider capability surface timed out' };
+    if (result.cancelled || result.unexpectedTermination) {
+      return { status: 'unknown', reason: 'provider capability surface terminated unexpectedly' };
+    }
+    if (result.outputLimitExceeded || result.stdoutTruncated || result.stderrTruncated) {
+      return { status: 'unknown', reason: 'provider capability output exceeded the safety limit' };
+    }
+    if (result.exitCode !== 0) {
+      return { status: 'unknown', reason: 'provider capability surface failed' };
+    }
+    return parseCapabilities(result.stdout);
+  }
 }
 
 export function createCommandModelProviderAdapter(
@@ -261,6 +303,7 @@ export function createModelProviderAdapters(options: {
       ...definition,
       enabled: configured?.enabled ?? true,
       executable: configured?.executable ?? defaultsForProvider.executable,
+      capabilityArgs: configured?.capabilityArgs,
       catalogArgs: configured?.catalogArgs ?? defaultsForProvider.catalogArgs,
       ...(options.processRunner === undefined ? {} : { processRunner: options.processRunner }),
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
@@ -304,6 +347,47 @@ export function parseModelCatalog(
       capabilities: normalizeCapabilities(fallbackCapabilities),
     }));
     return { status: 'known', models: uniqueSortedModels(models) };
+  }
+}
+
+function parseCapabilities(raw: string): CapabilityProbeResult {
+  if (Buffer.byteLength(raw, 'utf8') > CAPABILITY_OUTPUT_BYTES) {
+    return { status: 'unknown', reason: 'provider capability output exceeded the safety limit' };
+  }
+  const output = redactSensitiveText(raw).trim();
+  if (output.length === 0) {
+    return { status: 'unknown', reason: 'provider capability output was empty' };
+  }
+  try {
+    const parsed: unknown = JSON.parse(output);
+    const values = Array.isArray(parsed)
+      ? parsed
+      : typeof parsed === 'object' && parsed !== null &&
+          Array.isArray((parsed as Record<string, unknown>).capabilities)
+        ? (parsed as { capabilities: readonly unknown[] }).capabilities
+        : undefined;
+    if (
+      values === undefined ||
+      values.some(
+        (value) =>
+          typeof value !== 'string' ||
+          !MODEL_CAPABILITIES.includes(value as ModelCapability)
+      )
+    ) {
+      return {
+        status: 'unknown',
+        reason: 'provider capability output was not a supported machine-readable capability list',
+      };
+    }
+    return {
+      status: 'known',
+      capabilities: normalizeCapabilities(values as ModelCapability[]),
+    };
+  } catch {
+    return {
+      status: 'unknown',
+      reason: 'provider capability output was not a supported machine-readable capability list',
+    };
   }
 }
 

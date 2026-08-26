@@ -369,6 +369,32 @@ export const MIGRATIONS: readonly Migration[] = [
       END;
     `,
   },
+  {
+    version: 8,
+    name: 'bind_model_capacity_reservations',
+    up: `
+      ALTER TABLE usage_ledger ADD COLUMN routing_decision_id TEXT
+        REFERENCES routing_decisions(id);
+
+      CREATE TABLE IF NOT EXISTS provider_capacity_reservations (
+        routing_decision_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('active', 'released')),
+        reserved_at TEXT NOT NULL,
+        released_at TEXT,
+        FOREIGN KEY (project_id) REFERENCES projects(id),
+        FOREIGN KEY (routing_decision_id) REFERENCES routing_decisions(id)
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_capacity_request
+        ON provider_capacity_reservations(project_id, request_id);
+      CREATE INDEX IF NOT EXISTS idx_provider_capacity_provider_status
+        ON provider_capacity_reservations(project_id, provider_id, status);
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {

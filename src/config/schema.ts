@@ -40,6 +40,11 @@ export const modelProviderSettingsSchema = z.object({
   executable: z.string().min(1).max(4_096).refine((value) => !value.includes('\0'), {
     message: 'provider executable cannot contain NUL characters',
   }).optional(),
+  capabilityArgs: z.array(
+    z.string().min(1).max(1_024).refine((value) => !value.includes('\0'), {
+      message: 'provider capability arguments cannot contain NUL characters',
+    })
+  ).max(32).optional(),
   catalogArgs: z.array(
     z.string().min(1).max(1_024).refine((value) => !value.includes('\0'), {
       message: 'provider catalog arguments cannot contain NUL characters',

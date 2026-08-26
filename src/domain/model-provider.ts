@@ -143,6 +143,7 @@ export const usageLedgerRecordSchema = z.object({
   id: identitySchema,
   projectId: identitySchema,
   runId: identitySchema,
+  routingDecisionId: identitySchema.optional(),
   providerId: modelProviderIdSchema,
   modelId: modelIdentifierSchema,
   task: modelTaskTypeSchema,
@@ -158,6 +159,7 @@ export const usageLedgerRecordSchema = z.object({
 }).strict();
 export type UsageLedgerRecord = z.infer<typeof usageLedgerRecordSchema>;
 
+/** A scheduler-supplied snapshot; MODEL-001 never claims global ticket slots. */
 export const executionEnvelopeSchema = z.object({
   mode: modelRoutingModeSchema,
   maxConcurrentTickets: unknownIntegerSchema,

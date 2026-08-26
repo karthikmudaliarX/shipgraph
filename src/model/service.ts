@@ -89,6 +89,23 @@ export class ModelRoutingService {
 
   public async route(input: ModelRoutingRequest): Promise<ModelRoutingDecision> {
     const request = modelRoutingRequestSchema.parse(input);
+    const requestId = request.requestId ?? this.createId();
+    if (request.requestId !== undefined) {
+      const existing = this.repository.findRoutingDecisionByRequest(
+        this.options.projectId,
+        request.requestId
+      );
+      if (existing !== undefined) {
+        if (
+          existing.task !== request.task ||
+          existing.risk !== request.risk ||
+          existing.mode !== request.envelope.mode
+        ) {
+          throw new Error(`Routing request ${request.requestId} was reused for a different route`);
+        }
+        return existing;
+      }
+    }
     await this.registry.ensureFresh();
     // Routing decisions that depend on quota reset timing must use the same
     // injected clock as persistence. Callers may still provide an explicit
@@ -96,7 +113,6 @@ export class ModelRoutingService {
     const routableRequest = request.now === undefined
       ? { ...request, now: this.now() }
       : request;
-    const requestId = request.requestId ?? this.createId();
     const maxAttempts = this.registry.list().length + 1;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const selection = this.router.route(routableRequest, this.snapshot());
@@ -136,6 +152,9 @@ export class ModelRoutingService {
         id: input.id,
         recordedAt: input.recordedAt,
         runId: input.runId,
+        ...(input.routingDecisionId === undefined
+          ? {}
+          : { routingDecisionId: input.routingDecisionId }),
         providerId: input.providerId,
         modelId: input.modelId,
         task: input.task,
@@ -148,6 +167,15 @@ export class ModelRoutingService {
         cost: input.cost,
         quotaRemaining: input.quotaRemaining,
       });
+      if (input.routingDecisionId !== undefined) {
+        this.repository.releaseProviderCapacity(
+          this.options.projectId,
+          input.routingDecisionId,
+          entry.providerId,
+          entry.modelId,
+          this.now()
+        );
+      }
       const current = this.repository.findHealth(this.options.projectId, entry.providerId);
       const health = healthAfterUsage(
         current,
@@ -233,7 +261,7 @@ function healthAfterUsage(
     quotaPressure,
     quotaRemaining: entry.quotaRemaining,
     recentFailureCount,
-    activeRuns: Math.max(0, base.activeRuns - 1),
+    activeRuns: base.activeRuns,
     ...(failed ? { lastFailureAt: entry.recordedAt } : { lastSuccessAt: entry.recordedAt }),
     checkedAt: updatedAt,
     updatedAt,
