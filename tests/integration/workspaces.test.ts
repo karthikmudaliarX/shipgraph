@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -543,15 +544,17 @@ describe('WORK-001 isolated worktree lifecycle', () => {
     expect(missing.live.exists).toBe(false);
   });
 
-  it('removes a clean workspace, deletes the provably empty branch, and marks REMOVED', async () => {
+  it('removes a clean workspace, retains its branch, and marks REMOVED', async () => {
     harness = setupProject(2, [ticket('TA-1')]);
     const created = await createWorkspace(harness.options, 'TA-1');
 
     const removed = await removeWorkspace(harness.options, 'TA-1');
     expect(removed.removed).toBe(true);
-    expect(removed.branchRetained).toBe(false);
+    expect(removed.branchRetained).toBe(true);
     expect(existsSync(created.workspace.worktreePath)).toBe(false);
-    expect(git(harness.projectDir, 'branch', '--list', 'shipgraph/ta-1')).toBe('');
+    expect(git(harness.projectDir, 'rev-parse', 'shipgraph/ta-1')).toBe(
+      created.workspace.baseSha
+    );
 
     const row = createWorkspaceRepository(harness.options.db).findByTicket(
       findProjectId(harness.options.db),
@@ -565,6 +568,27 @@ describe('WORK-001 isolated worktree lifecycle', () => {
 
     // Ticket stays PLANNING; removal does not roll back the state machine here.
     expect(findTicketState(harness.options, 'TA-1')).toBe('PLANNING');
+  });
+
+  it('retains the branch when another Git worktree uses it', async () => {
+    harness = setupProject(2, [ticket('TA-1')]);
+    const created = await createWorkspace(harness.options, 'TA-1');
+    const competingPath = mkdtempSync(join(tmpdir(), 'sg-work-competing-'));
+    git(harness.projectDir, 'worktree', 'add', '--force', competingPath, created.workspace.branchName);
+    try {
+      const removed = await removeWorkspace(harness.options, 'TA-1');
+      expect(removed.branchRetained).toBe(true);
+      expect(existsSync(competingPath)).toBe(true);
+      expect(git(competingPath, 'symbolic-ref', '--short', 'HEAD')).toBe('shipgraph/ta-1');
+      expect(git(harness.projectDir, 'rev-parse', created.workspace.branchName)).toBe(
+        created.workspace.baseSha
+      );
+    } finally {
+      if (existsSync(competingPath)) {
+        git(harness.projectDir, 'worktree', 'remove', competingPath);
+      }
+      rmSync(competingPath, { recursive: true, force: true });
+    }
   });
 
   it('retains the branch on removal when it contains unique work', async () => {
@@ -643,6 +667,43 @@ describe('WORK-001 isolated worktree lifecycle', () => {
       expect(report.health).toBe('DRIFTED');
       await expect(removeWorkspace(harness.options, 'TA-1')).rejects.toThrow();
     } finally {
+      rmSync(foreignRepo, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a repository replacement at the same project path', async () => {
+    harness = setupProject(2, [ticket('TA-1'), ticket('TB-1')]);
+    await createWorkspace(harness.options, 'TA-1');
+    const projectId = findProjectId(harness.options.db);
+    const originalGit = join(harness.projectDir, '.git');
+    const originalGitBackup = join(harness.projectDir, '.git.original');
+    const foreignRepo = mkdtempSync(join(tmpdir(), 'sg-work-replaced-'));
+    git(foreignRepo, 'init', '-b', 'main');
+    git(foreignRepo, 'config', 'user.email', 'shipgraph-test@example.com');
+    git(foreignRepo, 'config', 'user.name', 'ShipGraph Test');
+    writeFileSync(join(foreignRepo, 'README.md'), '# replacement\n');
+    git(foreignRepo, 'add', '.');
+    git(foreignRepo, 'commit', '-m', 'replacement');
+
+    renameSync(originalGit, originalGitBackup);
+    renameSync(join(foreignRepo, '.git'), originalGit);
+    try {
+      await expect(createWorkspace(harness.options, 'TB-1')).rejects.toThrow(
+        /different source repository identity/
+      );
+      await expect(inspectWorkspace(harness.options, 'TA-1')).rejects.toThrow(
+        /different source repository identity/
+      );
+      await expect(listWorkspacesForProject(harness.options)).rejects.toThrow(
+        /different source repository identity/
+      );
+      await expect(removeWorkspace(harness.options, 'TA-1')).rejects.toThrow(
+        /different source repository identity/
+      );
+      expect(existsSync(join(harness.worktreeRoot, projectId, 'TB-1'))).toBe(false);
+    } finally {
+      renameSync(originalGit, join(foreignRepo, '.git'));
+      renameSync(originalGitBackup, originalGit);
       rmSync(foreignRepo, { recursive: true, force: true });
     }
   });
@@ -752,7 +813,7 @@ describe('WORK-001 isolated worktree lifecycle', () => {
   it('isolates workspace records across independent projects', async () => {
     harness = setupProject(2, [ticket('TA-1')]);
     const created = await createWorkspace(harness.options, 'TA-1');
-    expect(listWorkspacesForProject(harness.options).map((row) => row.id)).toEqual([
+    expect((await listWorkspacesForProject(harness.options)).map((row) => row.id)).toEqual([
       created.workspace.id,
     ]);
 
@@ -790,10 +851,10 @@ describe('WORK-001 isolated worktree lifecycle', () => {
       expect(otherResult.workspace.branchName).toBe(created.workspace.branchName);
       expect(otherResult.workspace.projectId).not.toBe(created.workspace.projectId);
       expect(git(otherDir, 'branch', '--list', 'shipgraph/ta-1')).not.toBe('');
-      expect(listWorkspacesForProject(otherHarness.options)).toHaveLength(1);
+      expect(await listWorkspacesForProject(otherHarness.options)).toHaveLength(1);
 
       // The source project is unaffected and its listing unchanged.
-      expect(listWorkspacesForProject(harness.options).map((row) => row.id)).toEqual([
+      expect((await listWorkspacesForProject(harness.options)).map((row) => row.id)).toEqual([
         created.workspace.id,
       ]);
     } finally {
@@ -828,7 +889,7 @@ describe('WORK-001 isolated worktree lifecycle', () => {
       ).rejects.toThrow(/bound to a different source repository|is bound to source repository/);
 
       // The real project is untouched by the failed attempt.
-      expect(listWorkspacesForProject(harness.options)).toHaveLength(1);
+      expect(await listWorkspacesForProject(harness.options)).toHaveLength(1);
       expect(git(harness.projectDir, 'branch', '--list', 'shipgraph/ta-1')).not.toBe('');
     } finally {
       rmSync(wrongDir, { recursive: true, force: true });

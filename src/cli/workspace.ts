@@ -47,8 +47,10 @@ export async function runWorkspaceInspect(
   };
 }
 
-export function runWorkspaceList(options: WorkspaceServiceOptions): Record<string, unknown> {
-  const workspaces = listWorkspacesForProject(options);
+export async function runWorkspaceList(
+  options: WorkspaceServiceOptions
+): Promise<Record<string, unknown>> {
+  const workspaces = await listWorkspacesForProject(options);
   return {
     workspaces: workspaces.map((workspace) => ({
       id: workspace.id,

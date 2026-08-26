@@ -231,12 +231,12 @@ export function createProgram(): Command {
     .description('List ShipGraph workspaces for the current project')
     .option('--project-dir <path>', 'target project directory', process.cwd())
     .option('--json', 'output structured list as JSON')
-    .action((options: { projectDir?: string; json?: boolean }) => {
+    .action(async (options: { projectDir?: string; json?: boolean }) => {
       let db: DbConnection | undefined;
       try {
         const projectDir = options.projectDir ?? process.cwd();
         db = openInitializedDatabase(projectDir);
-        const report = runWorkspaceList(workspaceServiceOptions(db, projectDir));
+        const report = await runWorkspaceList(workspaceServiceOptions(db, projectDir));
         if (options.json) {
           console.log(JSON.stringify(report, null, 2));
         } else {

@@ -13,8 +13,10 @@ ShipGraph-owned root outside the repository:
 The source checkout may contain unrelated uncommitted work. ShipGraph never
 modifies, stages, resets, cleans, checks out, or stashes those files. Allowed
 operations against the source repository are limited to what is required to
-manage the dedicated branch and worktree (`git worktree add/remove`,
-`git branch -d`, read-only inspection). `git reset --hard`, `git clean -fd`,
+manage the dedicated worktree (`git worktree add/remove`, read-only
+inspection). ShipGraph never deletes a branch automatically because Git ref
+deletion cannot be atomic with the worktree registry. `git reset --hard`,
+`git clean -fd`,
 `git stash`, and force-deletion of user changes are never executed.
 
 ## Pipeline
@@ -101,9 +103,11 @@ yields an equally valid workspace for that ticket at that base.
 ### Compensation
 
 When a failure happens inside the same controlled process, ShipGraph removes
-the newly created worktree and branch only when it can *prove* they belong to
-this reservation (registered, correct branch, `HEAD == baseSha`, clean).
-Otherwise everything is preserved and the workspace is marked `NEEDS_HUMAN`.
+the newly created worktree only when it can *prove* it belongs to this
+reservation (registered, correct branch, `HEAD == baseSha`, clean). The
+dedicated branch is always retained for human cleanup because ref deletion
+cannot be atomic with Git's worktree registry. Otherwise everything is
+preserved and the workspace is marked `NEEDS_HUMAN`.
 
 ### Removal residual window
 
@@ -116,8 +120,8 @@ which `workspace inspect` surfaces as `MISSING`; nothing is auto-repaired.
 A dirty ticket worktree is never removed; there is deliberately no
 `--force`. Removal requires a clean, registered, correctly-bound `READY`
 workspace whose recorded path exactly equals the deterministic location. The
-branch is deleted only when it provably still points at the recorded base
-SHA (no unique work); otherwise it is retained.
+dedicated branch is retained on every removal so a concurrent checkout can
+never lose its branch or make a unique commit unreachable.
 
 ## Ambiguity fails closed
 
@@ -142,11 +146,11 @@ them narrow and documented instead of pretending they are atomic:
   verified before READY is committed, but the worktree is a normal user-owned
   directory afterwards. Later drift is reported by `workspace inspect` as
   `DRIFTED`; nothing auto-repairs.
-- **Provenance is path-based.** Repository binding compares canonical local
-  paths, and workspace uniqueness holds per SQLite database. Once a project
-  has recorded workspace history, copied metadata in another checkout is
-  refused; a pristine metadata set that has never been used establishes its
-  binding on first use.
+- **Repository provenance is persisted.** The first workspace reservation binds
+  the canonical source path, source checkout directory, Git common directory,
+  primary object directory, and their device/inode identities. A repository or
+  checkout replacement at the same project path, or a `.git` redirection, is
+  refused; a pristine metadata set establishes its binding on first use.
 - **Repository-local Git config is trusted for that repository.** System and
   global configuration are pinned to /dev/null (no aliases, no global
   filters), but repository-local config — including smudge/clean filters and
@@ -159,7 +163,8 @@ them narrow and documented instead of pretending they are atomic:
   configuration.
 - **Removal leaves the ticket PLANNING.** Removing a workspace does not roll
   back the ticket state machine; capacity stays consumed until an operator or
-  a later ticket explicitly resolves the state.
+  a later ticket explicitly resolves the state. Its dedicated branch is
+  retained for the same operator-controlled cleanup boundary.
 - **Submodule worktrees are refused.** Removal requires no `.gitmodules` in
   the workspace: nested submodule contents are outside the superproject's
   cleanliness proof, so WORK-001 declines rather than risk deleting them.

@@ -1,4 +1,4 @@
-import { realpathSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import { execa } from 'execa';
 
 /**
@@ -25,6 +25,24 @@ export type GitRunner = (
   cwd: string,
   args: readonly string[]
 ) => Promise<GitCommandResult>;
+
+/**
+ * Stable local identity for the Git repository that owns a worktree.
+ *
+ * Paths alone are insufficient: a repository can be replaced or redirected
+ * while its project directory keeps the same name. The directory device/inode
+ * pairs bind the identity to the Git storage currently on disk as well.
+ */
+export type GitRepositoryIdentity = {
+  sourceDirectoryDevice: string;
+  sourceDirectoryInode: string;
+  commonDir: string;
+  objectDir: string;
+  commonDirDevice: string;
+  commonDirInode: string;
+  objectDirDevice: string;
+  objectDirInode: string;
+};
 
 const GIT_TIMEOUT_MS = 30_000;
 
@@ -112,6 +130,81 @@ export async function gitTopLevel(runner: GitRunner, cwd: string): Promise<strin
   const result = await runGit(runner, cwd, ['rev-parse', '--show-toplevel']);
   if (result.exitCode !== 0) return undefined;
   return result.stdout.trim() || undefined;
+}
+
+/** Resolve the Git common directory and primary object database identity. */
+export async function resolveGitRepositoryIdentity(
+  runner: GitRunner,
+  repoPath: string
+): Promise<GitRepositoryIdentity> {
+  const sourceDirectory = inspectDirectory(repoPath, 'source directory');
+  const common = await resolveGitDirectory(runner, repoPath, ['--git-common-dir'], 'common directory');
+  const objects = await resolveGitDirectory(
+    runner,
+    repoPath,
+    ['--git-path', 'objects'],
+    'object database'
+  );
+  return {
+    sourceDirectoryDevice: sourceDirectory.device,
+    sourceDirectoryInode: sourceDirectory.inode,
+    commonDir: common.path,
+    objectDir: objects.path,
+    commonDirDevice: common.device,
+    commonDirInode: common.inode,
+    objectDirDevice: objects.device,
+    objectDirInode: objects.inode,
+  };
+}
+
+export function sameGitRepositoryIdentity(
+  left: GitRepositoryIdentity,
+  right: GitRepositoryIdentity
+): boolean {
+  return (
+    left.sourceDirectoryDevice === right.sourceDirectoryDevice &&
+    left.sourceDirectoryInode === right.sourceDirectoryInode &&
+    left.commonDir === right.commonDir &&
+    left.objectDir === right.objectDir &&
+    left.commonDirDevice === right.commonDirDevice &&
+    left.commonDirInode === right.commonDirInode &&
+    left.objectDirDevice === right.objectDirDevice &&
+    left.objectDirInode === right.objectDirInode
+  );
+}
+
+async function resolveGitDirectory(
+  runner: GitRunner,
+  repoPath: string,
+  args: readonly string[],
+  label: string
+): Promise<{ path: string; device: string; inode: string }> {
+  const result = await runGit(runner, repoPath, [
+    'rev-parse',
+    '--path-format=absolute',
+    ...args,
+  ]);
+  const rawPath = result.stdout.trim();
+  if (result.exitCode !== 0 || rawPath.length === 0 || rawPath.includes('\n')) {
+    throw new Error(`Could not resolve Git ${label} for ${repoPath}`);
+  }
+  try {
+    const path = realpathSync(rawPath);
+    return { path, ...inspectDirectory(path, label) };
+  } catch (error) {
+    throw new Error(
+      `Could not inspect Git ${label} at ${rawPath}: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
+function inspectDirectory(path: string, label: string): {
+  device: string;
+  inode: string;
+} {
+  const stats = lstatSync(realpathSync(path), { bigint: true });
+  if (!stats.isDirectory()) throw new Error(`${label} is not a directory`);
+  return { device: stats.dev.toString(), inode: stats.ino.toString() };
 }
 
 /** Resolve an exact commit SHA for a local ref, or undefined when absent. */
@@ -232,39 +325,6 @@ export async function removeWorktree(
   }
 }
 
-/** Delete a local branch by exact name. Never uses force. */
-export async function deleteBranch(
-  runner: GitRunner,
-  repoPath: string,
-  branchName: string
-): Promise<boolean> {
-  const result = await runGit(runner, repoPath, ['branch', '-d', branchName]);
-  return result.exitCode === 0;
-}
-
-/**
- * Atomically delete a branch ONLY while it still points at the expected SHA
- * (`git update-ref -d --no-deref <ref> <old-oid>` is a kernel-side
- * compare-and-delete). --no-deref guarantees a symbolic ref can never pull
- * another branch into the deletion. If the ref moved, the deletion fails and
- * the branch is retained.
- */
-export async function deleteBranchIfAt(
-  runner: GitRunner,
-  repoPath: string,
-  branchName: string,
-  expectedSha: string
-): Promise<boolean> {
-  const result = await runGit(runner, repoPath, [
-    'update-ref',
-    '-d',
-    '--no-deref',
-    `refs/heads/${branchName}`,
-    expectedSha,
-  ]);
-  return result.exitCode === 0;
-}
-
 export type WorktreeLiveState = {
   head?: string;
   branch?: string;
@@ -369,24 +429,6 @@ export async function hasGitlinkEntries(
   return result.stdout
     .split('\n')
     .some((line) => line.trimStart().startsWith('160000'));
-}
-
-/**
- * List registered worktrees of the source repository that use the given
- * branch, excluding the recorded path itself. A non-empty result means the
- * branch is checked out somewhere else and must never be deleted.
- */
-export async function findOtherWorktreesUsingBranch(
-  runner: GitRunner,
-  repoPath: string,
-  branchName: string,
-  excludePath: string
-): Promise<readonly string[]> {
-  const entries = await listWorktrees(runner, repoPath);
-  const expected = `refs/heads/${branchName}`;
-  return entries
-    .filter((entry) => entry.path !== excludePath && entry.branch === expected)
-    .map((entry) => entry.path);
 }
 
 /**

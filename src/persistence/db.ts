@@ -179,6 +179,26 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE status IN ('CREATING', 'READY', 'NEEDS_HUMAN');
     `,
   },
+  {
+    version: 5,
+    name: 'bind_workspace_repository_identity',
+    up: `
+      CREATE TABLE IF NOT EXISTS workspace_repository_bindings (
+        project_id TEXT PRIMARY KEY,
+        source_repository_path TEXT NOT NULL,
+        source_directory_device TEXT NOT NULL,
+        source_directory_inode TEXT NOT NULL,
+        git_common_dir TEXT NOT NULL,
+        git_object_dir TEXT NOT NULL,
+        git_common_device TEXT NOT NULL,
+        git_common_inode TEXT NOT NULL,
+        git_object_device TEXT NOT NULL,
+        git_object_inode TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (project_id) REFERENCES projects(id)
+      );
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {

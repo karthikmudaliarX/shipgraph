@@ -20,9 +20,10 @@ import {
   inspectWorktreeState,
   isStrictlyClean,
   hasGitlinkEntries,
-  findOtherWorktreesUsingBranch,
   resolveCommitSha,
-  deleteBranchIfAt,
+  resolveGitRepositoryIdentity,
+  sameGitRepositoryIdentity,
+  type GitRepositoryIdentity,
   type GitRunner,
 } from '../git/service.js';
 import { assertSafeShipgraphPaths } from '../utils/paths.js';
@@ -33,7 +34,9 @@ import {
   createProjectRepository,
   createTicketRepository,
   createWorkspaceRepository,
+  createWorkspaceRepositoryBindingRepository,
   type WorkspaceRecord,
+  type WorkspaceRepositoryBinding,
   type WorkspaceStatus,
 } from '../persistence/repositories.js';
 import { persistTicketTransition } from '../persistence/ticket-state-store.js';
@@ -179,6 +182,17 @@ export function resolveWorktreeRoot(
     // Containment was already validated against the canonical path; create
     // the remaining segments recursively.
     mkdirSync(canonicalCandidate, { recursive: true, mode: 0o700 });
+  }
+  // Recursive mkdir follows a path component that may have been replaced
+  // between the pre-flight checks and the write. Revalidate the complete
+  // root after creation before any project/ticket segment is added.
+  assertNoSymlinkAncestors(canonicalCandidate);
+  const finalStats = tryLstatSync(canonicalCandidate);
+  if (!finalStats || finalStats.isSymbolicLink() || !finalStats.isDirectory()) {
+    throw new Error(`ShipGraph worktree root is not a plain directory: ${canonicalCandidate}`);
+  }
+  if (realpathSync(canonicalCandidate) !== canonicalCandidate) {
+    throw new Error(`ShipGraph worktree root resolves through a symlink: ${canonicalCandidate}`);
   }
   ensureOwnedDirectoryChain(canonicalCandidate);
   return realpathSync(canonicalCandidate);
@@ -331,7 +345,11 @@ async function resolveSourceRepository(
   runner: GitRunner,
   context: ProjectContext,
   defaultBranch: string
-): Promise<{ sourceRepositoryPath: string; baseSha: string }> {
+): Promise<{
+  sourceRepositoryPath: string;
+  baseSha: string;
+  repositoryIdentity: GitRepositoryIdentity;
+}> {
   if (!(await isInsideWorkTree(runner, context.canonicalProjectDir))) {
     throw new Error(`${context.canonicalProjectDir} is not a Git working tree`);
   }
@@ -346,6 +364,7 @@ async function resolveSourceRepository(
         `${context.canonicalProjectDir}; refusing to operate against the wrong repository`
     );
   }
+  const repositoryIdentity = await resolveGitRepositoryIdentity(runner, canonicalTopLevel);
   const baseSha = await resolveCommitSha(runner, canonicalTopLevel, defaultBranch);
   if (!baseSha) {
     throw new Error(
@@ -353,7 +372,7 @@ async function resolveSourceRepository(
         `WORK-001 never fetches remotes`
     );
   }
-  return { sourceRepositoryPath: canonicalTopLevel, baseSha };
+  return { sourceRepositoryPath: canonicalTopLevel, baseSha, repositoryIdentity };
 }
 
 /**
@@ -364,29 +383,130 @@ async function resolveSourceRepository(
  * no binding to compare against; its first workspace creation establishes
  * the binding.)
  */
+function bindingMatchesIdentity(
+  binding: WorkspaceRepositoryBinding,
+  sourceRepositoryPath: string,
+  identity: GitRepositoryIdentity
+): boolean {
+  return (
+    binding.sourceRepositoryPath === sourceRepositoryPath &&
+    binding.sourceDirectoryDevice === identity.sourceDirectoryDevice &&
+    binding.sourceDirectoryInode === identity.sourceDirectoryInode &&
+    binding.gitCommonDir === identity.commonDir &&
+    binding.gitObjectDir === identity.objectDir &&
+    binding.gitCommonDevice === identity.commonDirDevice &&
+    binding.gitCommonInode === identity.commonDirInode &&
+    binding.gitObjectDevice === identity.objectDirDevice &&
+    binding.gitObjectInode === identity.objectDirInode
+  );
+}
+
+function assertBindingMatchesIdentity(
+  binding: WorkspaceRepositoryBinding,
+  sourceRepositoryPath: string,
+  identity: GitRepositoryIdentity
+): void {
+  if (bindingMatchesIdentity(binding, sourceRepositoryPath, identity)) return;
+  throw new Error(
+    `ShipGraph project is bound to a different source repository identity ` +
+      `(${binding.sourceRepositoryPath}, ${binding.gitCommonDir}); refusing to operate ` +
+      `against ${sourceRepositoryPath} (${identity.commonDir})`
+  );
+}
+
+function bindingFromIdentity(
+  projectId: string,
+  sourceRepositoryPath: string,
+  identity: GitRepositoryIdentity,
+  createdAt: string
+): WorkspaceRepositoryBinding {
+  return {
+    projectId,
+    sourceRepositoryPath,
+    sourceDirectoryDevice: identity.sourceDirectoryDevice,
+    sourceDirectoryInode: identity.sourceDirectoryInode,
+    gitCommonDir: identity.commonDir,
+    gitObjectDir: identity.objectDir,
+    gitCommonDevice: identity.commonDirDevice,
+    gitCommonInode: identity.commonDirInode,
+    gitObjectDevice: identity.objectDirDevice,
+    gitObjectInode: identity.objectDirInode,
+    createdAt,
+  };
+}
+
+/**
+ * Verify repository provenance: once a project has ever recorded a
+ * workspace, its source path and Git storage identity are bound. Copied
+ * metadata, a replaced .git directory, or a redirected repository fails
+ * closed instead of silently operating against the wrong checkout. A
+ * pristine metadata set establishes the binding at its first reservation.
+ */
 function assertRepositoryProvenance(
   options: WorkspaceServiceOptions,
   projectId: string,
-  canonicalTopLevel: string
+  sourceRepositoryPath: string,
+  identity: GitRepositoryIdentity
 ): void {
-  const rows = options.db
-    .prepare(
-      'SELECT DISTINCT source_repository_path FROM workspaces WHERE project_id = ?'
-    )
-    .all(projectId) as Array<{ source_repository_path: string }>;
-  if (rows.length === 0) return;
-  // Fail closed on ANY non-matching row: mixed-repository metadata must never
-  // allow workspace creation against either repository.
-  const mismatched = rows.filter(
-    (row) => realpathSync(row.source_repository_path) !== canonicalTopLevel
-  );
-  if (mismatched.length > 0) {
+  const binding = createWorkspaceRepositoryBindingRepository(options.db).findByProjectId(projectId);
+  const rows = createWorkspaceRepository(options.db).listByProject(projectId);
+  if (binding === undefined) {
+    if (rows.length === 0) return;
     throw new Error(
-      `ShipGraph project has workspace records bound to a different source repository ` +
-        `(${mismatched.map((row) => row.source_repository_path).join(', ')}); ` +
-        `refusing to operate against ${canonicalTopLevel}`
+      `ShipGraph project has workspace records but no immutable repository identity binding; ` +
+        `refusing to operate against ${sourceRepositoryPath}`
     );
   }
+  assertBindingMatchesIdentity(binding, sourceRepositoryPath, identity);
+}
+
+async function assertCurrentRepositoryBinding(
+  options: WorkspaceServiceOptions,
+  runner: GitRunner,
+  projectId: string,
+  sourceRepositoryPath: string
+): Promise<GitRepositoryIdentity> {
+  if (!(await isInsideWorkTree(runner, sourceRepositoryPath))) {
+    throw new Error(`${sourceRepositoryPath} is not a Git working tree`);
+  }
+  const topLevel = await gitTopLevel(runner, sourceRepositoryPath);
+  if (topLevel === undefined || realpathSync(topLevel) !== sourceRepositoryPath) {
+    throw new Error(
+      `Git top-level does not match the ShipGraph source repository ${sourceRepositoryPath}`
+    );
+  }
+  const identity = await resolveGitRepositoryIdentity(runner, sourceRepositoryPath);
+  const binding = createWorkspaceRepositoryBindingRepository(options.db).findByProjectId(projectId);
+  if (binding === undefined) {
+    throw new Error(
+      `ShipGraph project has no immutable repository identity binding; refusing to operate ` +
+        `against ${sourceRepositoryPath}`
+    );
+  }
+  assertBindingMatchesIdentity(binding, sourceRepositoryPath, identity);
+  return identity;
+}
+
+function ensureRepositoryBinding(
+  options: WorkspaceServiceOptions,
+  context: ProjectContext,
+  sourceRepositoryPath: string,
+  identity: GitRepositoryIdentity,
+  createdAt: string
+): void {
+  const bindings = createWorkspaceRepositoryBindingRepository(options.db);
+  const existing = bindings.findByProjectId(context.projectId);
+  if (existing !== undefined) {
+    assertBindingMatchesIdentity(existing, sourceRepositoryPath, identity);
+    return;
+  }
+  if (createWorkspaceRepository(options.db).listByProject(context.projectId).length > 0) {
+    throw new Error(
+      `ShipGraph project has workspace records but no immutable repository identity binding; ` +
+        `refusing to reserve a new workspace`
+    );
+  }
+  bindings.insert(bindingFromIdentity(context.projectId, sourceRepositoryPath, identity, createdAt));
 }
 
 /**
@@ -458,7 +578,8 @@ function workspacePayload(row: WorkspaceRecord) {
 function reserveWorkspace(
   options: WorkspaceServiceOptions,
   context: ProjectContext,
-  row: WorkspaceRecord
+  row: WorkspaceRecord,
+  repositoryIdentity: GitRepositoryIdentity
 ): WorkspaceRecord {
   const timestamp = options.now ? options.now() : new Date().toISOString();
   const createEventId = options.createEventId ?? randomUUID;
@@ -466,6 +587,13 @@ function reserveWorkspace(
     // Claim capacity atomically: immediate transactions serialize concurrent
     // creators, so the count below cannot be observed stale.
     assertDispatchableAndClaimCapacityInTx(options, context, row.ticketId);
+    ensureRepositoryBinding(
+      options,
+      context,
+      row.sourceRepositoryPath,
+      repositoryIdentity,
+      row.createdAt
+    );
     const inserted = createWorkspaceRepository(options.db).insert({ ...row });
     const payload: WorkspaceCreatingPayload = workspacePayload(inserted);
     createEventRepository(options.db).append({
@@ -598,7 +726,7 @@ async function compensateCreation(
   row: WorkspaceRecord,
   reason: string
 ): Promise<void> {
-  const provablyOurs = await creationBelongsToReservation(runner, row);
+  const provablyOurs = await creationBelongsToReservation(options, runner, row);
   if (!provablyOurs) {
     markWorkspaceStatus(
       options,
@@ -615,18 +743,9 @@ async function compensateCreation(
   if (!claimed) return;
   try {
     await removeWorktree(runner, row.sourceRepositoryPath, row.worktreePath);
-    // Compare-and-delete on the ref itself: the deletion only lands while
-    // the branch still points exactly at the recorded base SHA, and only
-    // when no other worktree is using the branch.
-    const otherWorktrees = await findOtherWorktreesUsingBranch(
-      runner,
-      row.sourceRepositoryPath,
-      row.branchName,
-      row.worktreePath
-    );
-    if (otherWorktrees.length === 0) {
-      await deleteBranchIfAt(runner, row.sourceRepositoryPath, row.branchName, row.baseSha);
-    }
+    // Never delete the branch during compensation. Git ref deletion cannot
+    // be made atomic with the worktree registry, so retaining the dedicated
+    // branch is the only fail-closed outcome for concurrent external users.
   } catch (cleanupError) {
     // The reservation is already FAILED; preserved leftovers are surfaced as
     // DRIFTED by `workspace inspect` for human resolution.
@@ -635,10 +754,17 @@ async function compensateCreation(
 }
 
 async function creationBelongsToReservation(
+  options: WorkspaceServiceOptions,
   runner: GitRunner,
   row: WorkspaceRecord
 ): Promise<boolean> {
   try {
+    await assertCurrentRepositoryBinding(
+      options,
+      runner,
+      row.projectId,
+      row.sourceRepositoryPath
+    );
     const stats = tryLstatSync(row.worktreePath);
     if (!stats || stats.isSymbolicLink() || !stats.isDirectory()) return false;
     if (realpathSync(row.worktreePath) !== row.worktreePath) return false;
@@ -660,10 +786,12 @@ async function creationBelongsToReservation(
 
 /** All READY-validation invariants. Fail closed on any mismatch. */
 async function verifyReadyWorkspace(
+  options: WorkspaceServiceOptions,
   runner: GitRunner,
   row: WorkspaceRecord,
   worktreeRoot: string
 ): Promise<void> {
+  await assertCurrentRepositoryBinding(options, runner, row.projectId, row.sourceRepositoryPath);
   // Deterministic derivation must reproduce the recorded identity exactly.
   if (deriveBranchName(row.ticketId) !== row.branchName) {
     throw new Error(`Recorded branch ${row.branchName} is not deterministically derived`);
@@ -742,7 +870,7 @@ async function recoverCreatingReservation(
 ): Promise<WorkspaceCreateResult> {
   const { runner } = defaults(options);
   try {
-    await verifyReadyWorkspace(runner, row, worktreeRoot);
+    await verifyReadyWorkspace(options, runner, row, worktreeRoot);
   } catch (error) {
     markWorkspaceStatus(
       options,
@@ -797,7 +925,7 @@ async function reconcileWithExistingRow(
     case 'READY': {
       const { runner } = defaults(options);
       try {
-        await verifyReadyWorkspace(runner, row, worktreeRoot);
+        await verifyReadyWorkspace(options, runner, row, worktreeRoot);
       } catch (error) {
         throw new Error(
           `Existing workspace for ticket ${row.ticketId} is not healthy: ${
@@ -858,12 +986,17 @@ export async function createWorkspace(
   assertSafeTicketId(ticketIdInput);
 
   const project = createProjectRepository(options.db).findAll()[0];
-  const { sourceRepositoryPath, baseSha } = await resolveSourceRepository(
+  const { sourceRepositoryPath, baseSha, repositoryIdentity } = await resolveSourceRepository(
     runner,
     context,
     project.defaultBranch
   );
-  assertRepositoryProvenance(options, context.projectId, sourceRepositoryPath);
+  assertRepositoryProvenance(
+    options,
+    context.projectId,
+    sourceRepositoryPath,
+    repositoryIdentity
+  );
 
   const branchName = deriveBranchName(ticketIdInput);
   if (!(await isBranchNameValid(runner, sourceRepositoryPath, branchName))) {
@@ -915,18 +1048,23 @@ export async function createWorkspace(
 
   let row: WorkspaceRecord;
   try {
-    row = reserveWorkspace(options, context, {
-      id: randomUUID().replace(/-/g, ''),
-      projectId: context.projectId,
-      ticketId: ticketIdInput,
-      sourceRepositoryPath,
-      worktreePath,
-      branchName,
-      baseSha,
-      status: 'CREATING',
-      createdAt: now(),
-      updatedAt: now(),
-    });
+    row = reserveWorkspace(
+      options,
+      context,
+      {
+        id: randomUUID().replace(/-/g, ''),
+        projectId: context.projectId,
+        ticketId: ticketIdInput,
+        sourceRepositoryPath,
+        worktreePath,
+        branchName,
+        baseSha,
+        status: 'CREATING',
+        createdAt: now(),
+        updatedAt: now(),
+      },
+      repositoryIdentity
+    );
   } catch (reservationError) {
     // Lost the race against a concurrent creator: converge on their
     // reservation instead of duplicating any resources.
@@ -950,6 +1088,17 @@ export async function createWorkspace(
   // created; a failed `git worktree add` leaves nothing of ours behind.
   let gitResourcesCreated = false;
   try {
+    const currentRepositoryIdentity = await assertCurrentRepositoryBinding(
+      options,
+      runner,
+      context.projectId,
+      sourceRepositoryPath
+    );
+    if (!sameGitRepositoryIdentity(currentRepositoryIdentity, repositoryIdentity)) {
+      throw new Error(
+        'Source repository identity changed during workspace creation; refusing to operate'
+      );
+    }
     // Final pre-flight: the reservation window is the last chance for a
     // concurrent process to plant a conflicting path.
     if (tryLstatSync(worktreePath)) {
@@ -965,7 +1114,7 @@ export async function createWorkspace(
       baseSha
     );
     gitResourcesCreated = true;
-    await verifyReadyWorkspace(runner, row, worktreeRoot);
+    await verifyReadyWorkspace(options, runner, row, worktreeRoot);
     const result = finalizeReadyWorkspace(options, row);
     return {
       created: true,
@@ -1014,6 +1163,12 @@ export async function inspectWorkspace(
         `not the current project directory`
     );
   }
+  await assertCurrentRepositoryBinding(
+    options,
+    runner,
+    context.projectId,
+    context.canonicalProjectDir
+  );
   // Deterministic identity must reproduce the recorded path/branch, so a
   // tampered row cannot redirect inspection at an arbitrary worktree.
   if (deriveBranchName(row.ticketId) !== row.branchName) {
@@ -1083,14 +1238,26 @@ function computeHealth(
 }
 
 /** List workspaces of the current project only, ordered by ticket id. */
-export function listWorkspacesForProject(
+export async function listWorkspacesForProject(
   options: WorkspaceServiceOptions
-): readonly WorkspaceRecord[] {
+): Promise<readonly WorkspaceRecord[]> {
+  const { runner } = defaults(options);
   const context = resolveProjectContext(options);
   // Fail closed when invoked from a checkout that does not match the
   // recorded source repository: listing another repository's workspaces from
   // here would only confuse operators.
   const rows = createWorkspaceRepository(options.db).listByProject(context.projectId);
+  const binding = createWorkspaceRepositoryBindingRepository(options.db).findByProjectId(
+    context.projectId
+  );
+  if (rows.length > 0 || binding !== undefined) {
+    await assertCurrentRepositoryBinding(
+      options,
+      runner,
+      context.projectId,
+      context.canonicalProjectDir
+    );
+  }
   for (const row of rows) {
     if (row.sourceRepositoryPath !== context.canonicalProjectDir) {
       throw new Error(
@@ -1106,8 +1273,8 @@ export function listWorkspacesForProject(
  * Conservatively remove a clean READY workspace. Dirty or ambiguous
  * workspaces are refused; there is deliberately no force option.
  *
- * The dedicated branch is deleted only when it provably still points exactly
- * at the recorded base SHA (no unique work). Otherwise it is retained.
+ * The dedicated branch is retained on every removal because Git ref deletion
+ * cannot be made atomic with the worktree registry.
  */
 export async function removeWorkspace(
   options: WorkspaceServiceOptions,
@@ -1139,6 +1306,12 @@ export async function removeWorkspace(
         `not the current project directory`
     );
   }
+  await assertCurrentRepositoryBinding(
+    options,
+    runner,
+    context.projectId,
+    context.canonicalProjectDir
+  );
   // The recorded path must be exactly the deterministic location under the
   // current ShipGraph worktree root, with no symlink components anywhere.
   const worktreeRoot = resolveWorktreeRoot(options.worktreeRoot, context.canonicalProjectDir);
@@ -1228,29 +1401,10 @@ export async function removeWorkspace(
 
   await removeWorktree(runner, row.sourceRepositoryPath, row.worktreePath);
 
-  // Branch deletion only when provably empty of unique work, enforced by an
-  // atomic compare-and-delete: the ref is removed only while it still points
-  // exactly at the recorded base SHA. The worktree must be gone first; git
-  // refuses to delete a checked-out branch's worktree binding implicitly via
-  // the failed update above otherwise.
-  let branchRetained = true;
-  // The branch must not be checked out in any OTHER registered worktree:
-  // deleting a shared ref would corrupt that checkout's branch state.
-  const otherWorktrees = await findOtherWorktreesUsingBranch(
-    runner,
-    row.sourceRepositoryPath,
-    row.branchName,
-    row.worktreePath
-  );
-  if (otherWorktrees.length === 0) {
-    const deleted = await deleteBranchIfAt(
-      runner,
-      row.sourceRepositoryPath,
-      row.branchName,
-      row.baseSha
-    );
-    if (deleted) branchRetained = false;
-  }
+  // Ref deletion cannot be made atomic with Git's worktree registry. Retain
+  // the dedicated branch on every removal so a concurrent external checkout
+  // can never lose its branch or make a unique commit unreachable.
+  const branchRetained = true;
 
   const updated = markWorkspaceStatus(
     options,

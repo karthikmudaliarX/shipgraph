@@ -70,6 +70,20 @@ export type WorkspaceRecord = {
   updatedAt: string;
 };
 
+export type WorkspaceRepositoryBinding = {
+  projectId: string;
+  sourceRepositoryPath: string;
+  sourceDirectoryDevice: string;
+  sourceDirectoryInode: string;
+  gitCommonDir: string;
+  gitObjectDir: string;
+  gitCommonDevice: string;
+  gitCommonInode: string;
+  gitObjectDevice: string;
+  gitObjectInode: string;
+  createdAt: string;
+};
+
 export interface WorkspaceRepository {
   insert(workspace: WorkspaceRecord): WorkspaceRecord;
   findById(id: string): WorkspaceRecord | undefined;
@@ -82,6 +96,11 @@ export interface WorkspaceRepository {
     updatedAt: string,
     expectedStatuses?: readonly WorkspaceStatus[]
   ): WorkspaceRecord | undefined;
+}
+
+export interface WorkspaceRepositoryBindingRepository {
+  findByProjectId(projectId: string): WorkspaceRepositoryBinding | undefined;
+  insert(binding: WorkspaceRepositoryBinding): WorkspaceRepositoryBinding;
 }
 
 export interface ProjectRepository {
@@ -555,6 +574,41 @@ export function createWorkspaceRepository(db: DbConnection): WorkspaceRepository
   };
 }
 
+export function createWorkspaceRepositoryBindingRepository(
+  db: DbConnection
+): WorkspaceRepositoryBindingRepository {
+  return {
+    findByProjectId(projectId): WorkspaceRepositoryBinding | undefined {
+      const row = db
+        .prepare('SELECT * FROM workspace_repository_bindings WHERE project_id = ?')
+        .get(projectId) as Record<string, unknown> | undefined;
+      return row ? rowToWorkspaceRepositoryBinding(row) : undefined;
+    },
+    insert(binding): WorkspaceRepositoryBinding {
+      db.prepare(
+        `INSERT INTO workspace_repository_bindings (
+          project_id, source_repository_path, source_directory_device, source_directory_inode,
+          git_common_dir, git_object_dir,
+          git_common_device, git_common_inode, git_object_device, git_object_inode, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        binding.projectId,
+        binding.sourceRepositoryPath,
+        binding.sourceDirectoryDevice,
+        binding.sourceDirectoryInode,
+        binding.gitCommonDir,
+        binding.gitObjectDir,
+        binding.gitCommonDevice,
+        binding.gitCommonInode,
+        binding.gitObjectDevice,
+        binding.gitObjectInode,
+        binding.createdAt
+      );
+      return binding;
+    },
+  };
+}
+
 export function createEventRepository(db: DbConnection): EventRepository {
   const nextSequence = (projectId: string): number => {
     const row = db
@@ -717,6 +771,24 @@ function rowToWorkspace(row: Record<string, unknown>): WorkspaceRecord {
     status: String(row.status) as WorkspaceStatus,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+  };
+}
+
+function rowToWorkspaceRepositoryBinding(
+  row: Record<string, unknown>
+): WorkspaceRepositoryBinding {
+  return {
+    projectId: String(row.project_id),
+    sourceRepositoryPath: String(row.source_repository_path),
+    sourceDirectoryDevice: String(row.source_directory_device),
+    sourceDirectoryInode: String(row.source_directory_inode),
+    gitCommonDir: String(row.git_common_dir),
+    gitObjectDir: String(row.git_object_dir),
+    gitCommonDevice: String(row.git_common_device),
+    gitCommonInode: String(row.git_common_inode),
+    gitObjectDevice: String(row.git_object_device),
+    gitObjectInode: String(row.git_object_inode),
+    createdAt: String(row.created_at),
   };
 }
 
