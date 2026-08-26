@@ -104,10 +104,10 @@ export async function runProvidersRoute(
     risk: parseRisk(input.risk),
     envelope: {
       mode: parseMode(input.mode || config?.routing?.mode || 'balanced'),
-      maxConcurrentTickets: parseKnownNumber(
+      maxConcurrentTickets: parseKnownInteger(
         input.maxConcurrentTickets ?? String(config?.execution.maxConcurrentTickets ?? 'unknown')
       ),
-      activeConcurrentTickets: parseKnownNumber(input.activeConcurrentTickets ?? '0'),
+      activeConcurrentTickets: parseKnownInteger(input.activeConcurrentTickets ?? '0'),
       budgetRemaining: parseKnownNumber(input.budgetRemaining ?? 'unknown'),
     },
     ...(input.implementationProvider === undefined
@@ -157,6 +157,14 @@ function parseKnownNumber(value: string): number | 'unknown' {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) {
     throw new Error(`Expected a non-negative number or unknown, received: ${value}`);
+  }
+  return parsed;
+}
+
+function parseKnownInteger(value: string): number | 'unknown' {
+  const parsed = parseKnownNumber(value);
+  if (parsed !== 'unknown' && !Number.isInteger(parsed)) {
+    throw new Error(`Expected a non-negative integer or unknown, received: ${value}`);
   }
   return parsed;
 }

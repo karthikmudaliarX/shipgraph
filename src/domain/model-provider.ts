@@ -75,6 +75,10 @@ export const unknownNumberSchema = z.union([
   z.number().finite().nonnegative(),
   z.literal(UNKNOWN),
 ]);
+export const unknownIntegerSchema = z.union([
+  z.number().int().nonnegative(),
+  z.literal(UNKNOWN),
+]);
 export const unknownTimestampSchema = z.union([timestampSchema, z.literal(UNKNOWN)]);
 
 export const providerRegistryRecordSchema = z.object({
@@ -113,7 +117,7 @@ export const providerHealthRecordSchema = z.object({
   quotaResetAt: unknownTimestampSchema,
   recentFailureCount: z.number().int().nonnegative().max(1_000_000),
   activeRuns: z.number().int().nonnegative().max(1_000_000),
-  maxConcurrentRuns: unknownNumberSchema,
+  maxConcurrentRuns: unknownIntegerSchema,
   lastFailureAt: timestampSchema.optional(),
   lastSuccessAt: timestampSchema.optional(),
   checkedAt: timestampSchema,
@@ -146,8 +150,8 @@ export const usageLedgerRecordSchema = z.object({
   elapsedMs: z.number().int().nonnegative().max(31_536_000_000),
   outcome: modelOutcomeSchema,
   outcomeQuality: outcomeQualitySchema,
-  inputTokens: unknownNumberSchema,
-  outputTokens: unknownNumberSchema,
+  inputTokens: unknownIntegerSchema,
+  outputTokens: unknownIntegerSchema,
   cost: unknownNumberSchema,
   quotaRemaining: unknownNumberSchema,
   recordedAt: timestampSchema,
@@ -156,8 +160,8 @@ export type UsageLedgerRecord = z.infer<typeof usageLedgerRecordSchema>;
 
 export const executionEnvelopeSchema = z.object({
   mode: modelRoutingModeSchema,
-  maxConcurrentTickets: unknownNumberSchema,
-  activeConcurrentTickets: unknownNumberSchema,
+  maxConcurrentTickets: unknownIntegerSchema,
+  activeConcurrentTickets: unknownIntegerSchema,
   budgetRemaining: unknownNumberSchema,
 }).strict();
 export type ExecutionEnvelope = z.infer<typeof executionEnvelopeSchema>;
