@@ -66,7 +66,7 @@ envelope (Eco, Balanced or Max plus the caller's budget/concurrency values),
 selects a discovered usable model for implementation, review or repair, persists
 its reason, and atomically reserves the selected provider's known capacity when
 the caller supplies a durable execution run. A route without a run ID is a
-decision preview and does not claim provider capacity.
+non-persistent decision preview and does not claim provider capacity.
 The global ticket count in that envelope is a Scheduler-owned snapshot; MODEL-001
 does not claim or mutate global ticket capacity.
 Review routing prefers a different provider family from the implementation when

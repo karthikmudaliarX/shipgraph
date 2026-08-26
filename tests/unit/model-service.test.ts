@@ -141,7 +141,8 @@ describe('MODEL-001 service', () => {
     });
 
     expect(calls).toEqual({ probe: 4, discover: 4 });
-    expect(service.listRoutingDecisions()[0]?.reason).toBe(decision.reason);
+    expect(decision.reason).toContain('candidates=');
+    expect(service.listRoutingDecisions()).toHaveLength(0);
     expect(db.prepare('SELECT COUNT(*) AS count FROM provider_capacity_reservations').get()).toEqual({ count: 0 });
     expect(usage.entry.inputTokens).toBe('unknown');
     expect(usage.entry.outputTokens).toBe('unknown');
@@ -316,6 +317,47 @@ describe('MODEL-001 service', () => {
     expect(service.listHealth()[0]?.activeRuns).toBe(0);
   });
 
+  it('keeps previews non-persistent so the same request can become execution-bound', async () => {
+    const calls = { probe: 0, discover: 0 };
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [adapter('codex', 'openai', calls)],
+      now: () => now,
+    });
+    await service.refresh();
+
+    const preview = await service.route({
+      requestId: 'preview-then-run',
+      task: 'implementation',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 4,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    });
+    expect(preview.providerId).toBe('codex');
+    expect(service.listRoutingDecisions()).toHaveLength(0);
+
+    const bound = await service.route({
+      requestId: 'preview-then-run',
+      runId: 'run-1',
+      task: 'implementation',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 4,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    });
+    expect(bound.providerId).toBe('codex');
+    expect(service.listRoutingDecisions()).toHaveLength(1);
+    expect(service.listHealth()[0]?.activeRuns).toBe(1);
+  });
+
   it('refuses to replay a legacy capacity reservation without durable-run provenance', async () => {
     const calls = { probe: 0, discover: 0 };
     const service = new ModelRoutingService({
@@ -336,6 +378,7 @@ describe('MODEL-001 service', () => {
         budgetRemaining: 'unknown',
       },
     });
+    service.getRepository().appendRoutingDecision(preview);
     db.prepare(
       `INSERT INTO provider_capacity_reservations (
         routing_decision_id, project_id, request_id, provider_id, model_id,
@@ -349,7 +392,6 @@ describe('MODEL-001 service', () => {
       preview.modelId,
       now
     );
-
     await expect(service.route({
       requestId: 'legacy-route-request',
       task: 'implementation',
@@ -438,5 +480,21 @@ describe('MODEL-001 service', () => {
       routingDecisionId: decision.id,
     });
     expect(service.listHealth()[0]?.activeRuns).toBe(0);
+    await expect(service.recordUsage({
+      runId: 'run-1',
+      providerId: decision.providerId,
+      modelId: decision.modelId,
+      task: 'implementation',
+      retryCount: 1,
+      elapsedMs: 10,
+      outcome: 'failed',
+      outcomeQuality: 'poor',
+      quotaRemaining: 0,
+      providerError: 'quota',
+      routingDecisionId: decision.id,
+    })).rejects.toThrow(/already finalized/);
+    expect(service.listUsage()).toHaveLength(2);
+    expect(service.listHealth()[0]?.activeRuns).toBe(0);
+    expect(service.listHealth()[0]?.quotaRemaining).toBe('unknown');
   });
 });

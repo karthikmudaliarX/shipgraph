@@ -407,6 +407,15 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE run_id IS NOT NULL AND status = 'active';
     `,
   },
+  {
+    version: 10,
+    name: 'make_model_usage_finalization_unique',
+    up: `
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_ledger_routing_decision
+        ON usage_ledger(routing_decision_id)
+        WHERE routing_decision_id IS NOT NULL;
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {

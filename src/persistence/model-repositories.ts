@@ -280,6 +280,17 @@ export function createModelRepository(db: DbConnection): ModelRepository {
             `Usage ledger routing decision ${parsed.routingDecisionId} does not belong to run ${parsed.runId}`
           );
         }
+        const existingUsage = db
+          .prepare(
+            `SELECT id FROM usage_ledger
+             WHERE routing_decision_id = ?`
+          )
+          .get(parsed.routingDecisionId) as { id: string } | undefined;
+        if (existingUsage !== undefined) {
+          throw new Error(
+            `Usage ledger routing decision ${parsed.routingDecisionId} was already finalized`
+          );
+        }
       }
       db.prepare(
         `INSERT INTO usage_ledger (

@@ -134,9 +134,10 @@ export class ModelRoutingService {
         createdAt: this.now(),
       };
       if (request.runId === undefined) {
-        // A route without a durable execution run is a read/decision preview.
-        // Only an execution-bound route may claim provider capacity.
-        return this.repository.appendRoutingDecision(decision);
+        // A route without a durable execution run is a read-only preview.
+        // Only an execution-bound route may persist a decision or claim
+        // provider capacity.
+        return decision;
       }
       const persisted = this.repository.reserveProviderCapacityAndAppendRoutingDecision(
         decision,
