@@ -199,6 +199,53 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 6,
+    name: 'persist_agent_execution_runs',
+    up: `
+      -- The original runs table is retained for CORE-001 compatibility. These
+      -- nullable additions let old rows remain readable while every new
+      -- AGENT-001 execution is written with a complete durable record.
+      ALTER TABLE runs ADD COLUMN project_id TEXT;
+      ALTER TABLE runs ADD COLUMN workspace_id TEXT;
+      ALTER TABLE runs ADD COLUMN workspace_path TEXT;
+      ALTER TABLE runs ADD COLUMN provider TEXT;
+      ALTER TABLE runs ADD COLUMN model TEXT;
+      ALTER TABLE runs ADD COLUMN created_at TEXT;
+      ALTER TABLE runs ADD COLUMN updated_at TEXT;
+      ALTER TABLE runs ADD COLUMN provider_session_id TEXT;
+      ALTER TABLE runs ADD COLUMN provider_process_id INTEGER;
+      ALTER TABLE runs ADD COLUMN exit_code INTEGER;
+      ALTER TABLE runs ADD COLUMN termination_signal TEXT;
+      ALTER TABLE runs ADD COLUMN timed_out INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE runs ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE runs ADD COLUMN failure_category TEXT;
+      ALTER TABLE runs ADD COLUMN failure_reason TEXT;
+      ALTER TABLE runs ADD COLUMN stdout TEXT NOT NULL DEFAULT '';
+      ALTER TABLE runs ADD COLUMN stderr TEXT NOT NULL DEFAULT '';
+      ALTER TABLE runs ADD COLUMN stdout_truncated INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE runs ADD COLUMN stderr_truncated INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE runs ADD COLUMN evidence_json TEXT;
+      ALTER TABLE runs ADD COLUMN instructions_sha256 TEXT;
+      ALTER TABLE runs ADD COLUMN timeout_ms INTEGER;
+
+      UPDATE runs
+         SET created_at = started_at
+       WHERE created_at IS NULL;
+      UPDATE runs
+         SET updated_at = COALESCE(completed_at, started_at)
+       WHERE updated_at IS NULL;
+
+      CREATE INDEX IF NOT EXISTS idx_runs_project_ticket
+        ON runs(project_id, ticket_id, started_at);
+
+      -- A ticket may have history, but it can never have two live provider
+      -- executions. This is a database invariant, not a process-local lock.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_single_active_ticket
+        ON runs(ticket_id)
+        WHERE status IN ('CREATED', 'STARTING', 'RUNNING');
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {

@@ -120,6 +120,7 @@ describe('CLI smoke tests', () => {
       'backlog',
       'ready',
       'workspace',
+      'agent',
     ]);
   });
 

@@ -7,6 +7,16 @@ import { initProject } from './init.js';
 import { showStatus } from './status.js';
 import { syncBacklogProject, validateBacklogProject } from './backlog.js';
 import { emitReady, showReady } from './ready.js';
+import { createOpenCodeAdapter } from '../adapters/agent/opencode.js';
+import { AGENT_PROVIDERS, type AgentProvider } from '../domain/agent-provider.js';
+import { DEFAULT_AGENT_TIMEOUT_MS } from '../domain/agent-run.js';
+import {
+  agentServiceOptions,
+  runAgentInspect,
+  runAgentList,
+  runAgentRecover,
+  runAgentTask,
+} from './agent.js';
 import { assertSafeShipgraphPaths } from '../utils/paths.js';
 import { openAndMigrate, type DbConnection } from '../persistence/db.js';
 import {
@@ -280,6 +290,169 @@ export function createProgram(): Command {
       }
     });
 
+  const agent = program
+    .command('agent')
+    .description('Execute an explicitly supplied task in a verified agent workspace');
+
+  agent
+    .command('run <ticket-id>')
+    .description('Run one provider adapter in the ticket\'s READY workspace')
+    .requiredOption('--model <provider/model>', 'explicit provider model identifier')
+    .requiredOption('--instructions <text>', 'instructions supplied to the coding agent')
+    .option('--provider <provider>', 'provider adapter', 'opencode')
+    .option('--executable <path>', 'OpenCode executable or absolute test double', 'opencode')
+    .option('--timeout-ms <milliseconds>', 'execution timeout', String(DEFAULT_AGENT_TIMEOUT_MS))
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--worktree-root <path>', 'ShipGraph worktree root override')
+    .option('--json', 'output the durable run as JSON')
+    .action(async (
+      ticketId: string,
+      options: {
+        model: string;
+        instructions: string;
+        provider?: string;
+        executable?: string;
+        timeoutMs?: string;
+        projectDir?: string;
+        worktreeRoot?: string;
+        json?: boolean;
+      }
+    ) => {
+      let db: DbConnection | undefined;
+      const abortController = new AbortController();
+      const abortExecution = (): void => abortController.abort();
+      process.once('SIGINT', abortExecution);
+      process.once('SIGTERM', abortExecution);
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        const provider = parseAgentProvider(options.provider ?? 'opencode');
+        if (provider !== 'opencode') {
+          throw new Error(
+            `Provider ${provider} has no AGENT-001 adapter yet; only opencode is available`
+          );
+        }
+        db = openInitializedDatabase(projectDir);
+        const base = workspaceServiceOptions(db, projectDir, options.worktreeRoot);
+        const report = await runAgentTask(
+          agentServiceOptions(base, createOpenCodeAdapter({ executable: options.executable })),
+          {
+            ticketId,
+            provider,
+            model: options.model,
+            instructions: options.instructions,
+            timeoutMs: parsePositiveInteger(options.timeoutMs, 'timeout-ms'),
+            signal: abortController.signal,
+          }
+        );
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          const run = report.run as Record<string, unknown>;
+          console.log(`Agent run ${String(run.id)} ${String(run.status).toLowerCase()}.`);
+          console.log(`Provider: ${String(run.provider)}`);
+          console.log(`Model: ${String(run.model)}`);
+          console.log(`Workspace: ${String(run.workspacePath)}`);
+          if (run.failureReason !== undefined) console.log(`Reason: ${String(run.failureReason)}`);
+        }
+        if ((report.run as Record<string, unknown>).status !== 'SUCCEEDED') {
+          process.exitCode = 1;
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
+        process.removeListener('SIGINT', abortExecution);
+        process.removeListener('SIGTERM', abortExecution);
+        db?.close();
+      }
+    });
+
+  agent
+    .command('inspect <run-id>')
+    .description('Inspect one durable agent run')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--json', 'output the durable run as JSON')
+    .action(async (runId: string, options: { projectDir?: string; json?: boolean }) => {
+      let db: DbConnection | undefined;
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        db = openInitializedDatabase(projectDir);
+        const report = await runAgentInspect(workspaceServiceOptions(db, projectDir), runId);
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          const run = report.run as Record<string, unknown>;
+          console.log(`Run: ${String(run.id)}`);
+          console.log(`State: ${String(run.status)}`);
+          console.log(`Ticket: ${String(run.ticketId)}`);
+          console.log(`Provider/model: ${String(run.provider)}/${String(run.model)}`);
+          console.log(`Workspace: ${String(run.workspacePath)}`);
+          if (run.failureReason !== undefined) console.log(`Reason: ${String(run.failureReason)}`);
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
+        db?.close();
+      }
+    });
+
+  agent
+    .command('list')
+    .description('List durable agent runs for the current project')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--json', 'output durable runs as JSON')
+    .action(async (options: { projectDir?: string; json?: boolean }) => {
+      let db: DbConnection | undefined;
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        db = openInitializedDatabase(projectDir);
+        const report = await runAgentList(workspaceServiceOptions(db, projectDir));
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          const runs = report.runs as Array<Record<string, unknown>>;
+          if (runs.length === 0) {
+            console.log('No agent runs for this project.');
+            return;
+          }
+          for (const run of runs) {
+            console.log(`${String(run.id)}  ${String(run.status)}  ${String(run.ticketId)}  ${String(run.model)}`);
+          }
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
+        db?.close();
+      }
+    });
+
+  agent
+    .command('recover <run-id>')
+    .description('Mark an active post-restart run NEEDS_HUMAN without killing unknown processes')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--json', 'output the recovery result as JSON')
+    .action(async (runId: string, options: { projectDir?: string; json?: boolean }) => {
+      let db: DbConnection | undefined;
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        db = openInitializedDatabase(projectDir);
+        const report = await runAgentRecover(workspaceServiceOptions(db, projectDir), runId);
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          const run = report.run as Record<string, unknown>;
+          console.log(`Run ${String(run.id)} is ${String(run.status)}.`);
+          console.log(report.recovered ? 'Manual recovery recorded.' : 'Run was already terminal.');
+        }
+        if ((report.run as Record<string, unknown>).status !== 'SUCCEEDED') {
+          process.exitCode = 1;
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
+        db?.close();
+      }
+    });
+
   return program;
 }
 
@@ -291,6 +464,21 @@ function emitCommandError(error: unknown, json = false): void {
     console.error(message);
   }
   process.exitCode = 1;
+}
+
+function parseAgentProvider(value: string): AgentProvider {
+  if (!AGENT_PROVIDERS.includes(value as AgentProvider)) {
+    throw new Error(`Unsupported agent provider: ${value}`);
+  }
+  return value as AgentProvider;
+}
+
+function parsePositiveInteger(value: string | undefined, optionName: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`--${optionName} must be a positive integer`);
+  }
+  return parsed;
 }
 
 function readPackageVersion(): string {

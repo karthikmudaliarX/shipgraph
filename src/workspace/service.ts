@@ -832,6 +832,59 @@ async function verifyReadyWorkspace(
       `New worktree contains untracked or ignored files: ${row.worktreePath}`
     );
   }
+  const audit = recordedCreationBaseSha(options, row.projectId, row.id, row.ticketId);
+  if (audit.error !== undefined || audit.baseSha !== row.baseSha) {
+    throw new Error(
+      `Workspace ${row.id} does not match its immutable creation provenance; refusing execution`
+    );
+  }
+}
+
+/**
+ * Return only a workspace whose complete WORK-001 identity is live and
+ * healthy. This is the execution hand-off boundary: it never creates a root,
+ * recreates a worktree, adopts a path, or falls back to the source checkout.
+ */
+export async function getVerifiedWorkspaceForExecution(
+  options: WorkspaceServiceOptions,
+  ticketIdInput: string
+): Promise<WorkspaceRecord> {
+  const { runner } = defaults(options);
+  assertSafeTicketId(ticketIdInput);
+  const context = resolveProjectContext(options);
+  const row = createWorkspaceRepository(options.db).findActiveByTicket(
+    context.projectId,
+    ticketIdInput
+  );
+  if (!row) {
+    throw new Error(`No active ShipGraph workspace found for ticket ${ticketIdInput}`);
+  }
+  if (row.sourceRepositoryPath !== context.canonicalProjectDir) {
+    throw new Error(
+      `Workspace ${row.id} belongs to source repository ${row.sourceRepositoryPath}, ` +
+        `not the current project directory; refusing agent execution`
+    );
+  }
+  if (row.status !== 'READY') {
+    throw new Error(
+      `Workspace ${row.id} for ticket ${ticketIdInput} is ${row.status}; ` +
+        'agent execution requires a READY workspace'
+    );
+  }
+  // A missing root is an external drift condition. Do not recreate it while
+  // validating an execution target.
+  const worktreeRoot = resolveWorktreeRoot(
+    options.worktreeRoot,
+    context.canonicalProjectDir,
+    false
+  );
+  await verifyReadyWorkspace(options, runner, row, worktreeRoot);
+  return row;
+}
+
+/** Resolve the current project identity for read-only run queries. */
+export function getCurrentProjectId(options: WorkspaceServiceOptions): string {
+  return resolveProjectContext(options).projectId;
 }
 
 async function waitForActiveResolution(

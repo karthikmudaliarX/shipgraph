@@ -27,10 +27,11 @@ src/
   domain/           Typed contracts (ticket, config)
   persistence/      SQLite repositories, transitions, and migrations
   adapters/
-    agent/          Agent-adapter interface (OpenCode, Codex, ACP)
+    agent/          Provider-neutral adapter contract and OpenCode execution
     git-host/       Git-host adapter interface (GitHub)
   events/           Append-only audit-event contract
   config/           Configuration schema and loader
+  execution/        Durable agent-run lifecycle and recovery
   utils/            Shared helpers and error types
 ```
 
@@ -117,9 +118,10 @@ ShipGraph's differentiator is the combination of a deterministic outer loop,
 agentic inner loop, exact-SHA release provenance, and approved-backlog
 auto-advancement.
 
-## Current status (CORE-001)
+## Current status (AGENT-001)
 
-CORE-001 establishes the foundation: CLI, typed contracts, state machine,
-SQLite persistence, event log, adapter interfaces, tests, and CI. It does **not**
-run agents, open PRs, perform reviews, or merge code. Those capabilities are
-planned in successor tickets.
+CORE-001, CORE-002 and WORK-001 establish the foundation, backlog scheduler and
+safe isolated workspaces. AGENT-001 adds one bounded OpenCode execution in an
+already verified workspace. It does **not** select models, open PRs, perform
+reviews, repair changes, or merge code; those capabilities remain in successor
+tickets.

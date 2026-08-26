@@ -77,13 +77,9 @@ describe('SQLite persistence', () => {
 
     const upgraded = createDatabase(legacyPath);
     migrate(upgraded);
-    expect(upgraded.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual([
-      { version: 1 },
-      { version: 2 },
-      { version: 3 },
-      { version: 4 },
-      { version: 5 },
-    ]);
+    expect(upgraded.prepare('SELECT version FROM schema_migrations ORDER BY version').all()).toEqual(
+      MIGRATIONS.map((migration) => ({ version: migration.version }))
+    );
     expect(createProjectRepository(upgraded).findById('legacy-project')?.name).toBe('test');
     migrate(upgraded);
     expect(upgraded.prepare('SELECT COUNT(*) AS count FROM backlog_syncs').get()).toEqual({ count: 0 });
