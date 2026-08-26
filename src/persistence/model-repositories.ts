@@ -45,6 +45,10 @@ export interface ModelRepository {
     projectId: string,
     requestId: string
   ): RoutingReservationLookup | undefined;
+  findActiveRoutingDecisionByRun(
+    projectId: string,
+    runId: string
+  ): RoutingReservationLookup | undefined;
   releaseProviderCapacity(
     projectId: string,
     runId: string,
@@ -330,6 +334,7 @@ export function createModelRepository(db: DbConnection): ModelRepository {
     appendRoutingDecision,
     reserveProviderCapacityAndAppendRoutingDecision,
     findRoutingDecisionByRequest,
+    findActiveRoutingDecisionByRun,
     releaseProviderCapacity,
     listRoutingDecisions(projectId): readonly ModelRoutingDecision[] {
       const rows = db
@@ -537,6 +542,41 @@ export function createModelRepository(db: DbConnection): ModelRepository {
     }
     const row = rows[0];
     if (row === undefined) return undefined;
+    return rowToRoutingReservationLookup(row);
+  }
+
+  function findActiveRoutingDecisionByRun(
+    projectId: string,
+    runId: string
+  ): RoutingReservationLookup | undefined {
+    const parsedRunId = validateRunId(runId);
+    const rows = db
+      .prepare(
+        `SELECT decisions.*,
+                reservations.run_id,
+                reservations.routing_decision_id AS reservation_id
+         FROM routing_decisions AS decisions
+         INNER JOIN provider_capacity_reservations AS reservations
+           ON reservations.routing_decision_id = decisions.id
+         WHERE decisions.project_id = ?
+           AND reservations.project_id = ?
+           AND reservations.run_id = ?
+           AND reservations.status = 'active'
+         ORDER BY decisions.created_at, decisions.id`
+      )
+      .all(projectId, projectId, parsedRunId) as Array<Record<string, unknown>>;
+    if (rows.length > 1) {
+      throw new Error(
+        `Durable run ${parsedRunId} has multiple active routing decisions; refusing replay`
+      );
+    }
+    const row = rows[0];
+    return row === undefined ? undefined : rowToRoutingReservationLookup(row);
+  }
+
+  function rowToRoutingReservationLookup(
+    row: Record<string, unknown>
+  ): RoutingReservationLookup {
     return {
       decision: rowToRoutingDecision(row),
       hasReservation: row.reservation_id !== null && row.reservation_id !== undefined,

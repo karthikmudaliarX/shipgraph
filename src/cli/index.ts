@@ -248,6 +248,7 @@ export function createProgram(): Command {
     .requiredOption('--risk <risk>', 'task risk: low, medium, high, or critical')
     .option('--mode <mode>', 'execution mode: eco, balanced, or max')
     .option('--run-id <run-id>', 'durable execution run to reserve provider capacity for')
+    .option('--request-id <request-id>', 'stable routing request id for replay')
     .option('--implementation-provider <provider>', 'provider used for implementation diversity')
     .option('--fallback-from <provider>', 'provider to exclude for a fallback attempt')
     .option('--exclude-provider <provider...>', 'additional providers to exclude')
@@ -262,6 +263,7 @@ export function createProgram(): Command {
         risk: string;
         mode?: string;
         runId?: string;
+        requestId?: string;
         implementationProvider?: string;
         fallbackFrom?: string;
         excludeProvider?: string[];
@@ -283,6 +285,7 @@ export function createProgram(): Command {
             risk: parseRisk(options.risk),
             mode: options.mode === undefined ? '' : parseMode(options.mode),
             runId: options.runId,
+            requestId: options.requestId,
             ...(options.implementationProvider === undefined
               ? {}
               : { implementationProvider: providerIdForCli(options.implementationProvider) }),

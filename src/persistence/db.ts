@@ -409,11 +409,20 @@ export const MIGRATIONS: readonly Migration[] = [
   },
   {
     version: 10,
-    name: 'make_model_usage_finalization_unique',
+    name: 'guard_model_usage_finalization',
     up: `
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_ledger_routing_decision
-        ON usage_ledger(routing_decision_id)
-        WHERE routing_decision_id IS NOT NULL;
+      -- Do not rewrite or reject legacy duplicate telemetry during upgrade.
+      -- New finalization attempts are rejected by this append-only guard.
+      CREATE TRIGGER IF NOT EXISTS usage_ledger_one_finalization_per_route
+      BEFORE INSERT ON usage_ledger
+      WHEN NEW.routing_decision_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM usage_ledger
+          WHERE routing_decision_id = NEW.routing_decision_id
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'usage ledger routing decision was already finalized');
+      END;
     `,
   },
 ];

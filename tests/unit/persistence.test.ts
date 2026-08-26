@@ -87,6 +87,150 @@ describe('SQLite persistence', () => {
     upgraded.close();
   });
 
+  it('upgrades legacy duplicate model finalizations without rejecting historical telemetry', () => {
+    const legacyPath = join(databaseDir, 'legacy-model-usage.db');
+    const legacy = createDatabase(legacyPath);
+    for (const migration of MIGRATIONS.slice(0, 9)) {
+      legacy.exec(migration.up);
+      legacy
+        .prepare(
+          'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)'
+        )
+        .run(migration.version, migration.name, new Date().toISOString());
+    }
+    const now = new Date().toISOString();
+    legacy.prepare(
+      `INSERT INTO projects (
+        id, name, repository, default_branch, config_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'legacy-model-project',
+      'legacy-model',
+      'owner/legacy-model',
+      'main',
+      JSON.stringify(TEST_CONFIG),
+      now,
+      now
+    );
+    legacy.prepare(
+      `INSERT INTO tickets (
+        id, project_id, title, description, priority, risk, status, scope_json,
+        acceptance_criteria_json, verification_json, agent_json, release_json,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'KAR-9001',
+      'legacy-model-project',
+      'legacy model usage',
+      'legacy fixture',
+      'medium',
+      'medium',
+      'QUEUED',
+      '{}',
+      '[]',
+      '{}',
+      '{}',
+      '{}',
+      now,
+      now
+    );
+    legacy.prepare(
+      `INSERT INTO runs (
+        id, ticket_id, base_sha, branch_name, status, started_at, project_id,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'legacy-run',
+      'KAR-9001',
+      '0'.repeat(40),
+      'agent/legacy-model',
+      'SUCCEEDED',
+      now,
+      'legacy-model-project',
+      now,
+      now
+    );
+    legacy.prepare(
+      `INSERT INTO routing_decisions (
+        id, project_id, request_id, task, risk, mode, provider_id, provider_family,
+        model_id, reason, candidates_considered, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'legacy-decision',
+      'legacy-model-project',
+      'legacy-request',
+      'implementation',
+      'medium',
+      'balanced',
+      'codex',
+      'openai',
+      'provider/dynamic',
+      'legacy fixture',
+      1,
+      now
+    );
+    const insertUsage = legacy.prepare(
+      `INSERT INTO usage_ledger (
+        id, project_id, run_id, routing_decision_id, provider_id, model_id, task,
+        retry_count, elapsed_ms, outcome, outcome_quality, input_tokens_json,
+        output_tokens_json, cost_json, quota_remaining_json, recorded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    for (const id of ['legacy-usage-1', 'legacy-usage-2']) {
+      insertUsage.run(
+        id,
+        'legacy-model-project',
+        'legacy-run',
+        'legacy-decision',
+        'codex',
+        'provider/dynamic',
+        'implementation',
+        0,
+        1,
+        'succeeded',
+        'good',
+        JSON.stringify('unknown'),
+        JSON.stringify('unknown'),
+        JSON.stringify('unknown'),
+        JSON.stringify('unknown'),
+        now
+      );
+    }
+    legacy.close();
+
+    const upgraded = createDatabase(legacyPath);
+    expect(() => migrate(upgraded)).not.toThrow();
+    expect(upgraded.prepare(
+      'SELECT COUNT(*) AS count FROM usage_ledger WHERE routing_decision_id = ?'
+    ).get('legacy-decision')).toEqual({ count: 2 });
+    const insertUpgradedUsage = upgraded.prepare(
+      `INSERT INTO usage_ledger (
+        id, project_id, run_id, routing_decision_id, provider_id, model_id, task,
+        retry_count, elapsed_ms, outcome, outcome_quality, input_tokens_json,
+        output_tokens_json, cost_json, quota_remaining_json, recorded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    expect(() => insertUpgradedUsage.run(
+      'legacy-usage-3',
+      'legacy-model-project',
+      'legacy-run',
+      'legacy-decision',
+      'codex',
+      'provider/dynamic',
+      'implementation',
+      0,
+      1,
+      'succeeded',
+      'good',
+      JSON.stringify('unknown'),
+      JSON.stringify('unknown'),
+      JSON.stringify('unknown'),
+      JSON.stringify('unknown'),
+      now
+    )).toThrow(/already finalized/);
+    upgraded.close();
+  });
+
   it('rejects direct creation of a ticket that skips the queued approval boundary', () => {
     const projectId = randomUUID();
     createProjectRepository(db).create({

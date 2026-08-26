@@ -141,6 +141,7 @@ shipgraph agent run AG-001 --model <discovered-provider/model> --instructions "I
 shipgraph providers refresh --json
 
 # Preview a route; --run-id <run-id> binds it to a durable execution reservation
+# Retries without --request-id use the durable run ID as their stable key
 shipgraph providers route implementation --risk medium --mode balanced --json
 
 # Inspect persisted provider health and discovered models

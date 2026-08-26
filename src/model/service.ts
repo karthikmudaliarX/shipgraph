@@ -89,33 +89,34 @@ export class ModelRoutingService {
 
   public async route(input: ModelRoutingRequest): Promise<ModelRoutingDecision> {
     const request = modelRoutingRequestSchema.parse(input);
-    const requestId = request.requestId ?? this.createId();
-    if (request.requestId !== undefined) {
-      const existing = this.repository.findRoutingDecisionByRequest(
-        this.options.projectId,
-        request.requestId
-      );
-      if (existing !== undefined) {
-        if (existing.hasReservation && existing.runId === undefined) {
-          throw new Error(
-            `Routing request ${request.requestId} has an unbound capacity reservation; refusing replay`
-          );
-        }
-        if (existing.runId !== request.runId) {
-          throw new Error(
-            `Routing request ${request.requestId} is bound to a different durable run`
-          );
-        }
-        if (
-          existing.decision.task !== request.task ||
-          existing.decision.risk !== request.risk ||
-          existing.decision.mode !== request.envelope.mode
-        ) {
-          throw new Error(`Routing request ${request.requestId} was reused for a different route`);
-        }
-        return existing.decision;
+    const existing = request.requestId === undefined
+      ? request.runId === undefined
+        ? undefined
+        : this.repository.findActiveRoutingDecisionByRun(this.options.projectId, request.runId)
+      : this.repository.findRoutingDecisionByRequest(this.options.projectId, request.requestId);
+    if (existing !== undefined) {
+      const requestKey = request.requestId ?? request.runId ?? existing.decision.requestId;
+      if (existing.hasReservation && existing.runId === undefined) {
+        throw new Error(
+          `Routing request ${requestKey} has an unbound capacity reservation; refusing replay`
+        );
       }
+      if (existing.runId !== request.runId) {
+        throw new Error(`Routing request ${requestKey} is bound to a different durable run`);
+      }
+      if (
+        existing.decision.task !== request.task ||
+        existing.decision.risk !== request.risk ||
+        existing.decision.mode !== request.envelope.mode
+      ) {
+        throw new Error(`Routing request ${requestKey} was reused for a different route`);
+      }
+      return existing.decision;
     }
+    // A durable run is the stable idempotency key when the caller does not
+    // provide a separate request ID. This makes CLI retries recover a lost
+    // response without stranding the provider reservation.
+    const requestId = request.requestId ?? request.runId ?? this.createId();
     await this.registry.ensureFresh();
     // Routing decisions that depend on quota reset timing must use the same
     // injected clock as persistence. Callers may still provide an explicit

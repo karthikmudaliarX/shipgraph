@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { initProject } from '../../src/cli/init.js';
 import { createProgram } from '../../src/cli/index.js';
+import { openAndMigrate } from '../../src/persistence/db.js';
+import { createTicketRepository } from '../../src/persistence/repositories.js';
 import type { ShipgraphConfig } from '../../src/config/schema.js';
 
 describe('MODEL-001 CLI', () => {
@@ -32,6 +34,42 @@ describe('MODEL-001 CLI', () => {
       },
     };
     initProject(projectDir, { config });
+    const db = openAndMigrate(join(projectDir, '.shipgraph', 'shipgraph.db'));
+    const project = db.prepare('SELECT id FROM projects').get() as { id: string };
+    createTicketRepository(db).create({
+      id: 'KAR-6001',
+      projectId: project.id,
+      title: 'CLI model run',
+      description: 'disposable durable run',
+      priority: 'medium',
+      dependsOn: [],
+      scope: { allowedPaths: [], forbiddenPaths: [] },
+      acceptanceCriteria: [],
+      verification: { commands: [] },
+      risk: 'medium',
+      agent: {},
+      release: {},
+      status: 'QUEUED',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO runs (
+        id, ticket_id, base_sha, branch_name, status, started_at, project_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'run-cli-1',
+      'KAR-6001',
+      '0'.repeat(40),
+      'agent/cli-model',
+      'RUNNING',
+      now,
+      project.id,
+      now,
+      now
+    );
+    db.close();
     process.exitCode = undefined;
   });
 
@@ -77,6 +115,49 @@ describe('MODEL-001 CLI', () => {
       providers: Array<Record<string, unknown>>;
     };
     expect(listed.providers).toHaveLength(4);
+
+    consoleSpy.mockClear();
+    await createProgram().parseAsync(
+      [
+        'providers',
+        'route',
+        'implementation',
+        '--risk',
+        'medium',
+        '--run-id',
+        'run-cli-1',
+        '--project-dir',
+        projectDir,
+        '--json',
+      ],
+      { from: 'user' }
+    );
+    const boundFirst = JSON.parse(String(consoleSpy.mock.calls.at(-1)?.[0])) as {
+      decision: Record<string, unknown>;
+    };
+    await createProgram().parseAsync(
+      [
+        'providers',
+        'route',
+        'implementation',
+        '--risk',
+        'medium',
+        '--run-id',
+        'run-cli-1',
+        '--project-dir',
+        projectDir,
+        '--json',
+      ],
+      { from: 'user' }
+    );
+    const boundReplay = JSON.parse(String(consoleSpy.mock.calls.at(-1)?.[0])) as {
+      decision: Record<string, unknown>;
+    };
+    expect(boundReplay.decision).toEqual(boundFirst.decision);
+    const persisted = openAndMigrate(join(projectDir, '.shipgraph', 'shipgraph.db'));
+    expect(persisted.prepare('SELECT COUNT(*) AS count FROM routing_decisions').get()).toEqual({ count: 1 });
+    expect(persisted.prepare('SELECT COUNT(*) AS count FROM provider_capacity_reservations').get()).toEqual({ count: 1 });
+    persisted.close();
     consoleSpy.mockRestore();
   });
 });

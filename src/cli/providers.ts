@@ -90,6 +90,7 @@ export async function runProvidersRoute(
     risk: string;
     mode: string;
     runId?: string;
+    requestId?: string;
     implementationProvider?: string;
     fallbackFromProvider?: string;
     excludeProviders?: readonly string[];
@@ -104,6 +105,7 @@ export async function runProvidersRoute(
     task: parseTask(input.task),
     risk: parseRisk(input.risk),
     ...(input.runId === undefined ? {} : { runId: input.runId }),
+    ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
     envelope: {
       mode: parseMode(input.mode || config?.routing?.mode || 'balanced'),
       maxConcurrentTickets: parseKnownInteger(
