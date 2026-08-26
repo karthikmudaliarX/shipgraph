@@ -77,7 +77,7 @@ CORE-001 establishes the foundation:
 - Unit and integration tests
 - GitHub Actions CI
 
-CORE-002 active in this PR:
+CORE-002 shipped:
 
 - Approved `shipgraph.backlog.yml` contract and whole-DAG validation
 - Persistent, transactional backlog synchronization
