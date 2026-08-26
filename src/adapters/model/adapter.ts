@@ -415,11 +415,13 @@ function parseModelEntry(
   const rawId = record.id ?? record.modelId ?? record.name ?? record.model;
   if (typeof rawId !== 'string' || !isValidModelId(rawId)) return undefined;
 
+  const hasCapabilities = Object.prototype.hasOwnProperty.call(record, 'capabilities');
   const rawCapabilities = record.capabilities;
   let capabilities = normalizeCapabilities(fallbackCapabilities);
-  if (Array.isArray(rawCapabilities)) {
+  if (hasCapabilities) {
+    if (!Array.isArray(rawCapabilities)) return undefined;
     const parsedCapabilities = rawCapabilities.filter(
-      (candidate): candidate is ModelCapability =>
+      (candidate: unknown): candidate is ModelCapability =>
         typeof candidate === 'string' && MODEL_CAPABILITIES.includes(candidate as ModelCapability)
     );
     capabilities = normalizeCapabilities(parsedCapabilities);

@@ -86,7 +86,7 @@ export class ModelRouter {
       const providerModels = modelsByProvider.get(provider.providerId) ?? [];
       for (const model of providerModels) {
         if (!model.capabilities.includes(request.task)) continue;
-        const stats = observedStats(usage, provider.providerId, model.modelId);
+        const stats = observedStats(usage, provider.providerId, model.modelId, request.task);
         const score = scoreCandidate(
           request,
           provider,
@@ -206,10 +206,13 @@ function groupModels(
 function observedStats(
   usage: readonly UsageLedgerRecord[],
   providerId: ModelProviderId,
-  modelId: string
+  modelId: string,
+  task: ModelRoutingRequest['task']
 ): ObservedStats {
   const relevant = usage
-    .filter((entry) => entry.providerId === providerId && entry.modelId === modelId)
+    .filter((entry) =>
+      entry.providerId === providerId && entry.modelId === modelId && entry.task === task
+    )
     .sort((left, right) =>
       compareStableStrings(`${left.recordedAt}\0${left.id}`, `${right.recordedAt}\0${right.id}`)
     )

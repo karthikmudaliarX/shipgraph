@@ -214,4 +214,62 @@ describe('MODEL-001 deterministic routing', () => {
     expect(decision.providerId).toBe('codex');
     expect(decision.reason).toContain('quota reset=2026-08-27T00:30:00.000Z');
   });
+
+  it('uses observed telemetry only for the requested task', () => {
+    const router = new ModelRouter();
+    const usage: UsageLedgerRecord[] = [
+      {
+        id: 'implementation-outcome',
+        projectId: 'project-1',
+        runId: 'run-implementation',
+        providerId: 'codex',
+        modelId: 'codex-dynamic',
+        task: 'implementation',
+        retryCount: 0,
+        elapsedMs: 10,
+        outcome: 'succeeded',
+        outcomeQuality: 'excellent',
+        inputTokens: 'unknown',
+        outputTokens: 'unknown',
+        cost: 'unknown',
+        quotaRemaining: 'unknown',
+        recordedAt: '2026-08-27T00:00:00.000Z',
+      },
+      {
+        id: 'review-outcome',
+        projectId: 'project-1',
+        runId: 'run-review',
+        providerId: 'codex',
+        modelId: 'codex-dynamic',
+        task: 'review',
+        retryCount: 0,
+        elapsedMs: 20,
+        outcome: 'failed',
+        outcomeQuality: 'poor',
+        inputTokens: 'unknown',
+        outputTokens: 'unknown',
+        cost: 'unknown',
+        quotaRemaining: 'unknown',
+        recordedAt: '2026-08-27T00:01:00.000Z',
+      },
+    ];
+    const common = snapshot(
+      [provider('codex', 'openai')],
+      [model('codex', 'codex-dynamic')],
+      [health('codex')],
+      usage
+    );
+
+    const implementation = router.route(
+      { task: 'implementation', risk: 'medium', envelope },
+      common
+    );
+    const review = router.route(
+      { task: 'review', risk: 'medium', envelope },
+      common
+    );
+
+    expect(implementation.reason).toContain('observed quality=excellent');
+    expect(review.reason).toContain('observed quality=poor');
+  });
 });
