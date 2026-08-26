@@ -220,6 +220,55 @@ describe('MODEL-001 service', () => {
     expect(service.listHealth()[0]?.quotaRemaining).toBe('unknown');
   });
 
+  it('allows a fresh unknown auth probe to recover from a prior auth failure', async () => {
+    const authUnknownAdapter: ModelProviderAdapter = {
+      providerId: 'codex',
+      family: 'openai',
+      displayName: 'Codex',
+      probe: async () => ({
+        availability: 'available' as const,
+        auth: 'unknown' as const,
+        version: 'test-provider',
+        capabilities: ['implementation', 'review', 'repair'] as const,
+      }),
+      discoverModels: async () => ({
+        status: 'known' as const,
+        models: [{ modelId: 'codex/dynamic', capabilities: ['implementation', 'review', 'repair'] as const }],
+      }),
+    };
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [authUnknownAdapter],
+      now: () => now,
+    });
+
+    await service.refresh();
+    await service.recordUsage({
+      runId: 'run-1',
+      providerId: 'codex',
+      modelId: 'codex/dynamic',
+      task: 'implementation',
+      retryCount: 0,
+      elapsedMs: 10,
+      outcome: 'failed',
+      outcomeQuality: 'poor',
+      providerError: 'authentication',
+    });
+
+    expect(service.listHealth()[0]?.auth).toBe('unknown');
+    await expect(service.route({
+      task: 'implementation',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 4,
+        activeConcurrentTickets: 'unknown',
+        budgetRemaining: 'unknown',
+      },
+    })).resolves.toMatchObject({ providerId: 'codex' });
+  });
+
   it('claims known provider capacity atomically across concurrent routes', async () => {
     const calls = { probe: 0, discover: 0 };
     const service = new ModelRoutingService({

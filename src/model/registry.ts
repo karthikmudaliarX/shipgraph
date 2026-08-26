@@ -126,7 +126,7 @@ export class ProviderRegistry {
   }
 
   private async refreshAdapter(adapter: ModelProviderAdapter): Promise<ProviderRefreshResult> {
-    const checkedAt = this.now();
+    const checkedAt = this.nextCheckedAt(adapter.providerId);
     const probe = await safeProbe(adapter);
     const discovery = probe.availability === 'available'
       ? await safeDiscoverModels(adapter)
@@ -198,6 +198,24 @@ export class ProviderRegistry {
     }
     if (actual.size === 0) throw new Error('Provider registry requires at least one adapter');
   }
+
+  private nextCheckedAt(providerId: ModelProviderId): string {
+    const candidate = this.now();
+    const candidateMs = Date.parse(candidate);
+    const previous = this.repository
+      .listProviders(this.options.projectId)
+      .find((provider) => provider.providerId === providerId);
+    if (previous === undefined) return candidate;
+    const previousMs = Date.parse(previous.checkedAt);
+    if (
+      Number.isFinite(candidateMs) &&
+      Number.isFinite(previousMs) &&
+      candidateMs <= previousMs
+    ) {
+      return new Date(previousMs + 1).toISOString();
+    }
+    return candidate;
+  }
 }
 
 async function safeProbe(adapter: ModelProviderAdapter): Promise<ProviderProbeResult> {
@@ -241,7 +259,14 @@ function buildHealth(
     projectId,
     providerId,
     status,
-    auth: probe.auth === 'unknown' ? previous?.auth ?? UNKNOWN : probe.auth,
+    // An unknown auth probe supersedes a prior failure, but never upgrades to
+    // authenticated without positive evidence. This lets transient auth
+    // failures recover without pretending the provider is logged in.
+    auth: probe.auth === 'unknown'
+      ? previous?.auth === 'unauthenticated'
+        ? UNKNOWN
+        : previous?.auth ?? UNKNOWN
+      : probe.auth,
     quotaPressure: probe.quotaPressure ?? previous?.quotaPressure ?? UNKNOWN,
     // A refresh without current numeric/reset evidence must not keep routing
     // on a stale quota observation. Preserve qualitative pressure from the
