@@ -51,6 +51,11 @@ function createProject(db: DbConnection): void {
       id, ticket_id, base_sha, branch_name, status, started_at, project_id, created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run('run-1', 'KAR-1', '0'.repeat(40), 'agent/model-telemetry', 'SUCCEEDED', now, projectId, now, now);
+  db.prepare(
+    `INSERT INTO runs (
+      id, ticket_id, base_sha, branch_name, status, started_at, project_id, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run('run-2', 'KAR-1', '0'.repeat(40), 'agent/model-telemetry-2', 'SUCCEEDED', now, projectId, now, now);
 }
 
 function adapter(
@@ -137,6 +142,7 @@ describe('MODEL-001 service', () => {
 
     expect(calls).toEqual({ probe: 4, discover: 4 });
     expect(service.listRoutingDecisions()[0]?.reason).toBe(decision.reason);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM provider_capacity_reservations').get()).toEqual({ count: 0 });
     expect(usage.entry.inputTokens).toBe('unknown');
     expect(usage.entry.outputTokens).toBe('unknown');
     expect(usage.entry.cost).toBe('unknown');
@@ -204,8 +210,8 @@ describe('MODEL-001 service', () => {
       },
     };
     const attempts = await Promise.allSettled([
-      service.route(request),
-      service.route(request),
+      service.route({ ...request, requestId: 'request-a', runId: 'run-1' }),
+      service.route({ ...request, requestId: 'request-b', runId: 'run-2' }),
     ]);
     const successful = attempts.filter(
       (attempt): attempt is PromiseFulfilledResult<Awaited<ReturnType<ModelRoutingService['route']>>> =>
@@ -217,8 +223,14 @@ describe('MODEL-001 service', () => {
 
     const winner = successful[0]?.value;
     if (winner === undefined) throw new Error('missing successful route fixture');
+    const reservation = db
+      .prepare(
+        'SELECT run_id FROM provider_capacity_reservations WHERE routing_decision_id = ?'
+      )
+      .get(winner.id) as { run_id: string } | undefined;
+    if (reservation === undefined) throw new Error('missing provider reservation fixture');
     await service.recordUsage({
-      runId: 'run-1',
+      runId: reservation.run_id,
       providerId: winner.providerId,
       modelId: winner.modelId,
       task: 'implementation',
@@ -229,9 +241,27 @@ describe('MODEL-001 service', () => {
       routingDecisionId: winner.id,
     });
     expect(service.listHealth()[0]?.activeRuns).toBe(0);
-    await expect(service.route(request)).resolves.toMatchObject({
+    const retryRunId = reservation.run_id === 'run-1' ? 'run-2' : 'run-1';
+    const retry = await service.route({
+      ...request,
+      requestId: 'request-retry',
+      runId: retryRunId,
+    });
+    expect(retry).toMatchObject({
       providerId: 'codex',
     });
+    await service.recordUsage({
+      runId: retryRunId,
+      providerId: retry.providerId,
+      modelId: retry.modelId,
+      task: 'implementation',
+      retryCount: 0,
+      elapsedMs: 10,
+      outcome: 'succeeded',
+      outcomeQuality: 'good',
+      routingDecisionId: retry.id,
+    });
+    expect(service.listHealth()[0]?.activeRuns).toBe(0);
   });
 
   it('replays a request idempotently without creating another reservation', async () => {
@@ -252,6 +282,7 @@ describe('MODEL-001 service', () => {
 
     const request = {
       requestId: 'stable-route-request',
+      runId: 'run-1',
       task: 'implementation' as const,
       risk: 'medium' as const,
       envelope: {
@@ -267,6 +298,9 @@ describe('MODEL-001 service', () => {
     expect(replay).toEqual(first);
     expect(service.listRoutingDecisions()).toHaveLength(1);
     expect(service.listHealth()[0]?.activeRuns).toBe(1);
+    await expect(service.route({ ...request, runId: 'run-2' })).rejects.toThrow(
+      /different durable run/
+    );
 
     await service.recordUsage({
       runId: 'run-1',
@@ -280,6 +314,53 @@ describe('MODEL-001 service', () => {
       routingDecisionId: first.id,
     });
     expect(service.listHealth()[0]?.activeRuns).toBe(0);
+  });
+
+  it('refuses to replay a legacy capacity reservation without durable-run provenance', async () => {
+    const calls = { probe: 0, discover: 0 };
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [adapter('codex', 'openai', calls)],
+      now: () => now,
+    });
+    await service.refresh();
+    const preview = await service.route({
+      requestId: 'legacy-route-request',
+      task: 'implementation',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 4,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    });
+    db.prepare(
+      `INSERT INTO provider_capacity_reservations (
+        routing_decision_id, project_id, request_id, provider_id, model_id,
+        status, reserved_at, released_at
+      ) VALUES (?, ?, ?, ?, ?, 'active', ?, NULL)`
+    ).run(
+      preview.id,
+      projectId,
+      preview.requestId,
+      preview.providerId,
+      preview.modelId,
+      now
+    );
+
+    await expect(service.route({
+      requestId: 'legacy-route-request',
+      task: 'implementation',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 4,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    })).rejects.toThrow(/unbound capacity reservation/);
   });
 
   it('does not release provider capacity for usage without its routing decision', async () => {
@@ -300,6 +381,8 @@ describe('MODEL-001 service', () => {
     const decision = await service.route({
       task: 'implementation',
       risk: 'medium',
+      requestId: 'bound-request',
+      runId: 'run-1',
       envelope: {
         mode: 'balanced',
         maxConcurrentTickets: 4,
@@ -309,7 +392,7 @@ describe('MODEL-001 service', () => {
     });
 
     await service.recordUsage({
-      runId: 'run-1',
+      runId: 'run-2',
       providerId: decision.providerId,
       modelId: decision.modelId,
       task: 'implementation',
@@ -319,9 +402,22 @@ describe('MODEL-001 service', () => {
       outcomeQuality: 'good',
     });
     expect(service.listHealth()[0]?.activeRuns).toBe(1);
+    await expect(service.recordUsage({
+      runId: 'run-2',
+      providerId: decision.providerId,
+      modelId: decision.modelId,
+      task: 'implementation',
+      retryCount: 1,
+      elapsedMs: 10,
+      outcome: 'succeeded',
+      outcomeQuality: 'good',
+      routingDecisionId: decision.id,
+    })).rejects.toThrow(/does not belong to run/);
+    expect(service.listUsage()).toHaveLength(1);
     await expect(service.route({
       task: 'implementation',
       risk: 'medium',
+      runId: 'run-2',
       envelope: {
         mode: 'balanced',
         maxConcurrentTickets: 4,

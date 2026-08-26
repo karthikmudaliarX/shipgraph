@@ -96,8 +96,10 @@ requests, reviews changes, or merges code.
 
 The execution envelope is a Scheduler-owned snapshot: MODEL-001 validates the
 supplied global mode, budget and ticket counts but does not claim global ticket
-capacity. A successful model route reserves a provider run slot when that limit
-is known; usage finalization releases it using the returned routing decision ID.
+capacity. A route supplied with a durable `--run-id` reserves a provider run
+slot when that limit is known; a route without one is a decision preview. Usage
+finalization releases an execution-bound reservation only when the same durable
+run and routing decision ID are supplied.
 
 ## CLI examples
 
@@ -138,7 +140,7 @@ shipgraph agent run AG-001 --model <discovered-provider/model> --instructions "I
 # Refresh capability-probed provider and model metadata
 shipgraph providers refresh --json
 
-# Choose a provider/model for one explicitly supplied engineering step
+# Preview a route; --run-id <run-id> binds it to a durable execution reservation
 shipgraph providers route implementation --risk medium --mode balanced --json
 
 # Inspect persisted provider health and discovered models

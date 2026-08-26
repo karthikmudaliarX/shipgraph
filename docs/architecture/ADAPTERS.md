@@ -64,14 +64,17 @@ it. Model identifiers never imply capabilities.
 `ProviderHealth` state. `ModelRouter` receives only an explicit execution
 envelope (Eco, Balanced or Max plus the caller's budget/concurrency values),
 selects a discovered usable model for implementation, review or repair, persists
-its reason, and atomically reserves the selected provider's known capacity.
+its reason, and atomically reserves the selected provider's known capacity when
+the caller supplies a durable execution run. A route without a run ID is a
+decision preview and does not claim provider capacity.
 The global ticket count in that envelope is a Scheduler-owned snapshot; MODEL-001
 does not claim or mutate global ticket capacity.
 Review routing prefers a different provider family from the implementation when
 one is available. `UsageLedger` is append-only, accepts only durable run IDs
 from the current project, records per-run/provider/model telemetry without raw
-provider output or credentials, and releases the provider reservation when
-usage is finalized with the returned routing decision ID.
+provider output or credentials, and releases an execution-bound provider
+reservation only when usage is finalized by its owning durable run and returned
+routing decision ID.
 
 The existing AGENT-001 execution command still accepts an explicit provider and
 model. MODEL-001 does not dispatch Linear work or turn the metadata adapters

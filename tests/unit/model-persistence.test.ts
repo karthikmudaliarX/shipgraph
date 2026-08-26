@@ -145,6 +145,11 @@ describe('MODEL-001 persistence', () => {
         id, ticket_id, base_sha, branch_name, status, started_at, project_id, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run('run-1', 'KAR-1', '0'.repeat(40), 'agent/model-telemetry', 'SUCCEEDED', now, projectId, now, now);
+    db.prepare(
+      `INSERT INTO runs (
+        id, ticket_id, base_sha, branch_name, status, started_at, project_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run('run-2', 'KAR-1', '0'.repeat(40), 'agent/model-telemetry-2', 'SUCCEEDED', now, projectId, now, now);
     repository = createModelRepository(db);
   });
 
@@ -180,6 +185,24 @@ describe('MODEL-001 persistence', () => {
     expect(repository.listModels(projectId)).toEqual([model()]);
   });
 
+  it('preserves reservation-maintained active runs across a later provider refresh', () => {
+    repository.replaceProviderSnapshot({
+      provider: provider(),
+      health: health(),
+      models: [model()],
+      catalogStatus: 'known',
+    });
+    repository.upsertProviderHealth(health({ activeRuns: 1, updatedAt: '2026-08-27T00:01:00.000Z' }));
+    repository.replaceProviderSnapshot({
+      provider: provider({ checkedAt: '2026-08-27T00:02:00.000Z', updatedAt: '2026-08-27T00:02:00.000Z' }),
+      health: health({ checkedAt: '2026-08-27T00:02:00.000Z', updatedAt: '2026-08-27T00:02:00.000Z' }),
+      models: [model()],
+      catalogStatus: 'known',
+    });
+
+    expect(repository.listHealth(projectId)[0]?.activeRuns).toBe(1);
+  });
+
   it('enforces append-only usage and routing decision records', () => {
     const entry = usage();
     repository.appendUsage(entry);
@@ -196,5 +219,46 @@ describe('MODEL-001 persistence', () => {
     expect(() => repository.appendUsage(usage({ runId: 'missing-run' }))).toThrow(
       /not a durable run in project/
     );
+  });
+
+  it('binds provider capacity and usage release to the owning durable run', () => {
+    repository.replaceProviderSnapshot({
+      provider: provider(),
+      health: health({ maxConcurrentRuns: 1 }),
+      models: [model()],
+      catalogStatus: 'known',
+    });
+    const routed = repository.reserveProviderCapacityAndAppendRoutingDecision(
+      decision(),
+      'run-1'
+    );
+    if (routed === undefined) throw new Error('missing provider reservation fixture');
+
+    expect(db.prepare(
+      'SELECT run_id, status FROM provider_capacity_reservations WHERE routing_decision_id = ?'
+    ).get(routed.id)).toEqual({ run_id: 'run-1', status: 'active' });
+    expect(() => repository.appendUsage(usage({
+      runId: 'run-2',
+      routingDecisionId: routed.id,
+    }))).toThrow(/does not belong to run/);
+    expect(() => repository.releaseProviderCapacity(
+      projectId,
+      'run-2',
+      routed.id,
+      routed.providerId,
+      routed.modelId,
+      now
+    )).toThrow(/does not belong to run/);
+
+    repository.appendUsage(usage({ routingDecisionId: routed.id }));
+    expect(repository.releaseProviderCapacity(
+      projectId,
+      'run-1',
+      routed.id,
+      routed.providerId,
+      routed.modelId,
+      now
+    )).toBe(true);
+    expect(repository.listHealth(projectId)[0]?.activeRuns).toBe(0);
   });
 });

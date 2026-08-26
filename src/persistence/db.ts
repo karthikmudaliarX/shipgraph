@@ -395,6 +395,18 @@ export const MIGRATIONS: readonly Migration[] = [
         ON provider_capacity_reservations(project_id, provider_id, status);
     `,
   },
+  {
+    version: 9,
+    name: 'bind_model_capacity_to_runs',
+    up: `
+      ALTER TABLE provider_capacity_reservations ADD COLUMN run_id TEXT
+        REFERENCES runs(id);
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_capacity_run
+        ON provider_capacity_reservations(project_id, run_id)
+        WHERE run_id IS NOT NULL AND status = 'active';
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {

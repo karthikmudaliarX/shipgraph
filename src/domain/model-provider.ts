@@ -170,6 +170,7 @@ export type ExecutionEnvelope = z.infer<typeof executionEnvelopeSchema>;
 
 export const modelRoutingRequestSchema = z.object({
   requestId: identitySchema.optional(),
+  runId: identitySchema.optional(),
   task: modelTaskTypeSchema,
   risk: modelRiskLevelSchema,
   envelope: executionEnvelopeSchema,

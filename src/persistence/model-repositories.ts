@@ -21,6 +21,12 @@ export type ProviderSnapshotPersistence = {
   catalogStatus: 'known' | 'unknown';
 };
 
+export type RoutingReservationLookup = {
+  decision: ModelRoutingDecision;
+  hasReservation: boolean;
+  runId?: string;
+};
+
 export interface ModelRepository {
   replaceProviderSnapshot(snapshot: ProviderSnapshotPersistence): void;
   listProviders(projectId: string): readonly ProviderRegistryRecord[];
@@ -32,14 +38,16 @@ export interface ModelRepository {
   listUsage(projectId: string): readonly UsageLedgerRecord[];
   appendRoutingDecision(decision: ModelRoutingDecision): ModelRoutingDecision;
   reserveProviderCapacityAndAppendRoutingDecision(
-    decision: ModelRoutingDecision
+    decision: ModelRoutingDecision,
+    runId: string
   ): ModelRoutingDecision | undefined;
   findRoutingDecisionByRequest(
     projectId: string,
     requestId: string
-  ): ModelRoutingDecision | undefined;
+  ): RoutingReservationLookup | undefined;
   releaseProviderCapacity(
     projectId: string,
+    runId: string,
     routingDecisionId: string,
     providerId: ModelProviderId,
     modelId: string,
@@ -85,9 +93,17 @@ export function createModelRepository(db: DbConnection): ModelRepository {
       const currentHealth = existingHealthRow === undefined
         ? undefined
         : rowToHealth(existingHealthRow);
-      const healthToPersist = currentHealth !== undefined && isLaterTimestamp(currentHealth.updatedAt, health.updatedAt)
-        ? currentHealth
-        : health;
+      const healthToPersist = currentHealth === undefined
+        ? health
+        : isLaterTimestamp(currentHealth.updatedAt, health.updatedAt)
+          ? currentHealth
+          : {
+              ...health,
+              // Probe snapshots do not own provider concurrency. Preserve the
+              // reservation-maintained count even when a delayed refresh is
+              // newer than the snapshot that was read before a reservation.
+              activeRuns: currentHealth.activeRuns,
+            };
 
       db.prepare(
         `INSERT INTO provider_registry (
@@ -238,23 +254,30 @@ export function createModelRepository(db: DbConnection): ModelRepository {
       if (parsed.routingDecisionId !== undefined) {
         const reservation = db
           .prepare(
-            `SELECT project_id, provider_id, model_id
-             FROM provider_capacity_reservations
-             WHERE routing_decision_id = ?`
+            `SELECT reservations.project_id, reservations.run_id, reservations.provider_id,
+                    reservations.model_id, decisions.task
+             FROM provider_capacity_reservations AS reservations
+             INNER JOIN routing_decisions AS decisions
+               ON decisions.id = reservations.routing_decision_id
+             WHERE reservations.routing_decision_id = ?`
           )
           .get(parsed.routingDecisionId) as {
             project_id: string;
+            run_id: string | null;
             provider_id: string;
             model_id: string;
+            task: string;
           } | undefined;
         if (
           reservation === undefined ||
           reservation.project_id !== parsed.projectId ||
+          reservation.run_id !== parsed.runId ||
           reservation.provider_id !== parsed.providerId ||
-          reservation.model_id !== parsed.modelId
+          reservation.model_id !== parsed.modelId ||
+          reservation.task !== parsed.task
         ) {
           throw new Error(
-            `Usage ledger routing decision ${parsed.routingDecisionId} does not own ${parsed.providerId}/${parsed.modelId}`
+            `Usage ledger routing decision ${parsed.routingDecisionId} does not belong to run ${parsed.runId}`
           );
         }
       }
@@ -333,18 +356,36 @@ export function createModelRepository(db: DbConnection): ModelRepository {
   }
 
   function reserveProviderCapacityAndAppendRoutingDecision(
-    decision: ModelRoutingDecision
+    decision: ModelRoutingDecision,
+    runId: string
   ): ModelRoutingDecision | undefined {
     const reserve = db.transaction(
-      (decision: ModelRoutingDecision): ModelRoutingDecision | undefined => {
+      (decision: ModelRoutingDecision, runId: string): ModelRoutingDecision | undefined => {
         const parsed = modelRoutingDecisionSchema.parse(decision);
+        const parsedRunId = validateRunId(runId);
+        const durableRun = db
+          .prepare('SELECT project_id FROM runs WHERE id = ?')
+          .get(parsedRunId) as { project_id: string | null } | undefined;
+        if (durableRun === undefined || durableRun.project_id !== parsed.projectId) {
+          throw new Error(
+            `Routing run ${parsedRunId} is not a durable run in project ${parsed.projectId}`
+          );
+        }
         const existingReservationRow = db
           .prepare(
-            `SELECT routing_decision_id FROM provider_capacity_reservations
+            `SELECT routing_decision_id, run_id FROM provider_capacity_reservations
              WHERE project_id = ? AND request_id = ?`
           )
-          .get(parsed.projectId, parsed.requestId) as { routing_decision_id: string } | undefined;
+          .get(parsed.projectId, parsed.requestId) as {
+            routing_decision_id: string;
+            run_id: string | null;
+          } | undefined;
         if (existingReservationRow !== undefined) {
+          if (existingReservationRow.run_id !== parsedRunId) {
+            throw new Error(
+              `Routing request ${parsed.requestId} is already reserved by another durable run`
+            );
+          }
           const existingDecisionRow = db
             .prepare('SELECT * FROM routing_decisions WHERE id = ?')
             .get(existingReservationRow.routing_decision_id) as Record<string, unknown> | undefined;
@@ -362,6 +403,18 @@ export function createModelRepository(db: DbConnection): ModelRepository {
             throw new Error(`Routing request ${parsed.requestId} was reused for a different route`);
           }
           return existingDecision;
+        }
+        const activeRunReservation = db
+          .prepare(
+            `SELECT routing_decision_id
+             FROM provider_capacity_reservations
+             WHERE project_id = ? AND run_id = ? AND status = 'active'`
+          )
+          .get(parsed.projectId, parsedRunId) as { routing_decision_id: string } | undefined;
+        if (activeRunReservation !== undefined) {
+          throw new Error(
+            `Durable run ${parsedRunId} already owns provider capacity reservation ${activeRunReservation.routing_decision_id}`
+          );
         }
         const historicalDecision = db
           .prepare(
@@ -429,20 +482,21 @@ export function createModelRepository(db: DbConnection): ModelRepository {
         db.prepare(
           `INSERT INTO provider_capacity_reservations (
             routing_decision_id, project_id, request_id, provider_id, model_id,
-            status, reserved_at, released_at
-          ) VALUES (?, ?, ?, ?, ?, 'active', ?, NULL)`
+            run_id, status, reserved_at, released_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, NULL)`
         ).run(
           persisted.id,
           persisted.projectId,
           persisted.requestId,
           persisted.providerId,
           persisted.modelId,
+          parsedRunId,
           persisted.createdAt
         );
         return persisted;
       }
     ).immediate;
-    return reserve(decision);
+    return reserve(decision, runId);
   }
 
   function appendRoutingDecision(decision: ModelRoutingDecision): ModelRoutingDecision {
@@ -452,35 +506,54 @@ export function createModelRepository(db: DbConnection): ModelRepository {
   function findRoutingDecisionByRequest(
     projectId: string,
     requestId: string
-  ): ModelRoutingDecision | undefined {
-    const row = db
+  ): RoutingReservationLookup | undefined {
+    const rows = db
       .prepare(
-        `SELECT decisions.*
+        `SELECT decisions.*,
+                reservations.run_id,
+                reservations.routing_decision_id AS reservation_id
          FROM routing_decisions AS decisions
-         INNER JOIN provider_capacity_reservations AS reservations
+         LEFT JOIN provider_capacity_reservations AS reservations
            ON reservations.routing_decision_id = decisions.id
-         WHERE decisions.project_id = ? AND decisions.request_id = ?`
+         WHERE decisions.project_id = ? AND decisions.request_id = ?
+         ORDER BY decisions.created_at, decisions.id`
       )
-      .get(projectId, requestId) as Record<string, unknown> | undefined;
-    return row === undefined ? undefined : rowToRoutingDecision(row);
+      .all(projectId, requestId) as Array<Record<string, unknown>>;
+    if (rows.length > 1) {
+      throw new Error(
+        `Routing request ${requestId} has multiple persisted decisions; refusing replay`
+      );
+    }
+    const row = rows[0];
+    if (row === undefined) return undefined;
+    return {
+      decision: rowToRoutingDecision(row),
+      hasReservation: row.reservation_id !== null && row.reservation_id !== undefined,
+      ...(row.run_id === null || row.run_id === undefined
+        ? {}
+        : { runId: validateRunId(row.run_id) }),
+    };
   }
 
   /** Called by the service's enclosing transaction after usage is appended. */
   function releaseProviderCapacity(
     projectId: string,
+    runId: string,
     routingDecisionId: string,
     providerId: ModelProviderId,
     modelId: string,
     releasedAt: string
   ): boolean {
+    const parsedRunId = validateRunId(runId);
     const reservation = db
       .prepare(
-        `SELECT project_id, provider_id, model_id, status
+        `SELECT project_id, run_id, provider_id, model_id, status
          FROM provider_capacity_reservations
          WHERE routing_decision_id = ?`
       )
       .get(routingDecisionId) as {
         project_id: string;
+        run_id: string | null;
         provider_id: string;
         model_id: string;
         status: string;
@@ -488,11 +561,12 @@ export function createModelRepository(db: DbConnection): ModelRepository {
     if (
       reservation === undefined ||
       reservation.project_id !== projectId ||
+      reservation.run_id !== parsedRunId ||
       reservation.provider_id !== providerId ||
       reservation.model_id !== modelId
     ) {
       throw new Error(
-        `Routing decision ${routingDecisionId} does not own ${providerId}/${modelId} in project ${projectId}`
+        `Routing decision ${routingDecisionId} does not belong to run ${parsedRunId}`
       );
     }
     if (reservation.status === 'released') return false;
@@ -622,6 +696,13 @@ export function createModelRepository(db: DbConnection): ModelRepository {
       candidatesConsidered: requiredNumber(row.candidates_considered),
       createdAt: requiredText(row.created_at),
     });
+  }
+
+  function validateRunId(runId: unknown): string {
+    if (typeof runId !== 'string' || runId.length === 0 || runId.length > 256 || runId.includes('\0')) {
+      throw new Error('Routing run ID is invalid');
+    }
+    return runId;
   }
 }
 

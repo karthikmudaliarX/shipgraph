@@ -96,14 +96,24 @@ export class ModelRoutingService {
         request.requestId
       );
       if (existing !== undefined) {
+        if (existing.hasReservation && existing.runId === undefined) {
+          throw new Error(
+            `Routing request ${request.requestId} has an unbound capacity reservation; refusing replay`
+          );
+        }
+        if (existing.runId !== request.runId) {
+          throw new Error(
+            `Routing request ${request.requestId} is bound to a different durable run`
+          );
+        }
         if (
-          existing.task !== request.task ||
-          existing.risk !== request.risk ||
-          existing.mode !== request.envelope.mode
+          existing.decision.task !== request.task ||
+          existing.decision.risk !== request.risk ||
+          existing.decision.mode !== request.envelope.mode
         ) {
           throw new Error(`Routing request ${request.requestId} was reused for a different route`);
         }
-        return existing;
+        return existing.decision;
       }
     }
     await this.registry.ensureFresh();
@@ -123,7 +133,15 @@ export class ModelRoutingService {
         requestId,
         createdAt: this.now(),
       };
-      const persisted = this.repository.reserveProviderCapacityAndAppendRoutingDecision(decision);
+      if (request.runId === undefined) {
+        // A route without a durable execution run is a read/decision preview.
+        // Only an execution-bound route may claim provider capacity.
+        return this.repository.appendRoutingDecision(decision);
+      }
+      const persisted = this.repository.reserveProviderCapacityAndAppendRoutingDecision(
+        decision,
+        request.runId
+      );
       if (persisted !== undefined) return persisted;
     }
     throw new Error('Provider capacity changed while routing; retry the route request');
@@ -170,6 +188,7 @@ export class ModelRoutingService {
       if (input.routingDecisionId !== undefined) {
         this.repository.releaseProviderCapacity(
           this.options.projectId,
+          entry.runId,
           input.routingDecisionId,
           entry.providerId,
           entry.modelId,
