@@ -552,12 +552,24 @@ function normalizeAdapterResult(result: AgentExecutionResult, maxOutputBytes: nu
     ? undefined
     : {
         ...value.evidence,
+        eventTypes: value.evidence.eventTypes.map((eventType) =>
+          boundText(redactSensitiveText(eventType), 80)
+        ),
         ...(value.evidence.summary === undefined
           ? {}
           : { summary: boundText(redactSensitiveText(value.evidence.summary), 4_096) }),
       };
+  const providerSessionId = value.providerSessionId === undefined
+    ? undefined
+    : redactSensitiveText(value.providerSessionId) === value.providerSessionId
+      ? value.providerSessionId
+      : undefined;
   return {
     ...value,
+    ...(providerSessionId === undefined ? {} : { providerSessionId }),
+    ...(value.providerSessionId !== undefined && providerSessionId === undefined
+      ? { providerSessionId: undefined }
+      : {}),
     stdout: stdout.value,
     stderr: stderr.value,
     stdoutTruncated: value.stdoutTruncated || stdout.truncated,

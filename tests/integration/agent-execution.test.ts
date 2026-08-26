@@ -330,6 +330,30 @@ describe('AGENT-001 durable execution', () => {
     expect(JSON.stringify(result.run)).not.toContain('cancel this safely');
   });
 
+  it('redacts credential-shaped normalized evidence before durable persistence', async () => {
+    harness = await createHarness();
+    const options: AgentExecutionServiceOptions = {
+      ...harness.options,
+      adapter: fakeAdapter({
+        providerSessionId: 'sk-12345678901234567890',
+        evidence: {
+          outputFormat: 'jsonl',
+          eventCount: 1,
+          eventTypes: ['token=secret-value'],
+          summary: 'ordinary completion',
+        },
+      }),
+    };
+    const result = await executeAgentTask(options, {
+      ticketId: 'AG-001',
+      model: 'openai/gpt-5',
+      instructions: 'redact normalized evidence',
+    });
+    expect(result.run.providerSessionId).toBeUndefined();
+    expect(result.run.evidence?.eventTypes).toEqual(['token=[REDACTED_SECRET]']);
+    expect(JSON.stringify(result.run)).not.toContain('secret-value');
+  });
+
   it('surfaces an active post-restart run as NEEDS_HUMAN only through explicit recovery', async () => {
     harness = await createHarness();
     const now = new Date().toISOString();

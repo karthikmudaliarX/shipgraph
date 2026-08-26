@@ -225,22 +225,22 @@ function normalizeOpenCodeResult(result: AgentProcessResult): AgentExecutionResu
       failureReason: 'OpenCode terminated without an exit code or signal',
     };
   }
-  if (result.terminationSignal !== undefined) {
-    return {
-      ...common,
-      outcome: 'FAILED',
-      failureCategory: 'unexpected_termination',
-      failureReason: `OpenCode was terminated by ${result.terminationSignal}`,
-      ...(parsed.evidence === undefined ? {} : { evidence: parsed.evidence }),
-      ...(parsed.sessionId === undefined ? {} : { providerSessionId: parsed.sessionId }),
-    };
-  }
   if (result.outputLimitExceeded) {
     return {
       ...common,
       outcome: 'FAILED',
       failureCategory: 'output_limit',
       failureReason: 'OpenCode output exceeded ShipGraph’s retained-output limit',
+      ...(parsed.evidence === undefined ? {} : { evidence: parsed.evidence }),
+      ...(parsed.sessionId === undefined ? {} : { providerSessionId: parsed.sessionId }),
+    };
+  }
+  if (result.terminationSignal !== undefined) {
+    return {
+      ...common,
+      outcome: 'FAILED',
+      failureCategory: 'unexpected_termination',
+      failureReason: `OpenCode was terminated by ${result.terminationSignal}`,
       ...(parsed.evidence === undefined ? {} : { evidence: parsed.evidence }),
       ...(parsed.sessionId === undefined ? {} : { providerSessionId: parsed.sessionId }),
     };

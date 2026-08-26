@@ -116,6 +116,12 @@ describe('OpenCode adapter and process boundary', () => {
     ['timeout', { exitCode: undefined, timedOut: true }, 'timeout', 'TIMED_OUT'],
     ['cancel', { exitCode: undefined, cancelled: true }, 'cancelled', 'CANCELLED'],
     ['unexpected death', { exitCode: undefined, unexpectedTermination: true }, 'unexpected_termination', 'FAILED'],
+    ['output limit after termination signal', {
+      exitCode: undefined,
+      terminationSignal: 'SIGTERM',
+      outputLimitExceeded: true,
+      stdoutTruncated: true,
+    }, 'output_limit', 'FAILED'],
   ])('normalizes %s deterministically', async (_name, override, category, outcome) => {
     const adapter = new OpenCodeAdapter({
       processRunner: {
