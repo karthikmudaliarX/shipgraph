@@ -176,4 +176,60 @@ describe('MODEL-001 service', () => {
     expect(service.listUsage()).toHaveLength(1);
     expect(service.listHealth().find((health) => health.providerId === 'codex')?.recentFailureCount).toBe(1);
   });
+
+  it('claims known provider capacity atomically across concurrent routes', async () => {
+    const calls = { probe: 0, discover: 0 };
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [adapter('codex', 'openai', calls)],
+      now: () => now,
+    });
+    await service.refresh();
+    const currentHealth = service.listHealth()[0];
+    if (currentHealth === undefined) throw new Error('missing provider health fixture');
+    service.getRepository().upsertProviderHealth({
+      ...currentHealth,
+      maxConcurrentRuns: 1,
+    });
+
+    const request = {
+      task: 'implementation' as const,
+      risk: 'medium' as const,
+      envelope: {
+        mode: 'balanced' as const,
+        maxConcurrentTickets: 4,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown' as const,
+      },
+    };
+    const attempts = await Promise.allSettled([
+      service.route(request),
+      service.route(request),
+    ]);
+    const successful = attempts.filter(
+      (attempt): attempt is PromiseFulfilledResult<Awaited<ReturnType<ModelRoutingService['route']>>> =>
+        attempt.status === 'fulfilled'
+    );
+    expect(successful).toHaveLength(1);
+    expect(service.listRoutingDecisions()).toHaveLength(1);
+    expect(service.listHealth()[0]?.activeRuns).toBe(1);
+
+    const winner = successful[0]?.value;
+    if (winner === undefined) throw new Error('missing successful route fixture');
+    await service.recordUsage({
+      runId: 'run-1',
+      providerId: winner.providerId,
+      modelId: winner.modelId,
+      task: 'implementation',
+      retryCount: 0,
+      elapsedMs: 10,
+      outcome: 'succeeded',
+      outcomeQuality: 'good',
+    });
+    expect(service.listHealth()[0]?.activeRuns).toBe(0);
+    await expect(service.route(request)).resolves.toMatchObject({
+      providerId: 'codex',
+    });
+  });
 });

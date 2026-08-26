@@ -96,16 +96,21 @@ export class ModelRoutingService {
     const routableRequest = request.now === undefined
       ? { ...request, now: this.now() }
       : request;
-    const selection = this.router.route(routableRequest, this.snapshot());
     const requestId = request.requestId ?? this.createId();
-    const decision: ModelRoutingDecision = {
-      ...selection,
-      id: this.createId(),
-      projectId: this.options.projectId,
-      requestId,
-      createdAt: this.now(),
-    };
-    return this.repository.appendRoutingDecision(decision);
+    const maxAttempts = this.registry.list().length + 1;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const selection = this.router.route(routableRequest, this.snapshot());
+      const decision: ModelRoutingDecision = {
+        ...selection,
+        id: this.createId(),
+        projectId: this.options.projectId,
+        requestId,
+        createdAt: this.now(),
+      };
+      const persisted = this.repository.reserveProviderCapacityAndAppendRoutingDecision(decision);
+      if (persisted !== undefined) return persisted;
+    }
+    throw new Error('Provider capacity changed while routing; retry the route request');
   }
 
   public listUsage() {

@@ -31,6 +31,9 @@ export interface ModelRepository {
   appendUsage(entry: UsageLedgerRecord): UsageLedgerRecord;
   listUsage(projectId: string): readonly UsageLedgerRecord[];
   appendRoutingDecision(decision: ModelRoutingDecision): ModelRoutingDecision;
+  reserveProviderCapacityAndAppendRoutingDecision(
+    decision: ModelRoutingDecision
+  ): ModelRoutingDecision | undefined;
   listRoutingDecisions(projectId: string): readonly ModelRoutingDecision[];
 }
 
@@ -255,29 +258,8 @@ export function createModelRepository(db: DbConnection): ModelRepository {
         .all(projectId);
       return rows.map((row) => rowToUsage(row as Record<string, unknown>));
     },
-    appendRoutingDecision(decision): ModelRoutingDecision {
-      const parsed = modelRoutingDecisionSchema.parse(decision);
-      db.prepare(
-        `INSERT INTO routing_decisions (
-          id, project_id, request_id, task, risk, mode, provider_id, provider_family,
-          model_id, reason, candidates_considered, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        parsed.id,
-        parsed.projectId,
-        parsed.requestId,
-        parsed.task,
-        parsed.risk,
-        parsed.mode,
-        parsed.providerId,
-        parsed.providerFamily,
-        parsed.modelId,
-        parsed.reason,
-        parsed.candidatesConsidered,
-        parsed.createdAt
-      );
-      return parsed;
-    },
+    appendRoutingDecision,
+    reserveProviderCapacityAndAppendRoutingDecision,
     listRoutingDecisions(projectId): readonly ModelRoutingDecision[] {
       const rows = db
         .prepare(
@@ -288,6 +270,97 @@ export function createModelRepository(db: DbConnection): ModelRepository {
       return rows.map((row) => rowToRoutingDecision(row as Record<string, unknown>));
     },
   };
+
+  function insertRoutingDecision(decision: ModelRoutingDecision): ModelRoutingDecision {
+    const parsed = modelRoutingDecisionSchema.parse(decision);
+    db.prepare(
+      `INSERT INTO routing_decisions (
+        id, project_id, request_id, task, risk, mode, provider_id, provider_family,
+        model_id, reason, candidates_considered, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      parsed.id,
+      parsed.projectId,
+      parsed.requestId,
+      parsed.task,
+      parsed.risk,
+      parsed.mode,
+      parsed.providerId,
+      parsed.providerFamily,
+      parsed.modelId,
+      parsed.reason,
+      parsed.candidatesConsidered,
+      parsed.createdAt
+    );
+    return parsed;
+  }
+
+  function reserveProviderCapacityAndAppendRoutingDecision(
+    decision: ModelRoutingDecision
+  ): ModelRoutingDecision | undefined {
+    const reserve = db.transaction(
+      (decision: ModelRoutingDecision): ModelRoutingDecision | undefined => {
+        const parsed = modelRoutingDecisionSchema.parse(decision);
+        const providerRow = db
+          .prepare(
+            `SELECT * FROM provider_registry
+             WHERE project_id = ? AND provider_id = ?`
+          )
+          .get(parsed.projectId, parsed.providerId) as Record<string, unknown> | undefined;
+        if (providerRow === undefined) return undefined;
+        const provider = rowToProvider(providerRow);
+        if (
+          !provider.configured ||
+          provider.availability !== 'available' ||
+          provider.catalogStatus !== 'known' ||
+          provider.family !== parsed.providerFamily ||
+          !provider.capabilities.includes(parsed.task)
+        ) {
+          return undefined;
+        }
+
+        const modelRow = db
+          .prepare(
+            `SELECT * FROM model_catalog
+             WHERE project_id = ? AND provider_id = ? AND model_id = ?`
+          )
+          .get(parsed.projectId, parsed.providerId, parsed.modelId) as Record<string, unknown> | undefined;
+        if (modelRow === undefined) return undefined;
+        const model = rowToModel(modelRow);
+        if (!model.capabilities.includes(parsed.task)) return undefined;
+
+        const healthRow = db
+          .prepare(
+            `SELECT * FROM provider_health
+             WHERE project_id = ? AND provider_id = ?`
+          )
+          .get(parsed.projectId, parsed.providerId) as Record<string, unknown> | undefined;
+        if (healthRow === undefined) return undefined;
+        const health = rowToHealth(healthRow);
+        if (
+          (health.status !== 'healthy' && health.status !== 'degraded') ||
+          health.auth === 'unauthenticated' ||
+          (typeof health.quotaRemaining === 'number' && health.quotaRemaining <= 0) ||
+          (typeof health.maxConcurrentRuns === 'number' && health.activeRuns >= health.maxConcurrentRuns) ||
+          health.activeRuns >= 1_000_000
+        ) {
+          return undefined;
+        }
+
+        upsertHealth({
+          ...health,
+          activeRuns: health.activeRuns + 1,
+          updatedAt: parsed.createdAt,
+        });
+        return insertRoutingDecision(parsed);
+      }
+    ).immediate;
+    return reserve(decision);
+  }
+
+  function appendRoutingDecision(decision: ModelRoutingDecision): ModelRoutingDecision {
+    return insertRoutingDecision(decision);
+  }
 
   function rowToProvider(row: Record<string, unknown>): ProviderRegistryRecord {
     return providerRegistryRecordSchema.parse({

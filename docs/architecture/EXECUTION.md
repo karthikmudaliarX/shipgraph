@@ -64,6 +64,9 @@ bounded and redacted process text.
 
 MODEL-001 now owns provider metadata discovery, health, quota/usage ledger
 records and deterministic model routing in a separate control-plane subsystem.
+A successful route persists its decision with an atomic provider-capacity
+reservation; usage finalization releases that reservation. Unknown quota and
+usage values remain unknown.
 The AGENT-001 command remains explicit-provider execution; MODEL-001 does not
 automatically dispatch a ticket, replace that execution contract, or add
 post-execution PR/review/release automation.

@@ -57,11 +57,13 @@ estimated.
 `ProviderRegistry` persists the latest probe/catalog snapshot and
 `ProviderHealth` state. `ModelRouter` receives only an explicit execution
 envelope (Eco, Balanced or Max plus the caller's budget/concurrency values),
-selects a discovered usable model for implementation, review or repair, and
-persists its reason. Review routing prefers a different provider family from
-the implementation when one is available. `UsageLedger` is append-only, accepts
-only durable run IDs from the current project, and records
-per-run/provider/model telemetry without raw provider output or credentials.
+selects a discovered usable model for implementation, review or repair, persists
+its reason, and atomically reserves the selected provider's known capacity.
+Review routing prefers a different provider family from the implementation when
+one is available. `UsageLedger` is append-only, accepts only durable run IDs
+from the current project, records per-run/provider/model telemetry without raw
+provider output or credentials, and releases the provider reservation when
+usage is finalized.
 
 The existing AGENT-001 execution command still accepts an explicit provider and
 model. MODEL-001 does not dispatch Linear work or turn the metadata adapters
