@@ -3,6 +3,10 @@ import {
   TicketState,
   type TicketStateValue,
 } from '../core/state-machine/state.js';
+import {
+  agentRunStateSchema,
+  normalizedAgentEvidenceSchema,
+} from '../domain/agent-run.js';
 
 /** Core event types for the append-only audit log. */
 export const EVENT_TYPES = [
@@ -16,6 +20,7 @@ export const EVENT_TYPES = [
   'workspace.ready',
   'workspace.removed',
   'workspace.failed',
+  'run.state_changed',
 ] as const;
 
 export const EventType = {
@@ -29,6 +34,7 @@ export const EventType = {
   WORKSPACE_READY: EVENT_TYPES[7],
   WORKSPACE_REMOVED: EVENT_TYPES[8],
   WORKSPACE_FAILED: EVENT_TYPES[9],
+  RUN_STATE_CHANGED: EVENT_TYPES[10],
 } as const;
 
 export type EventTypeValue = (typeof EVENT_TYPES)[number];
@@ -70,6 +76,15 @@ export const runCreatedPayloadSchema = z.object({
   runId: identitySchema,
   ticketId: identitySchema,
   baseSha: z.string().min(1),
+  state: agentRunStateSchema.optional(),
+  workspaceId: identitySchema.optional(),
+  workspacePath: z.string().min(1).optional(),
+  branchName: z.string().min(1).optional(),
+  provider: z.string().min(1).optional(),
+  model: z.string().min(1).optional(),
+  createdAt: timestampSchema.optional(),
+  timeoutMs: z.number().int().positive().optional(),
+  instructionsSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 }).strict();
 
 export const runCompletedPayloadSchema = z.object({
@@ -77,6 +92,23 @@ export const runCompletedPayloadSchema = z.object({
   ticketId: identitySchema,
   status: z.string().min(1),
   completedAt: timestampSchema,
+  providerSessionId: identitySchema.optional(),
+  providerProcessId: z.number().int().positive().optional(),
+  exitCode: z.number().int().optional(),
+  terminationSignal: z.string().min(1).optional(),
+  timedOut: z.boolean().optional(),
+  cancelled: z.boolean().optional(),
+  failureCategory: z.string().min(1).optional(),
+  failureReason: z.string().min(1).optional(),
+  evidence: normalizedAgentEvidenceSchema.optional(),
+}).strict();
+
+export const runStateChangedPayloadSchema = z.object({
+  runId: identitySchema,
+  ticketId: identitySchema,
+  previous: agentRunStateSchema.optional(),
+  next: agentRunStateSchema,
+  reason: z.string().min(1).optional(),
 }).strict();
 
 const workspaceIdentityShape = {
@@ -175,6 +207,13 @@ const eventUnionSchema = z.discriminatedUnion('type', [
     type: z.literal(EventType.WORKSPACE_FAILED),
     payload: workspaceFailedPayloadSchema,
   }).strict(),
+  z.object({
+    ...baseEnvelopeShape,
+    ticketId: identitySchema,
+    runId: identitySchema,
+    type: z.literal(EventType.RUN_STATE_CHANGED),
+    payload: runStateChangedPayloadSchema,
+  }).strict(),
 ]);
 
 /** Runtime-typed event union with duplicated envelope identities kept consistent. */
@@ -221,6 +260,7 @@ export type TicketStateChangedPayload = z.infer<typeof ticketStateChangedPayload
 export type TicketSuggestedPayload = z.infer<typeof ticketSuggestedPayloadSchema>;
 export type RunCreatedPayload = z.infer<typeof runCreatedPayloadSchema>;
 export type RunCompletedPayload = z.infer<typeof runCompletedPayloadSchema>;
+export type RunStateChangedPayload = z.infer<typeof runStateChangedPayloadSchema>;
 export type WorkspaceCreatingPayload = z.infer<typeof workspaceCreatingPayloadSchema>;
 export type WorkspaceReadyPayload = z.infer<typeof workspaceReadyPayloadSchema>;
 export type WorkspaceRemovedPayload = z.infer<typeof workspaceRemovedPayloadSchema>;

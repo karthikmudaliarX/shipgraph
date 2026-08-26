@@ -84,8 +84,14 @@ CORE-002 shipped:
 - Deterministic `QUEUED` → `ELIGIBLE` reconciliation
 - Read-only capacity-aware `shipgraph ready` selection
 
-Agent execution, PR monitoring, autonomous review, repair loops, auto-merge, and
-successor tickets are intentionally **not** implemented yet.
+WORK-001 shipped:
+
+- Persistent, provenance-checked isolated Git worktrees
+- Deterministic workspace lifecycle and fail-closed cleanup
+
+AGENT-001 (this PR) adds one bounded provider execution in an already verified
+workspace. It does not choose work, select models, create pull requests, review
+changes, or merge code.
 
 ## CLI examples
 
@@ -119,6 +125,13 @@ shipgraph ready
 
 # Structured ready queue
 shipgraph ready --json
+
+# Execute one explicitly supplied task with the OpenCode adapter
+shipgraph agent run AG-001 --model openai/gpt-5 --instructions "Implement the approved task"
+
+# Inspect durable execution state
+shipgraph agent inspect <run-id> --json
+shipgraph agent list --json
 ```
 
 `init` never persists the template's empty identity. Once a valid configuration
@@ -149,15 +162,15 @@ Shipped:
 
 - **CORE-001 ✅** — Project foundation and safe state boundary
 - **CORE-002 ✅** — Persistent backlog DAG and eligibility scheduler
+- **WORK-001 ✅** — Safe isolated git worktree lifecycle
 
 Active in this PR:
 
-- **WORK-001** — Safe isolated git worktree lifecycle
-  ([design](docs/architecture/WORKSPACES.md))
+- **AGENT-001** — Provider-neutral bounded agent execution and OpenCode adapter
+  ([design](docs/architecture/EXECUTION.md))
 
 Next up:
 
-- **AGENT-001** — OpenCode execution adapter
 - **MODEL-001** — Dynamic model routing and compute-aware execution policy
 
 Planned successor tickets (not yet implemented):

@@ -15,6 +15,14 @@ import {
   type NewShipgraphEvent,
   type ShipgraphEvent,
 } from '../events/event.js';
+import {
+  agentFailureCategorySchema,
+  agentRunRecordSchema,
+  normalizedAgentEvidenceSchema,
+  type AgentFailureCategory,
+  type AgentRunRecord,
+  type NormalizedAgentEvidence,
+} from '../domain/agent-run.js';
 
 export type ProjectRecord = {
   id: string;
@@ -46,6 +54,48 @@ export type RunRecord = {
   status: string;
   startedAt: string;
   completedAt?: string;
+  /** AGENT-001 fields are optional only for CORE-001 legacy rows. */
+  projectId?: string;
+  workspaceId?: string;
+  workspacePath?: string;
+  provider?: string;
+  model?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  providerSessionId?: string;
+  providerProcessId?: number;
+  exitCode?: number;
+  terminationSignal?: string;
+  timedOut?: boolean;
+  cancelled?: boolean;
+  failureCategory?: AgentFailureCategory;
+  failureReason?: string;
+  stdout?: string;
+  stderr?: string;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+  evidence?: NormalizedAgentEvidence;
+  instructionsSha256?: string;
+  timeoutMs?: number;
+};
+
+export type RunUpdate = {
+  startedAt?: string;
+  completedAt?: string | null;
+  updatedAt?: string;
+  providerSessionId?: string | null;
+  providerProcessId?: number | null;
+  exitCode?: number | null;
+  terminationSignal?: string | null;
+  timedOut?: boolean;
+  cancelled?: boolean;
+  failureCategory?: AgentFailureCategory | null;
+  failureReason?: string | null;
+  stdout?: string;
+  stderr?: string;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+  evidence?: NormalizedAgentEvidence | null;
 };
 
 export type WorkspaceStatus = 'CREATING' | 'READY' | 'REMOVED' | 'FAILED' | 'NEEDS_HUMAN';
@@ -127,6 +177,15 @@ export interface RunRepository {
   create(run: RunRecord): RunRecord;
   findById(id: string): RunRecord | undefined;
   findByTicketId(ticketId: string): readonly RunRecord[];
+  findActiveByTicket(projectId: string, ticketId: string): RunRecord | undefined;
+  findByProjectId(projectId: string): readonly RunRecord[];
+  updateStatus(
+    id: string,
+    status: string,
+    updatedAt: string,
+    update?: RunUpdate,
+    expectedStatuses?: readonly string[]
+  ): RunRecord | undefined;
 }
 
 export interface EventRepository {
@@ -457,20 +516,59 @@ export function createTicketDependencyRepository(
 }
 
 export function createRunRepository(db: DbConnection): RunRepository {
+  const activeStatuses = ['CREATED', 'STARTING', 'RUNNING'] as const;
+
   return {
     create(run): RunRecord {
-      db.prepare(
-        `INSERT INTO runs (id, ticket_id, base_sha, branch_name, status, started_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        run.id,
-        run.ticketId,
-        run.baseSha,
-        run.branchName,
-        run.status,
-        run.startedAt,
-        run.completedAt ?? null
-      );
+      validateRunForPersistence(db, run);
+      try {
+        db.prepare(
+          `INSERT INTO runs (
+            id, ticket_id, base_sha, branch_name, status, started_at, completed_at,
+            project_id, workspace_id, workspace_path, provider, model, created_at, updated_at,
+            provider_session_id, provider_process_id, exit_code, termination_signal,
+            timed_out, cancelled, failure_category, failure_reason, stdout, stderr,
+            stdout_truncated, stderr_truncated, evidence_json, instructions_sha256, timeout_ms
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+          run.id,
+          run.ticketId,
+          run.baseSha,
+          run.branchName,
+          run.status,
+          run.startedAt,
+          run.completedAt ?? null,
+          run.projectId ?? null,
+          run.workspaceId ?? null,
+          run.workspacePath ?? null,
+          run.provider ?? null,
+          run.model ?? null,
+          run.createdAt ?? run.startedAt,
+          run.updatedAt ?? run.startedAt,
+          run.providerSessionId ?? null,
+          run.providerProcessId ?? null,
+          run.exitCode ?? null,
+          run.terminationSignal ?? null,
+          run.timedOut === true ? 1 : 0,
+          run.cancelled === true ? 1 : 0,
+          run.failureCategory ?? null,
+          run.failureReason ?? null,
+          run.stdout ?? '',
+          run.stderr ?? '',
+          run.stdoutTruncated === true ? 1 : 0,
+          run.stderrTruncated === true ? 1 : 0,
+          run.evidence === undefined ? null : JSON.stringify(run.evidence),
+          run.instructionsSha256 ?? null,
+          run.timeoutMs ?? null
+        );
+      } catch (error) {
+        if (error instanceof Error && /UNIQUE constraint failed/.test(error.message)) {
+          throw new Error(
+            `An active agent run already exists for ticket ${run.ticketId}; refusing duplicate execution`
+          );
+        }
+        throw error;
+      }
       return run;
     },
     findById(id): RunRecord | undefined {
@@ -485,6 +583,59 @@ export function createRunRepository(db: DbConnection): RunRepository {
         .prepare('SELECT * FROM runs WHERE ticket_id = ? ORDER BY started_at')
         .all(ticketId);
       return rows.map((row) => rowToRun(row as Record<string, unknown>));
+    },
+    findActiveByTicket(projectId, ticketId): RunRecord | undefined {
+      const placeholders = activeStatuses.map(() => '?').join(', ');
+      const row = db
+        .prepare(
+          `SELECT * FROM runs
+           WHERE project_id = ? AND ticket_id = ? AND status IN (${placeholders})
+           ORDER BY started_at ASC LIMIT 1`
+        )
+        .get(projectId, ticketId, ...activeStatuses) as Record<string, unknown> | undefined;
+      return row ? rowToRun(row) : undefined;
+    },
+    findByProjectId(projectId): readonly RunRecord[] {
+      const rows = db
+        .prepare('SELECT * FROM runs WHERE project_id = ? ORDER BY started_at ASC')
+        .all(projectId);
+      return rows.map((row) => rowToRun(row as Record<string, unknown>));
+    },
+    updateStatus(id, status, updatedAt, update = {}, expectedStatuses): RunRecord | undefined {
+      const assignments = ['status = ?', 'updated_at = ?'];
+      const values: unknown[] = [status, updatedAt];
+      const add = (column: string, value: unknown): void => {
+        assignments.push(`${column} = ?`);
+        values.push(value);
+      };
+      if (update.startedAt !== undefined) add('started_at', update.startedAt);
+      if (update.completedAt !== undefined) add('completed_at', update.completedAt);
+      if (update.providerSessionId !== undefined) add('provider_session_id', update.providerSessionId);
+      if (update.providerProcessId !== undefined) add('provider_process_id', update.providerProcessId);
+      if (update.exitCode !== undefined) add('exit_code', update.exitCode);
+      if (update.terminationSignal !== undefined) add('termination_signal', update.terminationSignal);
+      if (update.timedOut !== undefined) add('timed_out', update.timedOut ? 1 : 0);
+      if (update.cancelled !== undefined) add('cancelled', update.cancelled ? 1 : 0);
+      if (update.failureCategory !== undefined) add('failure_category', update.failureCategory);
+      if (update.failureReason !== undefined) add('failure_reason', update.failureReason);
+      if (update.stdout !== undefined) add('stdout', update.stdout);
+      if (update.stderr !== undefined) add('stderr', update.stderr);
+      if (update.stdoutTruncated !== undefined) add('stdout_truncated', update.stdoutTruncated ? 1 : 0);
+      if (update.stderrTruncated !== undefined) add('stderr_truncated', update.stderrTruncated ? 1 : 0);
+      if (update.evidence !== undefined) {
+        add('evidence_json', update.evidence === null ? null : JSON.stringify(update.evidence));
+      }
+      const conditions = ['id = ?'];
+      values.push(id);
+      if (expectedStatuses !== undefined && expectedStatuses.length > 0) {
+        conditions.push(`status IN (${expectedStatuses.map(() => '?').join(', ')})`);
+        values.push(...expectedStatuses);
+      }
+      const result = db
+        .prepare(`UPDATE runs SET ${assignments.join(', ')} WHERE ${conditions.join(' AND ')}`)
+        .run(...values);
+      if (result.changes !== 1) return undefined;
+      return this.findById(id);
     },
   };
 }
@@ -748,15 +899,155 @@ function rowToDependency(row: Record<string, unknown>): TicketDependencyRecord {
 }
 
 function rowToRun(row: Record<string, unknown>): RunRecord {
-  return {
-    id: String(row.id),
-    ticketId: String(row.ticket_id),
-    baseSha: String(row.base_sha),
-    branchName: String(row.branch_name),
-    status: String(row.status),
-    startedAt: String(row.started_at),
-    completedAt: row.completed_at ? String(row.completed_at) : undefined,
+  const legacy: RunRecord = {
+    id: requiredString(row, 'id'),
+    ticketId: requiredString(row, 'ticket_id'),
+    baseSha: requiredString(row, 'base_sha'),
+    branchName: requiredString(row, 'branch_name'),
+    status: requiredString(row, 'status'),
+    startedAt: requiredString(row, 'started_at'),
+    ...(row.completed_at === null || row.completed_at === undefined
+      ? {}
+      : { completedAt: requiredString(row, 'completed_at') }),
   };
+
+  // Databases created before AGENT-001 contain only the original CORE-001
+  // run columns. Preserve their public shape, but never silently coerce a
+  // partially populated new record into a valid execution record.
+  const hasDurableMetadata =
+    row.project_id !== null && row.project_id !== undefined;
+  if (!hasDurableMetadata) return legacy;
+
+  const durable = agentRunRecordSchema.parse({
+    ...legacy,
+    projectId: requiredString(row, 'project_id'),
+    workspaceId: requiredString(row, 'workspace_id'),
+    workspacePath: requiredString(row, 'workspace_path'),
+    provider: requiredString(row, 'provider'),
+    model: requiredString(row, 'model'),
+    createdAt: requiredString(row, 'created_at'),
+    updatedAt: requiredString(row, 'updated_at'),
+    ...(row.provider_session_id === null || row.provider_session_id === undefined
+      ? {}
+      : { providerSessionId: requiredString(row, 'provider_session_id') }),
+    ...(row.provider_process_id === null || row.provider_process_id === undefined
+      ? {}
+      : { providerProcessId: requiredInteger(row, 'provider_process_id') }),
+    ...(row.exit_code === null || row.exit_code === undefined
+      ? {}
+      : { exitCode: requiredInteger(row, 'exit_code') }),
+    ...(row.termination_signal === null || row.termination_signal === undefined
+      ? {}
+      : { terminationSignal: requiredString(row, 'termination_signal') }),
+    timedOut: sqliteBoolean(row.timed_out, 'timed_out'),
+    cancelled: sqliteBoolean(row.cancelled, 'cancelled'),
+    ...(row.failure_category === null || row.failure_category === undefined
+      ? {}
+      : { failureCategory: agentFailureCategorySchema.parse(row.failure_category) }),
+    ...(row.failure_reason === null || row.failure_reason === undefined
+      ? {}
+      : { failureReason: requiredString(row, 'failure_reason') }),
+    stdout: requiredText(row, 'stdout'),
+    stderr: requiredText(row, 'stderr'),
+    stdoutTruncated: sqliteBoolean(row.stdout_truncated, 'stdout_truncated'),
+    stderrTruncated: sqliteBoolean(row.stderr_truncated, 'stderr_truncated'),
+    ...(row.evidence_json === null || row.evidence_json === undefined
+      ? {}
+      : { evidence: normalizedAgentEvidenceSchema.parse(JSON.parse(requiredString(row, 'evidence_json'))) }),
+    instructionsSha256: requiredString(row, 'instructions_sha256'),
+    timeoutMs: requiredInteger(row, 'timeout_ms'),
+  }) as AgentRunRecord;
+  return durable;
+}
+
+function validateRunForPersistence(db: DbConnection, run: RunRecord): void {
+  const hasDurableMetadata =
+    run.projectId !== undefined ||
+    run.workspaceId !== undefined ||
+    run.provider !== undefined ||
+    run.model !== undefined ||
+    run.instructionsSha256 !== undefined;
+  if (!hasDurableMetadata) return;
+  agentRunRecordSchema.parse({
+    ...run,
+    projectId: run.projectId,
+    workspaceId: run.workspaceId,
+    workspacePath: run.workspacePath,
+    provider: run.provider,
+    model: run.model,
+    createdAt: run.createdAt ?? run.startedAt,
+    updatedAt: run.updatedAt ?? run.startedAt,
+    timedOut: run.timedOut ?? false,
+    cancelled: run.cancelled ?? false,
+    stdout: run.stdout ?? '',
+    stderr: run.stderr ?? '',
+    stdoutTruncated: run.stdoutTruncated ?? false,
+    stderrTruncated: run.stderrTruncated ?? false,
+    instructionsSha256: run.instructionsSha256,
+    timeoutMs: run.timeoutMs,
+  });
+  const ticket = db
+    .prepare('SELECT project_id FROM tickets WHERE id = ?')
+    .get(run.ticketId) as { project_id: string } | undefined;
+  if (!ticket || ticket.project_id !== run.projectId) {
+    throw new Error(`Agent run ${run.id} does not match its ticket project`);
+  }
+  const workspace = db
+    .prepare(
+      `SELECT project_id, ticket_id, worktree_path, branch_name, base_sha, status
+       FROM workspaces WHERE id = ?`
+    )
+    .get(run.workspaceId) as
+    | {
+        project_id: string;
+        ticket_id: string;
+        worktree_path: string;
+        branch_name: string;
+        base_sha: string;
+        status: string;
+      }
+    | undefined;
+  if (
+    !workspace ||
+    workspace.project_id !== run.projectId ||
+    workspace.ticket_id !== run.ticketId ||
+    workspace.worktree_path !== run.workspacePath ||
+    workspace.branch_name !== run.branchName ||
+    workspace.base_sha !== run.baseSha ||
+    workspace.status !== 'READY'
+  ) {
+    throw new Error(`Agent run ${run.id} does not match a READY workspace identity`);
+  }
+}
+
+function requiredString(row: Record<string, unknown>, column: string): string {
+  const value = row[column];
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`Persisted run column ${column} is invalid`);
+  }
+  return value;
+}
+
+function requiredText(row: Record<string, unknown>, column: string): string {
+  const value = row[column];
+  if (typeof value !== 'string') {
+    throw new Error(`Persisted run column ${column} is invalid`);
+  }
+  return value;
+}
+
+function requiredInteger(row: Record<string, unknown>, column: string): number {
+  const value = row[column];
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    throw new Error(`Persisted run column ${column} is invalid`);
+  }
+  return value;
+}
+
+function sqliteBoolean(value: unknown, column: string): boolean {
+  if (value === 0) return false;
+  if (value === 1) return true;
+  throw new Error(`Persisted run column ${column} is invalid`);
 }
 
 function rowToWorkspace(row: Record<string, unknown>): WorkspaceRecord {
