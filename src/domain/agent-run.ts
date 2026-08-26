@@ -55,7 +55,7 @@ export const agentFailureCategorySchema = z.enum(AGENT_FAILURE_CATEGORIES);
  * remain bounded process output and are never persisted as arbitrary JSON.
  */
 export const normalizedAgentEvidenceSchema = z.object({
-  outputFormat: z.literal('jsonl'),
+  outputFormat: z.enum(['json', 'jsonl']),
   eventCount: z.number().int().min(1).max(10_000),
   eventTypes: z.array(z.string().min(1).max(80)).max(64),
   summary: z.string().max(4_096).optional(),

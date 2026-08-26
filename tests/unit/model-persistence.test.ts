@@ -26,6 +26,8 @@ function provider(overrides: Partial<ProviderRegistryRecord> = {}): ProviderRegi
     displayName: 'Codex',
     configured: true,
     availability: 'available',
+    executionStatus: 'available',
+    executionProvider: 'codex',
     capabilities: ['implementation', 'review', 'repair'],
     catalogStatus: 'known',
     checkedAt: now,

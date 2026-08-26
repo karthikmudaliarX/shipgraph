@@ -5,6 +5,7 @@ import type {
   AgentExecutionRequest,
   AgentExecutionResult,
 } from '../adapters/agent/adapter.js';
+import type { ModelExecutionTarget } from '../adapters/agent/registry.js';
 import {
   AGENT_PROVIDERS,
   type AgentProvider,
@@ -68,6 +69,8 @@ export type AgentRunRecoveryResult = {
   recovered: boolean;
   run: AgentRunRecord;
 };
+
+export type SelectedAgentTaskInput = Omit<AgentTaskInput, 'model' | 'provider'>;
 
 /**
  * Execute exactly one explicitly supplied ticket in its existing READY
@@ -228,6 +231,26 @@ export async function executeAgentTask(
       `Run ${started.id} terminal result could not be persisted and the run could not be marked NEEDS_HUMAN: ${safeErrorMessage(error)}`
     );
   }
+}
+
+/**
+ * Execute a selection returned by MODEL-001 through the AGENT-001 boundary.
+ * The target carries the already-resolved adapter and model ID; this helper
+ * deliberately does not perform scheduling or choose another provider.
+ */
+export async function executeSelectedAgentTask(
+  options: Omit<AgentExecutionServiceOptions, 'adapter'>,
+  target: ModelExecutionTarget,
+  input: SelectedAgentTaskInput
+): Promise<AgentTaskResult> {
+  return executeAgentTask(
+    { ...options, adapter: target.adapter },
+    {
+      ...input,
+      provider: target.provider,
+      model: target.modelId,
+    }
+  );
 }
 
 /** Read one durable run after validating current-project ownership. */

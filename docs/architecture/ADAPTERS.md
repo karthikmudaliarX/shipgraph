@@ -37,14 +37,21 @@ Capabilities:
 - `review` — review a change for correctness or adversarial concerns.
 - `repair` — fix a change after review feedback.
 
-Current execution provider:
+Current execution surfaces:
 
-- OpenCode (AGENT-001)
+- OpenCode Go → the OpenCode AGENT-001 adapter
+- Codex → the Codex AGENT-001 adapter
+- Grok → a Grok command adapter bound to the shared ACP identity
+- Gemini → an Antigravity (`agy`) command adapter bound to the shared ACP identity
 
-Future execution providers:
-
-- Codex
-- ACP (Agent Client Protocol)
+The MODEL-001 provider identity is intentionally kept separate from the
+provider-neutral AGENT-001 identity. The exhaustive mapping is
+`opencode-go → opencode`, `codex → codex`, and `grok`/`gemini → acp`; the two
+ACP-bound providers still have distinct adapter instances. A provider is
+execution-available only after its adapter proves the exact installed
+headless command surface. In particular, Gemini execution uses Antigravity
+(`agy`), not Gemini CLI. Missing or unsupported automation evidence remains
+unknown and cannot be routed.
 
 MODEL-001 adds a separate metadata boundary for the paid engineering pools:
 OpenCode Go, Codex, Grok and Gemini. `ModelProviderAdapter` implementations
@@ -60,13 +67,17 @@ provider has no such surface, its adapter-level task contract is the stable
 capability boundary and explicit model capabilities from the catalog may narrow
 it. Model identifiers never imply capabilities.
 
-`ProviderRegistry` persists the latest probe/catalog snapshot and
-`ProviderHealth` state. `ModelRouter` receives only an explicit execution
-envelope (Eco, Balanced or Max plus the caller's budget/concurrency values),
-selects a discovered usable model for implementation, review or repair, persists
-its reason, and atomically reserves the selected provider's known capacity when
-the caller supplies a durable execution run. A route without a run ID is a
-non-persistent decision preview and does not claim provider capacity.
+`ProviderRegistry` persists the latest provider/model metadata,
+capability-probed execution status and `ProviderHealth` state. `ModelRouter`
+receives only an explicit execution envelope (Eco, Balanced or Max plus the
+caller's budget/concurrency values), selects a discovered usable model for
+implementation, review or repair only when its AGENT-001 adapter is available,
+persists its reason, and atomically reserves the selected provider's known
+capacity when the caller supplies a durable execution run. A route without a
+run ID is a non-persistent decision preview and does not claim provider
+capacity. `ModelRoutingService.resolveExecutionTarget()` returns the exact
+capability-probed adapter for a route, and the execution service accepts that
+target without choosing a different provider.
 When no separate request ID is supplied, the durable run ID is the stable
 replay key for that reservation until it is finalized; a new attempt after
 finalization must use a new request ID.
@@ -81,9 +92,10 @@ durable run and returned routing decision ID. A durable agent run may issue
 sequential model attempts, so its RUNNING state alone does not keep a completed
 model-attempt reservation active.
 
-The existing AGENT-001 execution command still accepts an explicit provider and
-model. MODEL-001 does not dispatch Linear work or turn the metadata adapters
-into post-KAR-6 PR, CI, merge or scheduler automation.
+The AGENT-001 execution command accepts an explicit provider/model and can use
+the bounded Codex, Grok or Antigravity adapters as well as OpenCode. MODEL-001
+does not dispatch Linear work or turn these adapters into post-KAR-6 PR, CI,
+merge or scheduler automation.
 
 ## GitHostAdapter
 

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AGENT_PROVIDERS } from './agent-provider.js';
 
 export const MODEL_PROVIDER_IDS = ['opencode-go', 'codex', 'grok', 'gemini'] as const;
 export type ModelProviderId = (typeof MODEL_PROVIDER_IDS)[number];
@@ -57,6 +58,14 @@ export const PROVIDER_AUTH_STATUSES = [
 export type ProviderAuthStatus = (typeof PROVIDER_AUTH_STATUSES)[number];
 export const providerAuthStatusSchema = z.enum(PROVIDER_AUTH_STATUSES);
 
+export const PROVIDER_EXECUTION_STATUSES = [
+  'available',
+  'unavailable',
+  'unknown',
+] as const;
+export type ProviderExecutionStatus = (typeof PROVIDER_EXECUTION_STATUSES)[number];
+export const providerExecutionStatusSchema = z.enum(PROVIDER_EXECUTION_STATUSES);
+
 export const QUOTA_PRESSURES = ['low', 'medium', 'high', 'unknown'] as const;
 export type QuotaPressure = (typeof QUOTA_PRESSURES)[number];
 export const quotaPressureSchema = z.enum(QUOTA_PRESSURES);
@@ -88,13 +97,31 @@ export const providerRegistryRecordSchema = z.object({
   displayName: z.string().min(1).max(128),
   configured: z.boolean(),
   availability: providerAvailabilitySchema,
+  executionStatus: providerExecutionStatusSchema,
+  executionProvider: z.enum(AGENT_PROVIDERS).optional(),
+  executionReason: z.string().min(1).max(2_048).optional(),
   version: z.string().min(1).max(256).optional(),
   capabilities: z.array(modelCapabilitySchema).max(16),
   catalogStatus: z.enum(['known', UNKNOWN]),
   catalogReason: z.string().min(1).max(2_048).optional(),
   checkedAt: timestampSchema,
   updatedAt: timestampSchema,
-}).strict();
+}).strict().superRefine((record, context) => {
+  if (record.executionStatus === 'available' && record.executionProvider === undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['executionProvider'],
+      message: 'an available provider must identify its AGENT-001 execution adapter',
+    });
+  }
+  if (record.executionStatus !== 'available' && record.executionProvider !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['executionProvider'],
+      message: 'a non-routable provider cannot identify an available execution adapter',
+    });
+  }
+});
 export type ProviderRegistryRecord = z.infer<typeof providerRegistryRecordSchema>;
 
 export const modelCatalogRecordSchema = z.object({
@@ -214,6 +241,9 @@ export type ProviderSnapshot = {
   displayName: string;
   configured: boolean;
   availability: ProviderAvailability;
+  executionStatus: ProviderExecutionStatus;
+  executionProvider?: (typeof AGENT_PROVIDERS)[number];
+  executionReason?: string;
   auth: ProviderAuthStatus;
   version?: string;
   capabilities: readonly ModelCapability[];

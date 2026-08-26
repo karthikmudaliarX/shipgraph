@@ -175,6 +175,8 @@ function isUsableProvider(
   return (
     provider.configured &&
     provider.availability === 'available' &&
+    provider.executionStatus === 'available' &&
+    provider.executionProvider !== undefined &&
     provider.catalogStatus === 'known' &&
     provider.capabilities.includes(task) &&
     health !== undefined &&
@@ -342,6 +344,7 @@ function reasonFacts(
   const facts = [
     `provider=${provider.providerId}`,
     `family=${provider.family}`,
+    `execution=${provider.executionProvider}`,
     `model=${model.modelId}`,
     `health=${health.status}`,
     `auth=${health.auth}`,

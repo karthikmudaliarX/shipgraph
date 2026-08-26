@@ -17,7 +17,11 @@ describe('MODEL-001 CLI', () => {
     providerScript = join(projectDir, 'provider');
     writeFileSync(
       providerScript,
-      '#!/bin/sh\nif [ "$1" = "--version" ]; then printf "fake-provider 1.0\\n"; else printf "[{\\"id\\":\\"future/provider-model\\"}]\\n"; fi\n'
+      '#!/bin/sh\n' +
+        'if [ "$1" = "--version" ]; then printf "fake-provider 1.0\\n"; ' +
+        'elif [ "$1" = "run" ] && [ "$2" = "--help" ]; then ' +
+        'printf "run --format --dir --model --auto\\n"; ' +
+        'else printf "[{\\"id\\":\\"future/provider-model\\"}]\\n"; fi\n'
     );
     chmodSync(providerScript, 0o700);
     const config: ShipgraphConfig = {
@@ -90,6 +94,8 @@ describe('MODEL-001 CLI', () => {
     };
     expect(refresh.providers.find((provider) => provider.providerId === 'opencode-go')).toMatchObject({
       availability: 'available',
+      executionStatus: 'available',
+      executionProvider: 'opencode',
       catalogStatus: 'known',
       modelCount: 1,
     });

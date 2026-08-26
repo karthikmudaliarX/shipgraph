@@ -7,6 +7,8 @@ import type {
   ModelDiscoveryResult,
   ProviderProbeResult,
 } from '../../src/adapters/model/adapter.js';
+import type { AgentProvider } from '../../src/domain/agent-provider.js';
+import type { ModelExecutionAdapterBinding } from '../../src/adapters/agent/registry.js';
 import { ModelRoutingService } from '../../src/model/service.js';
 
 const projectId = 'project-1';
@@ -88,6 +90,27 @@ function adapter(
   };
 }
 
+function executionBinding(
+  modelProviderId: ModelExecutionAdapterBinding['modelProviderId']
+): ModelExecutionAdapterBinding {
+  const provider: AgentProvider = modelProviderId === 'opencode-go'
+    ? 'opencode'
+    : modelProviderId === 'codex'
+      ? 'codex'
+      : 'acp';
+  return {
+    modelProviderId,
+    adapter: {
+      provider,
+      capabilities: ['execute'],
+      probe: async () => ({ available: true as const, version: 'test-agent' }),
+      execute: async () => {
+        throw new Error('test execution adapter is only used for capability selection');
+      },
+    },
+  };
+}
+
 describe('MODEL-001 service', () => {
   let db: DbConnection;
 
@@ -109,6 +132,12 @@ describe('MODEL-001 service', () => {
         adapter('codex', 'openai', calls),
         adapter('grok', 'xai', calls),
         adapter('gemini', 'google', calls),
+      ],
+      executionAdapters: [
+        executionBinding('opencode-go'),
+        executionBinding('codex'),
+        executionBinding('grok'),
+        executionBinding('gemini'),
       ],
       now: () => now,
       createId: (() => {
@@ -162,6 +191,12 @@ describe('MODEL-001 service', () => {
         adapter('grok', 'xai', calls),
         adapter('gemini', 'google', calls),
       ],
+      executionAdapters: [
+        executionBinding('opencode-go'),
+        executionBinding('codex'),
+        executionBinding('grok'),
+        executionBinding('gemini'),
+      ],
       now: () => now,
     });
     await service.refresh();
@@ -210,6 +245,7 @@ describe('MODEL-001 service', () => {
       db,
       projectId,
       adapters: [changingAdapter],
+      executionAdapters: [executionBinding('codex')],
       now: () => clock,
     });
 
@@ -240,6 +276,7 @@ describe('MODEL-001 service', () => {
       db,
       projectId,
       adapters: [authUnknownAdapter],
+      executionAdapters: [executionBinding('codex')],
       now: () => now,
     });
 
@@ -275,6 +312,7 @@ describe('MODEL-001 service', () => {
       db,
       projectId,
       adapters: [adapter('codex', 'openai', calls)],
+      executionAdapters: [executionBinding('codex')],
       now: () => now,
     });
     await service.refresh();
@@ -356,6 +394,7 @@ describe('MODEL-001 service', () => {
       db,
       projectId,
       adapters: [adapter('codex', 'openai', calls)],
+      executionAdapters: [executionBinding('codex')],
       now: () => now,
     });
     await service.refresh();
@@ -411,6 +450,7 @@ describe('MODEL-001 service', () => {
       db,
       projectId,
       adapters: [adapter('codex', 'openai', calls)],
+      executionAdapters: [executionBinding('codex')],
       now: () => now,
     });
     await service.refresh();
@@ -452,6 +492,7 @@ describe('MODEL-001 service', () => {
       db,
       projectId,
       adapters: [adapter('codex', 'openai', calls)],
+      executionAdapters: [executionBinding('codex')],
       now: () => now,
     });
     await service.refresh();
@@ -499,6 +540,7 @@ describe('MODEL-001 service', () => {
       db,
       projectId,
       adapters: [adapter('codex', 'openai', calls)],
+      executionAdapters: [executionBinding('codex')],
       now: () => now,
     });
     await service.refresh();

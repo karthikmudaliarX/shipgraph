@@ -4,12 +4,17 @@ import {
   modelRoutingRequestSchema,
   type ModelProviderId,
   type ModelRoutingDecision,
+  type ModelRoutingSelection,
   type ModelRoutingRequest,
   type ProviderHealthRecord,
   type ProviderRegistryRecord,
   type ModelRoutingSnapshot,
 } from '../domain/model-provider.js';
 import type { ModelProviderAdapter, ModelProviderConfiguration } from '../adapters/model/adapter.js';
+import type {
+  ModelExecutionAdapterBinding,
+  ModelExecutionTarget,
+} from '../adapters/agent/registry.js';
 import type { DbConnection } from '../persistence/db.js';
 import { createModelRepository, type ModelRepository } from '../persistence/model-repositories.js';
 import { UsageLedger, type UsageLedgerInput } from './ledger.js';
@@ -33,6 +38,7 @@ export type ModelServiceOptions = {
   db: DbConnection;
   projectId: string;
   adapters?: readonly ModelProviderAdapter[];
+  executionAdapters?: readonly ModelExecutionAdapterBinding[];
   configuration?: ModelProviderConfiguration;
   cwd?: string;
   now?: () => string;
@@ -160,6 +166,16 @@ export class ModelRoutingService {
 
   public listRoutingDecisions() {
     return this.repository.listRoutingDecisions(this.options.projectId);
+  }
+
+  /**
+   * Resolve a routed MODEL-001 selection to the exact provider-neutral
+   * AGENT-001 adapter that was capability-probed during refresh.
+   */
+  public resolveExecutionTarget(
+    selection: Pick<ModelRoutingSelection, 'providerId' | 'modelId' | 'task'>
+  ): ModelExecutionTarget {
+    return this.registry.resolveExecutionTarget(selection);
   }
 
   public async recordUsage(input: UsageRecordInput): Promise<UsageRecordResult> {

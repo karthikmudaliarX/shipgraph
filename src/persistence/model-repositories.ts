@@ -113,13 +113,17 @@ export function createModelRepository(db: DbConnection): ModelRepository {
       db.prepare(
         `INSERT INTO provider_registry (
           project_id, provider_id, family, display_name, configured, availability,
+          execution_status, execution_provider, execution_reason,
           version, capabilities_json, catalog_status, catalog_reason, checked_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(project_id, provider_id) DO UPDATE SET
           family = excluded.family,
           display_name = excluded.display_name,
           configured = excluded.configured,
           availability = excluded.availability,
+          execution_status = excluded.execution_status,
+          execution_provider = excluded.execution_provider,
+          execution_reason = excluded.execution_reason,
           version = excluded.version,
           capabilities_json = excluded.capabilities_json,
           catalog_status = excluded.catalog_status,
@@ -133,6 +137,9 @@ export function createModelRepository(db: DbConnection): ModelRepository {
         provider.displayName,
         provider.configured ? 1 : 0,
         provider.availability,
+        provider.executionStatus,
+        provider.executionProvider ?? null,
+        provider.executionReason ?? null,
         provider.version ?? null,
         JSON.stringify(provider.capabilities),
         provider.catalogStatus,
@@ -674,6 +681,13 @@ export function createModelRepository(db: DbConnection): ModelRepository {
       displayName: requiredText(row.display_name),
       configured: requiredBoolean(row.configured),
       availability: row.availability,
+      executionStatus: row.execution_status,
+      ...(row.execution_provider === null || row.execution_provider === undefined
+        ? {}
+        : { executionProvider: row.execution_provider }),
+      ...(row.execution_reason === null || row.execution_reason === undefined
+        ? {}
+        : { executionReason: requiredText(row.execution_reason) }),
       ...(row.version === null || row.version === undefined ? {} : { version: requiredText(row.version) }),
       capabilities: parseJson(row.capabilities_json),
       catalogStatus: row.catalog_status,

@@ -18,9 +18,20 @@ import {
   runProvidersRoute,
   runProvidersUsage,
 } from './providers.js';
+import {
+  createCodexAdapter,
+  createGeminiAdapter,
+  createGrokAdapter,
+} from '../adapters/agent/providers.js';
 import { createOpenCodeAdapter } from '../adapters/agent/opencode.js';
+import type { AgentExecutionAdapter } from '../adapters/agent/adapter.js';
 import { AGENT_PROVIDERS, type AgentProvider } from '../domain/agent-provider.js';
 import { DEFAULT_AGENT_TIMEOUT_MS } from '../domain/agent-run.js';
+import {
+  normalizeModelProviderId,
+  type ModelProviderId,
+} from '../domain/model-provider.js';
+import { agentProviderForModelProvider } from '../adapters/agent/registry.js';
 import {
   agentServiceOptions,
   runAgentInspect,
@@ -476,8 +487,9 @@ export function createProgram(): Command {
     .description('Run one provider adapter in the ticket\'s READY workspace')
     .requiredOption('--model <provider/model>', 'explicit provider model identifier')
     .requiredOption('--instructions <text>', 'instructions supplied to the coding agent')
-    .option('--provider <provider>', 'provider adapter', 'opencode')
-    .option('--executable <path>', 'OpenCode executable or absolute test double', 'opencode')
+    .option('--provider <provider>', 'AGENT adapter identity (opencode, codex, or acp)', 'opencode')
+    .option('--model-provider <provider>', 'MODEL provider identity (needed to distinguish acp adapters)')
+    .option('--executable <path>', 'selected provider executable or absolute test double')
     .option('--timeout-ms <milliseconds>', 'execution timeout', String(DEFAULT_AGENT_TIMEOUT_MS))
     .option('--project-dir <path>', 'target project directory', process.cwd())
     .option('--worktree-root <path>', 'ShipGraph worktree root override')
@@ -488,6 +500,7 @@ export function createProgram(): Command {
         model: string;
         instructions: string;
         provider?: string;
+        modelProvider?: string;
         executable?: string;
         timeoutMs?: string;
         projectDir?: string;
@@ -503,15 +516,18 @@ export function createProgram(): Command {
       try {
         const projectDir = options.projectDir ?? process.cwd();
         const provider = parseAgentProvider(options.provider ?? 'opencode');
-        if (provider !== 'opencode') {
+        const modelProvider = resolveCliModelProvider(provider, options.modelProvider);
+        const adapter = createCliAgentAdapter(modelProvider, options.executable);
+        const probe = await adapter.probe();
+        if (!probe.available) {
           throw new Error(
-            `Provider ${provider} has no AGENT-001 adapter yet; only opencode is available`
+            `Provider ${modelProvider} has no usable AGENT-001 execution surface: ${probe.reason}`
           );
         }
         db = openInitializedDatabase(projectDir);
         const base = workspaceServiceOptions(db, projectDir, options.worktreeRoot);
         const report = await runAgentTask(
-          agentServiceOptions(base, createOpenCodeAdapter({ executable: options.executable })),
+          agentServiceOptions(base, adapter),
           {
             ticketId,
             provider,
@@ -648,6 +664,41 @@ function parseAgentProvider(value: string): AgentProvider {
     throw new Error(`Unsupported agent provider: ${value}`);
   }
   return value as AgentProvider;
+}
+
+function resolveCliModelProvider(
+  provider: AgentProvider,
+  requested: string | undefined
+): ModelProviderId {
+  if (requested !== undefined) {
+    const modelProvider = normalizeModelProviderId(requested);
+    if (agentProviderForModelProvider(modelProvider) !== provider) {
+      throw new Error(
+        `MODEL provider ${modelProvider} uses AGENT adapter ${agentProviderForModelProvider(modelProvider)}, not ${provider}`
+      );
+    }
+    return modelProvider;
+  }
+  if (provider === 'opencode') return 'opencode-go';
+  if (provider === 'codex') return 'codex';
+  throw new Error('AGENT provider acp is ambiguous; supply --model-provider grok or gemini');
+}
+
+function createCliAgentAdapter(
+  modelProvider: ModelProviderId,
+  executable: string | undefined
+): AgentExecutionAdapter {
+  const options = executable === undefined ? {} : { executable };
+  switch (modelProvider) {
+    case 'opencode-go':
+      return createOpenCodeAdapter(options);
+    case 'codex':
+      return createCodexAdapter(options);
+    case 'grok':
+      return createGrokAdapter(options);
+    case 'gemini':
+      return createGeminiAdapter(options);
+  }
 }
 
 function parsePositiveInteger(value: string | undefined, optionName: string): number {

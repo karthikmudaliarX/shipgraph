@@ -7,7 +7,7 @@ ShipGraph execution core
         ↓
 provider-neutral AgentExecutionAdapter
         ↓
-OpenCode adapter
+capability-probed provider adapter
         ↓
 one verified WORK-001 worktree
 ```
@@ -54,13 +54,16 @@ completed; later verification owns engineering success.
 
 ## Process boundary
 
-The OpenCode adapter invokes the executable without a shell, sets both `cwd`
-and OpenCode's directory argument to the verified worktree, passes an explicit
-model, uses a small allow-listed environment, drains bounded stdout/stderr, and
-terminates the owned POSIX process group on timeout or cancellation. OpenCode
-JSONL events are reduced to session ID, event types/count and a bounded summary;
-raw event objects are not persisted as structured fields; retained stdout is
-bounded and redacted process text.
+Command adapters invoke their executable without a shell, pin the process cwd
+to the verified worktree, pass the selected model explicitly, use a small
+allow-listed environment, drain bounded stdout/stderr, and terminate the owned
+POSIX process group on timeout or cancellation. OpenCode and Codex JSONL, plus
+Grok and Antigravity (`agy`) JSON, are reduced to session ID, event types/count
+and a bounded summary; raw event objects are not persisted as structured
+fields; retained stdout is bounded and redacted process text. Each adapter
+probes the exact version/help surface it will use before the provider becomes
+execution-available. Gemini's MODEL-001 identity is implemented through
+Antigravity (`agy`), not Gemini CLI.
 
 MODEL-001 now owns provider metadata discovery, health, quota/usage ledger
 records and deterministic model routing in a separate control-plane subsystem.
@@ -68,9 +71,10 @@ A route with a durable execution run persists its decision with an atomic,
 run-bound provider-capacity reservation; a route without a run ID is a
 non-persistent preview. Usage finalization releases that reservation only for
 the owning run. Unknown quota and usage values remain unknown.
-The AGENT-001 command remains explicit-provider execution; MODEL-001 does not
-automatically dispatch a ticket, replace that execution contract, or add
-post-execution PR/review/release automation.
+The AGENT-001 command remains explicit-provider execution; MODEL-001 resolves a
+routed selection to the exact adapter but does not automatically dispatch a
+ticket, replace that execution contract, or add post-execution PR/review/release
+automation.
 
 ## Known limitations
 
@@ -78,9 +82,9 @@ post-execution PR/review/release automation.
   run remains durable and blocks duplicate execution until an operator invokes
   `shipgraph agent recover`, which records `NEEDS_HUMAN` without killing a
   process whose ownership cannot be proven.
-- The explicit AGENT-001 execution command exposes only the OpenCode execution
-  adapter. MODEL-001 exposes metadata probes and routing separately; it does not
-  automatically dispatch those choices into this command.
+- The explicit AGENT-001 execution command still requires a caller to supply a
+  ticket, workspace, instructions and model. MODEL-001 does not automatically
+  dispatch routed choices or add scheduler/Linear orchestration.
 - A terminal run describes the bounded provider execution only. The ticket
   remains in the existing implementation lifecycle for later verification,
   review, repair, release and merge tickets to advance.

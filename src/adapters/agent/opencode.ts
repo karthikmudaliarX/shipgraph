@@ -10,6 +10,9 @@ import {
   type NormalizedAgentEvidence,
 } from '../../domain/agent-run.js';
 import {
+  probeCommandSurface,
+} from './command.js';
+import {
   createAgentProcessRunner,
   type AgentProcessResult,
   type AgentProcessRunner,
@@ -19,7 +22,6 @@ import { redactSensitiveText } from './safety.js';
 export { redactSensitiveText } from './safety.js';
 
 const OPENCODE_PROVIDER = 'opencode' as const;
-const PROBE_TIMEOUT_MS = 5_000;
 const MAX_EVENT_TYPES = 64;
 const MAX_SUMMARY_LENGTH = 4_096;
 
@@ -47,6 +49,7 @@ const SAFE_INHERITED_ENVIRONMENT = [
 const BLOCKED_ENVIRONMENT_KEYS = /^(?:GIT_|NODE_OPTIONS$|BASH_ENV$|ENV$|CDPATH$|LD_PRELOAD$|DYLD_)/;
 
 export type OpenCodeAdapterOptions = {
+  enabled?: boolean;
   executable?: string;
   processRunner?: AgentProcessRunner;
   /** Explicit test/provider environment additions; never persisted. */
@@ -65,37 +68,29 @@ export class OpenCodeAdapter implements AgentExecutionAdapter {
   public readonly provider = OPENCODE_PROVIDER;
   public readonly capabilities = ['execute'] as const;
 
+  private readonly enabled: boolean;
   private readonly executable: string;
   private readonly processRunner: AgentProcessRunner;
   private readonly environment: Readonly<Record<string, string>>;
 
   public constructor(options: OpenCodeAdapterOptions = {}) {
+    this.enabled = options.enabled ?? true;
     this.executable = options.executable ?? 'opencode';
     this.processRunner = options.processRunner ?? createAgentProcessRunner();
     this.environment = buildEnvironment(options.environment);
   }
 
   public async probe(): Promise<AgentProbeResult> {
-    const result = await this.processRunner.run({
-      command: this.executable,
-      args: ['--version'],
+    return probeCommandSurface({
+      displayName: 'OpenCode',
+      enabled: this.enabled,
+      executable: this.executable,
+      probeArgs: ['run', '--help'],
+      requiredProbeTokens: ['--format', '--dir', '--model', '--auto'],
+      processRunner: this.processRunner,
       cwd: process.cwd(),
-      env: this.environment,
-      timeoutMs: PROBE_TIMEOUT_MS,
-      maxOutputBytes: 8_192,
+      environment: this.environment,
     });
-    if (result.spawnErrorCode !== undefined) {
-      return {
-        available: false,
-        reason: `OpenCode could not be started (${result.spawnErrorCode})`,
-      };
-    }
-    if (result.timedOut) return { available: false, reason: 'OpenCode version probe timed out' };
-    if (result.exitCode !== 0) {
-      return { available: false, reason: 'OpenCode version probe failed' };
-    }
-    const version = result.stdout.trim().split(/\r?\n/u)[0]?.trim();
-    return version ? { available: true, version } : { available: true };
   }
 
   public async execute(request: AgentExecutionRequest): Promise<AgentExecutionResult> {

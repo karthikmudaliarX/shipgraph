@@ -1,0 +1,150 @@
+import {
+  MODEL_PROVIDER_IDS,
+  modelProviderIdSchema,
+  type ModelProviderId,
+  type ModelRoutingSelection,
+} from '../../domain/model-provider.js';
+import type { AgentProvider } from '../../domain/agent-provider.js';
+import type { AgentExecutionAdapter } from './adapter.js';
+import {
+  createCodexAdapter,
+  createGeminiAdapter,
+  createGrokAdapter,
+  type ModelExecutionAdapterBinding,
+} from './providers.js';
+import { createOpenCodeAdapter, type OpenCodeAdapterOptions } from './opencode.js';
+import type { AgentProcessRunner } from './process.js';
+import type { ModelProviderConfiguration } from '../model/adapter.js';
+
+export type { ModelExecutionAdapterBinding } from './providers.js';
+
+/**
+ * MODEL-001 provider identities describe the account/model pool. AGENT-001
+ * identities describe the executable automation surface. Keep this mapping
+ * exhaustive and explicit: two model providers may use the ACP boundary, but
+ * their binding remains distinct and is selected by model provider ID.
+ */
+export const MODEL_PROVIDER_TO_AGENT_PROVIDER = {
+  'opencode-go': 'opencode',
+  codex: 'codex',
+  grok: 'acp',
+  gemini: 'acp',
+} as const satisfies Record<ModelProviderId, AgentProvider>;
+
+export type ModelExecutionTarget = {
+  modelProviderId: ModelProviderId;
+  provider: AgentProvider;
+  modelId: string;
+  adapter: AgentExecutionAdapter;
+};
+
+export type ModelExecutionAdapterFactoryOptions = {
+  configuration?: ModelProviderConfiguration;
+  processRunner?: AgentProcessRunner;
+  cwd?: string;
+  environment?: Readonly<Record<string, string>>;
+};
+
+/**
+ * Indexes execution adapters by MODEL-001 identity while preserving the
+ * provider-neutral AGENT-001 adapter contract.
+ */
+export class AgentExecutionAdapterRegistry {
+  private readonly bindings: ReadonlyMap<ModelProviderId, ModelExecutionAdapterBinding>;
+
+  public constructor(bindings: readonly ModelExecutionAdapterBinding[]) {
+    const indexed = new Map<ModelProviderId, ModelExecutionAdapterBinding>();
+    for (const binding of bindings) {
+      const modelProviderId = modelProviderIdSchema.parse(binding.modelProviderId);
+      if (indexed.has(modelProviderId)) {
+        throw new Error(`Duplicate execution adapter binding for ${modelProviderId}`);
+      }
+      const expected = MODEL_PROVIDER_TO_AGENT_PROVIDER[modelProviderId];
+      if (binding.adapter.provider !== expected) {
+        throw new Error(
+          `Execution adapter for ${modelProviderId} uses ${binding.adapter.provider}; expected ${expected}`
+        );
+      }
+      if (!binding.adapter.capabilities.includes('execute')) {
+        throw new Error(`Execution adapter for ${modelProviderId} does not support execute`);
+      }
+      indexed.set(modelProviderId, { modelProviderId, adapter: binding.adapter });
+    }
+    this.bindings = indexed;
+  }
+
+  public list(): readonly ModelExecutionAdapterBinding[] {
+    return MODEL_PROVIDER_IDS
+      .map((providerId) => this.bindings.get(providerId))
+      .filter((binding): binding is ModelExecutionAdapterBinding => binding !== undefined);
+  }
+
+  public get(modelProviderId: ModelProviderId): ModelExecutionAdapterBinding | undefined {
+    return this.bindings.get(modelProviderId);
+  }
+
+  public resolve(selection: Pick<ModelRoutingSelection, 'providerId' | 'modelId'>): ModelExecutionTarget {
+    const binding = this.bindings.get(selection.providerId);
+    if (binding === undefined) {
+      throw new Error(`No AGENT-001 execution adapter is bound to ${selection.providerId}`);
+    }
+    return {
+      modelProviderId: selection.providerId,
+      provider: binding.adapter.provider,
+      modelId: selection.modelId,
+      adapter: binding.adapter,
+    };
+  }
+}
+
+export function createModelExecutionAdapterBindings(
+  options: ModelExecutionAdapterFactoryOptions = {}
+): readonly ModelExecutionAdapterBinding[] {
+  const configuration = options.configuration ?? {};
+  const opencode = configuration.opencodeGo;
+  const codex = configuration.codex;
+  const grok = configuration.grok;
+  const gemini = configuration.gemini;
+  const shared = {
+    ...(options.processRunner === undefined ? {} : { processRunner: options.processRunner }),
+    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+    ...(options.environment === undefined ? {} : { environment: options.environment }),
+  };
+  const opencodeOptions: OpenCodeAdapterOptions = {
+    ...shared,
+    ...(opencode?.enabled === undefined ? {} : { enabled: opencode.enabled }),
+    ...(opencode?.executable === undefined ? {} : { executable: opencode.executable }),
+  };
+
+  return [
+    { modelProviderId: 'opencode-go', adapter: createOpenCodeAdapter(opencodeOptions) },
+    {
+      modelProviderId: 'codex',
+      adapter: createCodexAdapter({
+        ...shared,
+        ...(codex?.enabled === undefined ? {} : { enabled: codex.enabled }),
+        ...(codex?.executable === undefined ? {} : { executable: codex.executable }),
+      }),
+    },
+    {
+      modelProviderId: 'grok',
+      adapter: createGrokAdapter({
+        ...shared,
+        ...(grok?.enabled === undefined ? {} : { enabled: grok.enabled }),
+        ...(grok?.executable === undefined ? {} : { executable: grok.executable }),
+      }),
+    },
+    {
+      modelProviderId: 'gemini',
+      adapter: createGeminiAdapter({
+        ...shared,
+        ...(gemini?.enabled === undefined ? {} : { enabled: gemini.enabled }),
+        ...(gemini?.executable === undefined ? {} : { executable: gemini.executable }),
+      }),
+    },
+  ];
+}
+
+export function agentProviderForModelProvider(modelProviderId: ModelProviderId): AgentProvider {
+  return MODEL_PROVIDER_TO_AGENT_PROVIDER[modelProviderId];
+}

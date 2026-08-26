@@ -91,8 +91,9 @@ WORK-001 shipped:
 
 AGENT-001 shipped one bounded provider execution in an already verified
 workspace. MODEL-001 (this PR) adds deterministic provider discovery, health,
-usage telemetry and model routing. Neither ticket chooses work, creates pull
-requests, reviews changes, or merges code.
+usage telemetry, model routing and capability-probed execution-adapter
+selection. Neither ticket chooses work, creates pull requests, reviews changes,
+or merges code.
 
 The execution envelope is a Scheduler-owned snapshot: MODEL-001 validates the
 supplied global mode, budget and ticket counts but does not claim global ticket
@@ -137,6 +138,9 @@ shipgraph ready --json
 # Execute one explicitly supplied task with the OpenCode adapter
 shipgraph agent run AG-001 --model <discovered-provider/model> --instructions "Implement the approved task"
 
+# Explicitly select the shared ACP boundary's Antigravity adapter
+shipgraph agent run AG-001 --provider acp --model-provider gemini --model <discovered-provider/model> --instructions "Implement the approved task"
+
 # Refresh capability-probed provider and model metadata
 shipgraph providers refresh --json
 
@@ -159,10 +163,11 @@ has initialized the database, both `init` and `status` fail closed if the file's
 identity or validated configuration drifts from the persisted project.
 
 Provider settings identify executable and catalog surfaces, not model names.
-OpenCode and Codex have conservative command defaults; configure a provider's
-machine-readable `catalogArgs` when its surface is available, and leave a
-provider disabled when it is not. Unsupported quota, token and cost values stay
-`unknown`.
+OpenCode, Codex, Grok and Antigravity (`agy`) have conservative execution
+defaults; configure a provider's machine-readable `catalogArgs` when its model
+catalog surface is available, and leave a provider disabled when it is not. A
+provider without a capability-probed execution surface is never routable.
+Unsupported quota, token and cost values stay `unknown`.
 
 ## Installation
 
@@ -193,8 +198,9 @@ Shipped:
 
 Active in this PR:
 
-- **MODEL-001** — Provider registry, dynamic model catalog, health, usage ledger
-  and deterministic routing ([design](docs/architecture/ADAPTERS.md))
+- **MODEL-001** — Provider registry, dynamic model catalog, capability-probed
+  execution adapters, health, usage ledger and deterministic routing
+  ([design](docs/architecture/ADAPTERS.md))
 
 Next up:
 

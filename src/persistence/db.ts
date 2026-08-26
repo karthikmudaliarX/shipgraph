@@ -425,6 +425,19 @@ export const MIGRATIONS: readonly Migration[] = [
       END;
     `,
   },
+  {
+    version: 11,
+    name: 'persist_provider_execution_capability',
+    up: `
+      -- Metadata availability is not execution availability. Keep the
+      -- capability-probed AGENT-001 surface explicit and fail closed for old
+      -- provider rows until a current execution probe succeeds.
+      ALTER TABLE provider_registry ADD COLUMN execution_status TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (execution_status IN ('available', 'unavailable', 'unknown'));
+      ALTER TABLE provider_registry ADD COLUMN execution_provider TEXT;
+      ALTER TABLE provider_registry ADD COLUMN execution_reason TEXT;
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {

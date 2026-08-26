@@ -4,6 +4,12 @@ import type {
   ModelProviderConfiguration,
   ProviderProbeResult,
 } from '../adapters/model/adapter.js';
+import {
+  AgentExecutionAdapterRegistry,
+  createModelExecutionAdapterBindings,
+  type ModelExecutionAdapterBinding,
+  type ModelExecutionTarget,
+} from '../adapters/agent/registry.js';
 import { createModelProviderAdapters } from '../adapters/model/adapter.js';
 import {
   MODEL_PROVIDER_DEFINITIONS,
@@ -11,6 +17,7 @@ import {
   type ModelProviderId,
   type ProviderHealthRecord,
   type ProviderRegistryRecord,
+  type ModelRoutingSelection,
 } from '../domain/model-provider.js';
 import {
   createModelRepository,
@@ -23,6 +30,7 @@ export type ProviderRegistryOptions = {
   db: DbConnection;
   projectId: string;
   adapters?: readonly ModelProviderAdapter[];
+  executionAdapters?: readonly ModelExecutionAdapterBinding[];
   configuration?: ModelProviderConfiguration;
   cwd?: string;
   now?: () => string;
@@ -41,6 +49,7 @@ const DEFAULT_STALE_AFTER_MS = 15 * 60 * 1_000;
 export class ProviderRegistry {
   private readonly repository: ModelRepository;
   private readonly adapters: readonly ModelProviderAdapter[];
+  private readonly executionAdapters: AgentExecutionAdapterRegistry;
   private readonly now: () => string;
   private readonly staleAfterMs: number;
 
@@ -52,6 +61,14 @@ export class ProviderRegistry {
         cwd: options.cwd,
       })
     )].sort((left, right) => compareStableStrings(left.providerId, right.providerId));
+    this.executionAdapters = new AgentExecutionAdapterRegistry(
+      options.executionAdapters ?? (options.adapters === undefined
+        ? createModelExecutionAdapterBindings({
+            configuration: options.configuration,
+            cwd: options.cwd,
+          })
+        : [])
+    );
     this.now = options.now ?? (() => new Date().toISOString());
     this.staleAfterMs = options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
     if (!Number.isInteger(this.staleAfterMs) || this.staleAfterMs < 0) {
@@ -125,9 +142,39 @@ export class ProviderRegistry {
     return this.repository;
   }
 
+  public resolveExecutionTarget(
+    selection: Pick<ModelRoutingSelection, 'providerId' | 'modelId' | 'task'>
+  ): ModelExecutionTarget {
+    const provider = this.list().find((entry) => entry.providerId === selection.providerId);
+    if (provider === undefined) {
+      throw new Error(`Provider ${selection.providerId} is not present in the routing snapshot`);
+    }
+    if (provider.executionStatus !== 'available' || provider.executionProvider === undefined) {
+      throw new Error(
+        `Provider ${selection.providerId} has no capability-probed AGENT-001 execution surface`
+      );
+    }
+    const model = this.models(selection.providerId)
+      .find((entry) => entry.modelId === selection.modelId);
+    if (model === undefined || !model.capabilities.includes(selection.task)) {
+      throw new Error(
+        `Model ${selection.providerId}/${selection.modelId} is not a discovered model for ${selection.task}`
+      );
+    }
+    const binding = this.executionAdapters.get(selection.providerId);
+    if (binding === undefined || binding.adapter.provider !== provider.executionProvider) {
+      throw new Error(
+        `Provider ${selection.providerId} has an inconsistent AGENT-001 execution binding`
+      );
+    }
+    return this.executionAdapters.resolve(selection);
+  }
+
   private async refreshAdapter(adapter: ModelProviderAdapter): Promise<ProviderRefreshResult> {
     const checkedAt = this.nextCheckedAt(adapter.providerId);
     const probe = await safeProbe(adapter);
+    const executionBinding = this.executionAdapters.get(adapter.providerId);
+    const executionProbe = await safeExecutionProbe(executionBinding?.adapter);
     const discovery = probe.availability === 'available'
       ? await safeDiscoverModels(adapter)
       : { status: 'unknown' as const, reason: 'provider is not available for catalog discovery' };
@@ -146,6 +193,7 @@ export class ProviderRegistry {
       displayName: adapter.displayName,
       configured: probe.availability !== 'unknown' || probe.reason !== 'provider executable is not configured',
       availability: probe.availability,
+      ...executionFields(executionProbe, executionBinding),
       ...(probe.version === undefined ? {} : { version: probe.version }),
       capabilities: [...probe.capabilities],
       catalogStatus: discovery.status,
@@ -229,6 +277,43 @@ async function safeProbe(adapter: ModelProviderAdapter): Promise<ProviderProbeRe
       reason: 'provider probe failed unexpectedly',
     };
   }
+}
+
+async function safeExecutionProbe(
+  adapter: ModelExecutionAdapterBinding['adapter'] | undefined
+) {
+  if (adapter === undefined) {
+    return {
+      available: false as const,
+      reason: 'no AGENT-001 execution adapter is configured for this provider',
+    };
+  }
+  try {
+    return await adapter.probe();
+  } catch {
+    return {
+      available: false as const,
+      reason: 'AGENT-001 execution capability probe failed unexpectedly',
+    };
+  }
+}
+
+function executionFields(
+  probe: Awaited<ReturnType<ModelExecutionAdapterBinding['adapter']['probe']>>,
+  binding: ModelExecutionAdapterBinding | undefined
+): Pick<ProviderRegistryRecord, 'executionStatus' | 'executionProvider' | 'executionReason'> {
+  if (probe.available && binding !== undefined) {
+    return {
+      executionStatus: 'available',
+      executionProvider: binding.adapter.provider,
+    };
+  }
+  return {
+    executionStatus: 'unknown',
+    executionReason: probe.available
+      ? 'AGENT-001 execution probe returned no bound adapter'
+      : probe.reason,
+  };
 }
 
 async function safeDiscoverModels(adapter: ModelProviderAdapter) {

@@ -27,7 +27,7 @@ src/
   domain/           Typed contracts (ticket, config)
   persistence/      SQLite repositories, transitions, and migrations
   adapters/
-    agent/          Provider-neutral adapter contract and OpenCode execution
+    agent/          Provider-neutral adapter contract and capability-probed execution
     model/          Capability-probed provider/model metadata adapters
     git-host/       Git-host adapter interface (GitHub)
   events/           Append-only audit-event contract
@@ -123,7 +123,8 @@ auto-advancement.
 
 CORE-001, CORE-002, WORK-001 and AGENT-001 establish the foundation, backlog
 scheduler, safe isolated workspaces and one bounded explicit OpenCode execution.
-MODEL-001 adds current provider/model metadata, health, append-only usage
-telemetry and deterministic routing for one explicitly supplied engineering
-step. It does **not** select product work, poll Linear, open PRs, perform
-autonomous reviews, repair changes, enforce release gates or merge code.
+MODEL-001 adds current provider/model metadata, capability-probed Codex, Grok
+and Antigravity (`agy`) execution adapters, health, append-only usage telemetry
+and deterministic routing for one explicitly supplied engineering step. It does
+**not** select product work, poll Linear, open PRs, perform autonomous reviews,
+repair changes, enforce release gates or merge code.

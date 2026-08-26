@@ -29,6 +29,12 @@ function provider(
     displayName: providerId,
     configured: true,
     availability: 'available',
+    executionStatus: 'available',
+    executionProvider: providerId === 'opencode-go'
+      ? 'opencode'
+      : providerId === 'codex'
+        ? 'codex'
+        : 'acp',
     capabilities: ['implementation', 'review', 'repair'],
     catalogStatus: 'known',
     checkedAt: '2026-08-27T00:00:00.000Z',
