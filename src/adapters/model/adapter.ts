@@ -420,11 +420,11 @@ function parseModelEntry(
   let capabilities = normalizeCapabilities(fallbackCapabilities);
   if (hasCapabilities) {
     if (!Array.isArray(rawCapabilities)) return undefined;
-    const parsedCapabilities = rawCapabilities.filter(
+    if (!rawCapabilities.every(
       (candidate: unknown): candidate is ModelCapability =>
         typeof candidate === 'string' && MODEL_CAPABILITIES.includes(candidate as ModelCapability)
-    );
-    capabilities = normalizeCapabilities(parsedCapabilities);
+    )) return undefined;
+    capabilities = normalizeCapabilities(rawCapabilities);
   }
   const contextWindow = record.contextWindow ?? record.context_window;
   if (contextWindow === undefined) return { modelId: rawId, capabilities };

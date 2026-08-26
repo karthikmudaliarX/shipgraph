@@ -83,6 +83,18 @@ describe('MODEL-001 provider adapters', () => {
     });
   });
 
+  it('fails closed when model capability metadata contains an unknown value', () => {
+    expect(parseModelCatalog(
+      JSON.stringify({
+        models: [{ id: 'provider/malformed', capabilities: ['implementation', 'future-task'] }],
+      }),
+      ['implementation', 'review']
+    )).toEqual({
+      status: 'unknown',
+      reason: 'provider catalog contained an invalid model entry',
+    });
+  });
+
   it('keeps truncated catalog output unknown', async () => {
     const adapter = createCommandModelProviderAdapter({
       providerId: 'grok',
