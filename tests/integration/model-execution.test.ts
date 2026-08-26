@@ -122,7 +122,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
         if (spec.args[0] === '--version') return result({ stdout: 'codex 1.0.0\n' });
         if (spec.args[0] === 'exec' && spec.args[1] === '--help') {
           return result({
-            stdout: 'exec --json --model --cd --sandbox --ask-for-approval --ephemeral\n',
+            stdout: 'exec --json --model --cd --sandbox --approve-for-me --ephemeral\n',
           });
         }
         return result({ stdout: '{"type":"result","session_id":"codex-session"}\n' });
@@ -253,7 +253,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
           if (spec.args[0] === '--version') return result({ stdout: 'codex 1.0.0\n' });
           if (spec.args[0] === 'exec' && spec.args[1] === '--help') {
             return result({
-              stdout: 'exec --json --model --cd --sandbox --ask-for-approval --ephemeral\n',
+              stdout: 'exec --json --model --cd --sandbox --approve-for-me --ephemeral\n',
             });
           }
           await spec.onStarted?.(4242);

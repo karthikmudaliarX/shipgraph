@@ -60,7 +60,7 @@ describe('deferred MODEL-001 provider execution adapters', () => {
       executable: '/opt/codex',
       cwd: '/tmp/shipgraph-project',
       processRunner: scriptedRunner(
-        'exec --json --model --cd --sandbox --ask-for-approval --ephemeral\n',
+        'exec --json --model --cd --sandbox --approve-for-me --ephemeral\n',
         '{"type":"result","session_id":"codex-session","text":"done"}\n',
         calls
       ),
@@ -86,8 +86,7 @@ describe('deferred MODEL-001 provider execution adapters', () => {
         request.model,
         '--sandbox',
         'workspace-write',
-        '--ask-for-approval',
-        'never',
+        '--approve-for-me',
         request.instructions,
       ],
     });

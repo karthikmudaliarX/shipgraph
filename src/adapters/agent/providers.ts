@@ -29,7 +29,7 @@ export class CodexAdapter extends CommandAgentExecutionAdapter {
         '--model',
         '--cd',
         '--sandbox',
-        '--ask-for-approval',
+        '--approve-for-me',
         '--ephemeral',
       ],
       outputFormat: 'jsonl',
@@ -43,8 +43,7 @@ export class CodexAdapter extends CommandAgentExecutionAdapter {
         request.model,
         '--sandbox',
         'workspace-write',
-        '--ask-for-approval',
-        'never',
+        '--approve-for-me',
         request.instructions,
       ],
     } satisfies CommandAgentAdapterOptions);
