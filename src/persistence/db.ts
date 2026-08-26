@@ -141,6 +141,64 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 4,
+    name: 'create_ticket_workspaces',
+    up: `
+      CREATE TABLE IF NOT EXISTS workspaces (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        ticket_id TEXT NOT NULL,
+        source_repository_path TEXT NOT NULL,
+        worktree_path TEXT NOT NULL,
+        branch_name TEXT NOT NULL,
+        base_sha TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('CREATING','READY','REMOVED','FAILED','NEEDS_HUMAN')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (project_id) REFERENCES projects(id),
+        FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_workspaces_project_ticket
+        ON workspaces(project_id, ticket_id);
+
+      -- Persistence-level invariant: a ticket has at most one active
+      -- ShipGraph workspace. Uniqueness lives in the schema, not only in
+      -- application logic.
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_single_active_per_ticket
+        ON workspaces(project_id, ticket_id)
+        WHERE status IN ('CREATING', 'READY', 'NEEDS_HUMAN');
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_single_active_branch
+        ON workspaces(source_repository_path, branch_name)
+        WHERE status IN ('CREATING', 'READY', 'NEEDS_HUMAN');
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_workspaces_single_active_path
+        ON workspaces(worktree_path)
+        WHERE status IN ('CREATING', 'READY', 'NEEDS_HUMAN');
+    `,
+  },
+  {
+    version: 5,
+    name: 'bind_workspace_repository_identity',
+    up: `
+      CREATE TABLE IF NOT EXISTS workspace_repository_bindings (
+        project_id TEXT PRIMARY KEY,
+        source_repository_path TEXT NOT NULL,
+        source_directory_device TEXT NOT NULL,
+        source_directory_inode TEXT NOT NULL,
+        git_common_dir TEXT NOT NULL,
+        git_object_dir TEXT NOT NULL,
+        git_common_device TEXT NOT NULL,
+        git_common_inode TEXT NOT NULL,
+        git_object_device TEXT NOT NULL,
+        git_object_inode TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (project_id) REFERENCES projects(id)
+      );
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {

@@ -48,6 +48,61 @@ export type RunRecord = {
   completedAt?: string;
 };
 
+export type WorkspaceStatus = 'CREATING' | 'READY' | 'REMOVED' | 'FAILED' | 'NEEDS_HUMAN';
+
+/** Statuses that claim the ticket's single active workspace slot. */
+export const ACTIVE_WORKSPACE_STATUSES: readonly WorkspaceStatus[] = [
+  'CREATING',
+  'READY',
+  'NEEDS_HUMAN',
+];
+
+export type WorkspaceRecord = {
+  id: string;
+  projectId: string;
+  ticketId: string;
+  sourceRepositoryPath: string;
+  worktreePath: string;
+  branchName: string;
+  baseSha: string;
+  status: WorkspaceStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkspaceRepositoryBinding = {
+  projectId: string;
+  sourceRepositoryPath: string;
+  sourceDirectoryDevice: string;
+  sourceDirectoryInode: string;
+  gitCommonDir: string;
+  gitObjectDir: string;
+  gitCommonDevice: string;
+  gitCommonInode: string;
+  gitObjectDevice: string;
+  gitObjectInode: string;
+  createdAt: string;
+};
+
+export interface WorkspaceRepository {
+  insert(workspace: WorkspaceRecord): WorkspaceRecord;
+  findById(id: string): WorkspaceRecord | undefined;
+  findActiveByTicket(projectId: string, ticketId: string): WorkspaceRecord | undefined;
+  findByTicket(projectId: string, ticketId: string): readonly WorkspaceRecord[];
+  listByProject(projectId: string): readonly WorkspaceRecord[];
+  updateStatus(
+    id: string,
+    status: WorkspaceStatus,
+    updatedAt: string,
+    expectedStatuses?: readonly WorkspaceStatus[]
+  ): WorkspaceRecord | undefined;
+}
+
+export interface WorkspaceRepositoryBindingRepository {
+  findByProjectId(projectId: string): WorkspaceRepositoryBinding | undefined;
+  insert(binding: WorkspaceRepositoryBinding): WorkspaceRepositoryBinding;
+}
+
 export interface ProjectRepository {
   create(project: ProjectRecord): ProjectRecord;
   findById(id: string): ProjectRecord | undefined;
@@ -434,6 +489,126 @@ export function createRunRepository(db: DbConnection): RunRepository {
   };
 }
 
+export function createWorkspaceRepository(db: DbConnection): WorkspaceRepository {
+  const insert = (workspace: WorkspaceRecord): WorkspaceRecord => {
+    try {
+      db.prepare(
+        `INSERT INTO workspaces (
+          id, project_id, ticket_id, source_repository_path, worktree_path,
+          branch_name, base_sha, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        workspace.id,
+        workspace.projectId,
+        workspace.ticketId,
+        workspace.sourceRepositoryPath,
+        workspace.worktreePath,
+        workspace.branchName,
+        workspace.baseSha,
+        workspace.status,
+        workspace.createdAt,
+        workspace.updatedAt
+      );
+    } catch (error) {
+      if (error instanceof Error && /UNIQUE constraint failed/.test(error.message)) {
+        throw new Error(
+          `Workspace reservation conflict for ticket ${workspace.ticketId}: ${error.message}`
+        );
+      }
+      throw error;
+    }
+    return workspace;
+  };
+  return {
+    insert,
+    findById(id): WorkspaceRecord | undefined {
+      const row = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id) as
+        | Record<string, unknown>
+        | undefined;
+      return row ? rowToWorkspace(row) : undefined;
+    },
+    findActiveByTicket(projectId, ticketId): WorkspaceRecord | undefined {
+      const row = db
+        .prepare(
+          `SELECT * FROM workspaces
+           WHERE project_id = ? AND ticket_id = ?
+             AND status IN ('CREATING', 'READY', 'NEEDS_HUMAN')`
+        )
+        .get(projectId, ticketId) as Record<string, unknown> | undefined;
+      return row ? rowToWorkspace(row) : undefined;
+    },
+    findByTicket(projectId, ticketId): readonly WorkspaceRecord[] {
+      const rows = db
+        .prepare(
+          `SELECT * FROM workspaces WHERE project_id = ? AND ticket_id = ?
+           ORDER BY created_at ASC`
+        )
+        .all(projectId, ticketId);
+      return rows.map((row) => rowToWorkspace(row as Record<string, unknown>));
+    },
+    listByProject(projectId): readonly WorkspaceRecord[] {
+      const rows = db
+        .prepare('SELECT * FROM workspaces WHERE project_id = ? ORDER BY ticket_id ASC')
+        .all(projectId);
+      return rows.map((row) => rowToWorkspace(row as Record<string, unknown>));
+    },
+    updateStatus(id, status, updatedAt, expectedStatuses): WorkspaceRecord | undefined {
+      if (expectedStatuses !== undefined && expectedStatuses.length > 0) {
+        const placeholders = expectedStatuses.map(() => '?').join(', ');
+        const result = db
+          .prepare(
+            `UPDATE workspaces SET status = ?, updated_at = ?
+             WHERE id = ? AND status IN (${placeholders})`
+          )
+          .run(status, updatedAt, id, ...expectedStatuses);
+        if (result.changes !== 1) return undefined;
+      } else {
+        db.prepare('UPDATE workspaces SET status = ?, updated_at = ? WHERE id = ?').run(
+          status,
+          updatedAt,
+          id
+        );
+      }
+      return this.findById(id);
+    },
+  };
+}
+
+export function createWorkspaceRepositoryBindingRepository(
+  db: DbConnection
+): WorkspaceRepositoryBindingRepository {
+  return {
+    findByProjectId(projectId): WorkspaceRepositoryBinding | undefined {
+      const row = db
+        .prepare('SELECT * FROM workspace_repository_bindings WHERE project_id = ?')
+        .get(projectId) as Record<string, unknown> | undefined;
+      return row ? rowToWorkspaceRepositoryBinding(row) : undefined;
+    },
+    insert(binding): WorkspaceRepositoryBinding {
+      db.prepare(
+        `INSERT INTO workspace_repository_bindings (
+          project_id, source_repository_path, source_directory_device, source_directory_inode,
+          git_common_dir, git_object_dir,
+          git_common_device, git_common_inode, git_object_device, git_object_inode, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        binding.projectId,
+        binding.sourceRepositoryPath,
+        binding.sourceDirectoryDevice,
+        binding.sourceDirectoryInode,
+        binding.gitCommonDir,
+        binding.gitObjectDir,
+        binding.gitCommonDevice,
+        binding.gitCommonInode,
+        binding.gitObjectDevice,
+        binding.gitObjectInode,
+        binding.createdAt
+      );
+      return binding;
+    },
+  };
+}
+
 export function createEventRepository(db: DbConnection): EventRepository {
   const nextSequence = (projectId: string): number => {
     const row = db
@@ -581,6 +756,39 @@ function rowToRun(row: Record<string, unknown>): RunRecord {
     status: String(row.status),
     startedAt: String(row.started_at),
     completedAt: row.completed_at ? String(row.completed_at) : undefined,
+  };
+}
+
+function rowToWorkspace(row: Record<string, unknown>): WorkspaceRecord {
+  return {
+    id: String(row.id),
+    projectId: String(row.project_id),
+    ticketId: String(row.ticket_id),
+    sourceRepositoryPath: String(row.source_repository_path),
+    worktreePath: String(row.worktree_path),
+    branchName: String(row.branch_name),
+    baseSha: String(row.base_sha),
+    status: String(row.status) as WorkspaceStatus,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function rowToWorkspaceRepositoryBinding(
+  row: Record<string, unknown>
+): WorkspaceRepositoryBinding {
+  return {
+    projectId: String(row.project_id),
+    sourceRepositoryPath: String(row.source_repository_path),
+    sourceDirectoryDevice: String(row.source_directory_device),
+    sourceDirectoryInode: String(row.source_directory_inode),
+    gitCommonDir: String(row.git_common_dir),
+    gitObjectDir: String(row.git_object_dir),
+    gitCommonDevice: String(row.git_common_device),
+    gitCommonInode: String(row.git_common_inode),
+    gitObjectDevice: String(row.git_object_device),
+    gitObjectInode: String(row.git_object_inode),
+    createdAt: String(row.created_at),
   };
 }
 

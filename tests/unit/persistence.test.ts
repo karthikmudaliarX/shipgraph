@@ -81,6 +81,8 @@ describe('SQLite persistence', () => {
       { version: 1 },
       { version: 2 },
       { version: 3 },
+      { version: 4 },
+      { version: 5 },
     ]);
     expect(createProjectRepository(upgraded).findById('legacy-project')?.name).toBe('test');
     migrate(upgraded);
