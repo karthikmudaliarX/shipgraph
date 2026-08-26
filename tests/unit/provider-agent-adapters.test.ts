@@ -103,7 +103,7 @@ describe('deferred MODEL-001 provider execution adapters', () => {
       executable: '/opt/grok',
       cwd: '/tmp/shipgraph-project',
       processRunner: scriptedRunner(
-        '--single --output-format --model --cwd --always-approve\n',
+        '--single --output-format --model --cwd --always-approve --sandbox\n',
         '{"type":"result","conversationId":"grok-session","text":"done"}\n',
         calls
       ),
@@ -125,6 +125,8 @@ describe('deferred MODEL-001 provider execution adapters', () => {
       '--no-subagents',
       '--no-plan',
       '--disable-web-search',
+      '--sandbox',
+      'workspace',
     ]);
     expect(execution).toMatchObject({
       outcome: 'SUCCEEDED',
@@ -138,7 +140,7 @@ describe('deferred MODEL-001 provider execution adapters', () => {
     const adapter = new GeminiAdapter({
       cwd: '/tmp/shipgraph-project',
       processRunner: scriptedRunner(
-        '--print --output-format --model --mode --disable-slash-commands\n',
+        '--print --output-format --model --mode --disable-slash-commands --sandbox\n',
         '{"type":"result","conversationId":"agy-session","text":"done"}\n',
         calls
       ),
@@ -159,6 +161,7 @@ describe('deferred MODEL-001 provider execution adapters', () => {
         '--mode',
         'accept-edits',
         '--disable-slash-commands',
+        '--sandbox',
         request.instructions,
       ],
     });

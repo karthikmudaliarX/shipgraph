@@ -388,6 +388,44 @@ describe('MODEL-001 service', () => {
     expect(service.listHealth()[0]?.activeRuns).toBe(0);
   });
 
+  it('does not persist a route when execution capability disappears before reservation', async () => {
+    const calls = { probe: 0, discover: 0 };
+    let idCalls = 0;
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [adapter('codex', 'openai', calls)],
+      executionAdapters: [executionBinding('codex')],
+      now: () => now,
+      createId: () => {
+        idCalls += 1;
+        if (idCalls === 1) {
+          db.prepare(
+            `UPDATE provider_registry
+             SET execution_status = 'unknown', execution_provider = NULL
+             WHERE project_id = ? AND provider_id = 'codex'`
+          ).run(projectId);
+        }
+        return `route-${idCalls}`;
+      },
+    });
+    await service.refresh();
+
+    await expect(service.route({
+      runId: 'run-1',
+      task: 'implementation',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 4,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    })).rejects.toThrow(/No usable provider\/model|capacity changed/);
+    expect(service.listRoutingDecisions()).toHaveLength(0);
+    expect(service.listHealth()[0]?.activeRuns).toBe(0);
+  });
+
   it('replays a request idempotently without creating another reservation', async () => {
     const calls = { probe: 0, discover: 0 };
     const service = new ModelRoutingService({

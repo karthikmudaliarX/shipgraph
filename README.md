@@ -164,9 +164,11 @@ identity or validated configuration drifts from the persisted project.
 
 Provider settings identify executable and catalog surfaces, not model names.
 OpenCode, Codex, Grok and Antigravity (`agy`) have conservative execution
-defaults; configure a provider's machine-readable `catalogArgs` when its model
-catalog surface is available, and leave a provider disabled when it is not. A
-provider without a capability-probed execution surface is never routable.
+defaults; Grok uses its `workspace` sandbox profile and Antigravity uses its
+supported `--sandbox` mode. Configure a provider's machine-readable
+`catalogArgs` when its model catalog surface is available, and leave a provider
+disabled when it is not. A provider without a capability-probed execution
+surface is never routable.
 Unsupported quota, token and cost values stay `unknown`.
 
 ## Installation

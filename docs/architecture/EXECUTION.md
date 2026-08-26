@@ -63,7 +63,9 @@ and a bounded summary; raw event objects are not persisted as structured
 fields; retained stdout is bounded and redacted process text. Each adapter
 probes the exact version/help surface it will use before the provider becomes
 execution-available. Gemini's MODEL-001 identity is implemented through
-Antigravity (`agy`), not Gemini CLI.
+Antigravity (`agy`), not Gemini CLI. Grok uses its `workspace` sandbox profile
+and Antigravity uses its supported `--sandbox` mode; cwd alone is not treated
+as filesystem isolation.
 
 MODEL-001 now owns provider metadata discovery, health, quota/usage ledger
 records and deterministic model routing in a separate control-plane subsystem.

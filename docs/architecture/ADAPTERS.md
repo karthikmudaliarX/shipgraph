@@ -53,6 +53,10 @@ headless command surface. In particular, Gemini execution uses Antigravity
 (`agy`), not Gemini CLI. Missing or unsupported automation evidence remains
 unknown and cannot be routed.
 
+Command execution also uses each supported surface's workspace restriction:
+Grok is launched with its `workspace` sandbox profile and Antigravity with its
+`--sandbox` mode. CWD alone is not treated as isolation.
+
 MODEL-001 adds a separate metadata boundary for the paid engineering pools:
 OpenCode Go, Codex, Grok and Gemini. `ModelProviderAdapter` implementations
 capability-probe their local/provider surface and may expose a current model

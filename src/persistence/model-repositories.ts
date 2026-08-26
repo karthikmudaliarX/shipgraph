@@ -468,6 +468,8 @@ export function createModelRepository(db: DbConnection): ModelRepository {
         if (
           !provider.configured ||
           provider.availability !== 'available' ||
+          provider.executionStatus !== 'available' ||
+          provider.executionProvider === undefined ||
           provider.catalogStatus !== 'known' ||
           provider.family !== parsed.providerFamily ||
           !provider.capabilities.includes(parsed.task)

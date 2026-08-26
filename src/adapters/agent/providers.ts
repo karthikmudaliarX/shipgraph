@@ -70,6 +70,7 @@ export class GrokAdapter extends CommandAgentExecutionAdapter {
         '--model',
         '--cwd',
         '--always-approve',
+        '--sandbox',
       ],
       outputFormat: 'json',
       buildArgs: (request) => [
@@ -85,6 +86,8 @@ export class GrokAdapter extends CommandAgentExecutionAdapter {
         '--no-subagents',
         '--no-plan',
         '--disable-web-search',
+        '--sandbox',
+        'workspace',
       ],
     } satisfies CommandAgentAdapterOptions);
   }
@@ -110,6 +113,7 @@ export class GeminiAdapter extends CommandAgentExecutionAdapter {
         '--model',
         '--mode',
         '--disable-slash-commands',
+        '--sandbox',
       ],
       outputFormat: 'json',
       buildArgs: (request) => [
@@ -121,6 +125,7 @@ export class GeminiAdapter extends CommandAgentExecutionAdapter {
         '--mode',
         'accept-edits',
         '--disable-slash-commands',
+        '--sandbox',
         request.instructions,
       ],
     } satisfies CommandAgentAdapterOptions);
