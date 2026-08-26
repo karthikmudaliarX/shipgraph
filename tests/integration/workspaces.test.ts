@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   copyFileSync,
@@ -38,6 +38,77 @@ function git(cwd: string, ...args: string[]): string {
 
 function gitRaw(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
+}
+
+function runWorkspaceCreatorProcess(
+  harness: Harness,
+  ticketId: string
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  // Keep the ephemeral test under Vitest's configured include root so the
+  // child process exercises the real TypeScript source without requiring a
+  // pre-built dist/ directory.
+  const sourceRoot = process.cwd();
+  const childDir = mkdtempSync(join(sourceRoot, 'tests', 'workspace-child-'));
+  const childTest = join(childDir, 'workspace-child.test.ts');
+  writeFileSync(
+    childTest,
+    `
+import { it } from 'vitest';
+import { openAndMigrate } from ${JSON.stringify(`${sourceRoot}/src/persistence/db.ts`)};
+import { createWorkspace } from ${JSON.stringify(`${sourceRoot}/src/workspace/service.ts`)};
+
+it('creates one workspace process attempt', async () => {
+  const db = openAndMigrate(process.env.SG_WORKSPACE_DB as string);
+  try {
+    try {
+      const result = await createWorkspace({
+        db,
+        projectDir: process.env.SG_WORKSPACE_PROJECT as string,
+        worktreeRoot: process.env.SG_WORKSPACE_ROOT as string,
+      }, process.env.SG_WORKSPACE_TICKET as string);
+      console.log('WORKSPACE_CHILD_RESULT ' + JSON.stringify({ ok: true, created: result.created, recovered: result.recovered }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/Dispatch capacity is full/.test(message)) throw error;
+      console.log('WORKSPACE_CHILD_RESULT ' + JSON.stringify({ ok: false, error: message }));
+    }
+  } finally {
+    db.close();
+  }
+});
+`
+  );
+
+  return new Promise((resolve) => {
+    const child = spawn(
+      join(sourceRoot, 'node_modules', '.bin', 'vitest'),
+      ['run', '--config', join(sourceRoot, 'vitest.config.ts'), childTest, '--reporter=dot'],
+      {
+        cwd: sourceRoot,
+        env: {
+          ...process.env,
+          SG_WORKSPACE_DB: harness.dbPath,
+          SG_WORKSPACE_PROJECT: harness.projectDir,
+          SG_WORKSPACE_ROOT: harness.worktreeRoot,
+          SG_WORKSPACE_TICKET: ticketId,
+          SHIPGRAPH_CREATION_POLL_TIMEOUT_MS: '500',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.on('close', (code) => {
+      rmSync(childDir, { recursive: true, force: true });
+      resolve({ code, stdout, stderr });
+    });
+  });
 }
 
 const BASE_CONFIG = (max: number) => ({
@@ -347,6 +418,44 @@ describe('WORK-001 isolated worktree lifecycle', () => {
     } finally {
       delete process.env.SHIPGRAPH_CREATION_POLL_TIMEOUT_MS;
     }
+  });
+
+  it('serializes capacity and shared directory creation across processes', async () => {
+    harness = setupProject(1, [ticket('PROC-1'), ticket('PROC-2')]);
+    const projectId = findProjectId(harness.options.db);
+    const dbPath = harness.dbPath;
+    harness.options.db.close();
+
+    const results = await Promise.all([
+      runWorkspaceCreatorProcess(harness, 'PROC-1'),
+      runWorkspaceCreatorProcess(harness, 'PROC-2'),
+    ]);
+
+    // The child tests turn the expected capacity loser into a successful test
+    // process. Any raw EEXIST, SQLite error, or other failure still fails here.
+    expect(results.every((result) => result.code === 0), JSON.stringify(results)).toBe(true);
+    expect(
+      results.every((result) => result.stdout.includes('WORKSPACE_CHILD_RESULT')),
+      JSON.stringify(results)
+    ).toBe(true);
+
+    harness.options.db = openAndMigrate(dbPath);
+    const rows = createWorkspaceRepository(harness.options.db).listByProject(projectId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe('READY');
+    const tickets = createTicketRepository(harness.options.db).findApprovedByProjectId(projectId);
+    expect(tickets.filter((entry) => entry.status === 'PLANNING')).toHaveLength(1);
+    expect(tickets.filter((entry) => entry.status === 'ELIGIBLE')).toHaveLength(1);
+    expect(
+      git(harness.projectDir, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/shipgraph/')
+        .split('\n')
+        .filter(Boolean)
+    ).toHaveLength(1);
+    expect(
+      git(harness.projectDir, 'worktree', 'list', '--porcelain')
+        .split('\n')
+        .filter((line) => line.startsWith('worktree '))
+    ).toHaveLength(2);
   });
 
   it('counts un-transitioned CREATING reservations against capacity', async () => {

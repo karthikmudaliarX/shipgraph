@@ -101,7 +101,22 @@ export function ensureOwnedDirectoryChain(base: string, ...segments: readonly st
         throw new Error(`ShipGraph workspace path component is not a directory: ${current}`);
       }
     } else {
-      mkdirSync(current, { mode: 0o700 });
+      try {
+        mkdirSync(current, { mode: 0o700 });
+      } catch (error) {
+        // Another ShipGraph process may have created this exact component
+        // after our lstat. Revalidate the winner instead of leaking EEXIST,
+        // while still rejecting a raced symlink or non-directory.
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        const raced = tryLstatSync(current);
+        if (!raced) throw error;
+        if (raced.isSymbolicLink()) {
+          throw new Error(`Refusing to use symbolic link for ShipGraph workspace path: ${current}`);
+        }
+        if (!raced.isDirectory()) {
+          throw new Error(`ShipGraph workspace path component is not a directory: ${current}`);
+        }
+      }
     }
   }
   return current;
