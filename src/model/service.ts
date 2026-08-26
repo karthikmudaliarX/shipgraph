@@ -193,6 +193,8 @@ export class ModelRoutingService {
         quotaRemaining: input.quotaRemaining,
       });
       if (input.routingDecisionId !== undefined) {
+        // A durable agent run can contain multiple sequential model attempts.
+        // This finalizes the specific model route, not the parent run itself.
         this.repository.releaseProviderCapacity(
           this.options.projectId,
           entry.runId,

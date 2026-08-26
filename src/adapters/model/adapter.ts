@@ -440,7 +440,15 @@ function parseModelEntry(
 function uniqueSortedModels(models: readonly DiscoveredModel[]): readonly DiscoveredModel[] {
   const byId = new Map<string, DiscoveredModel>();
   for (const model of models) {
-    if (byId.has(model.modelId)) continue;
+    const existing = byId.get(model.modelId);
+    if (existing !== undefined) {
+      const sameCapabilities = existing.capabilities.length === model.capabilities.length &&
+        existing.capabilities.every((capability, index) => capability === model.capabilities[index]);
+      if (!sameCapabilities || existing.contextWindow !== model.contextWindow) {
+        throw new Error(`provider catalog contained conflicting metadata for ${model.modelId}`);
+      }
+      continue;
+    }
     byId.set(model.modelId, model);
     if (byId.size > MAX_CATALOG_MODELS) {
       throw new Error('provider catalog exceeds the model limit');

@@ -58,6 +58,21 @@ describe('MODEL-001 provider adapters', () => {
     });
   });
 
+  it('fails closed on conflicting duplicate model metadata', () => {
+    expect(parseModelCatalog(
+      JSON.stringify({
+        models: [
+          { id: 'provider/duplicate', capabilities: ['implementation'] },
+          { id: 'provider/duplicate', capabilities: ['review'] },
+        ],
+      }),
+      ['implementation', 'review']
+    )).toEqual({
+      status: 'unknown',
+      reason: 'provider catalog output was not a supported machine-readable model list',
+    });
+  });
+
   it('keeps truncated catalog output unknown', async () => {
     const adapter = createCommandModelProviderAdapter({
       providerId: 'grok',

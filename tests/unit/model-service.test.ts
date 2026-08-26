@@ -184,6 +184,42 @@ describe('MODEL-001 service', () => {
     expect(service.listHealth().find((health) => health.providerId === 'codex')?.recentFailureCount).toBe(1);
   });
 
+  it('does not carry stale numeric quota through a refresh without quota evidence', async () => {
+    let probeCount = 0;
+    let clock = now;
+    const changingAdapter: ModelProviderAdapter = {
+      providerId: 'codex',
+      family: 'openai',
+      displayName: 'Codex',
+      probe: async () => {
+        probeCount += 1;
+        return {
+          availability: 'available' as const,
+          auth: 'authenticated' as const,
+          version: 'test-provider',
+          capabilities: ['implementation', 'review', 'repair'] as const,
+          ...(probeCount === 1 ? { quotaRemaining: 3 } : {}),
+        };
+      },
+      discoverModels: async () => ({
+        status: 'known' as const,
+        models: [{ modelId: 'codex/dynamic', capabilities: ['implementation', 'review', 'repair'] as const }],
+      }),
+    };
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [changingAdapter],
+      now: () => clock,
+    });
+
+    await service.refresh();
+    expect(service.listHealth()[0]?.quotaRemaining).toBe(3);
+    clock = '2026-08-27T00:01:00.000Z';
+    await service.refresh();
+    expect(service.listHealth()[0]?.quotaRemaining).toBe('unknown');
+  });
+
   it('claims known provider capacity atomically across concurrent routes', async () => {
     const calls = { probe: 0, discover: 0 };
     const service = new ModelRoutingService({

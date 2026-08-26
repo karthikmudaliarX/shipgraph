@@ -243,8 +243,11 @@ function buildHealth(
     status,
     auth: probe.auth === 'unknown' ? previous?.auth ?? UNKNOWN : probe.auth,
     quotaPressure: probe.quotaPressure ?? previous?.quotaPressure ?? UNKNOWN,
-    quotaRemaining: probe.quotaRemaining ?? previous?.quotaRemaining ?? UNKNOWN,
-    quotaResetAt: probe.quotaResetAt ?? previous?.quotaResetAt ?? UNKNOWN,
+    // A refresh without current numeric/reset evidence must not keep routing
+    // on a stale quota observation. Preserve qualitative pressure from the
+    // health history, but make unsupported current quota values explicit.
+    quotaRemaining: probe.quotaRemaining ?? UNKNOWN,
+    quotaResetAt: probe.quotaResetAt ?? UNKNOWN,
     recentFailureCount: previous?.recentFailureCount ?? 0,
     activeRuns: previous?.activeRuns ?? 0,
     maxConcurrentRuns: previous?.maxConcurrentRuns ?? UNKNOWN,

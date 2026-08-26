@@ -203,6 +203,24 @@ describe('MODEL-001 persistence', () => {
     expect(repository.listHealth(projectId)[0]?.activeRuns).toBe(1);
   });
 
+  it('keeps the first provider snapshot when a concurrent refresh has the same timestamp', () => {
+    repository.replaceProviderSnapshot({
+      provider: provider(),
+      health: health(),
+      models: [model()],
+      catalogStatus: 'known',
+    });
+    repository.replaceProviderSnapshot({
+      provider: provider({ displayName: 'stale concurrent snapshot' }),
+      health: health(),
+      models: [{ ...model(), modelId: 'provider/stale-model' }],
+      catalogStatus: 'known',
+    });
+
+    expect(repository.listProviders(projectId)[0]?.displayName).toBe('Codex');
+    expect(repository.listModels(projectId)[0]?.modelId).toBe('provider/dynamic-model');
+  });
+
   it('enforces append-only usage and routing decision records', () => {
     const entry = usage();
     repository.appendUsage(entry);

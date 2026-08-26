@@ -87,7 +87,7 @@ export function createModelRepository(db: DbConnection): ModelRepository {
       // A delayed probe must never overwrite a newer refresh from another
       // ShipGraph process. Compare instants rather than timestamp text so
       // offsets cannot change the ordering.
-      if (existing && isLaterTimestamp(existing.checked_at, provider.checkedAt)) return;
+      if (existing && isAtOrAfterTimestamp(existing.checked_at, provider.checkedAt)) return;
 
       const existingHealthRow = db
         .prepare(
@@ -100,7 +100,7 @@ export function createModelRepository(db: DbConnection): ModelRepository {
         : rowToHealth(existingHealthRow);
       const healthToPersist = currentHealth === undefined
         ? health
-        : isLaterTimestamp(currentHealth.updatedAt, health.updatedAt)
+        : isAtOrAfterTimestamp(currentHealth.updatedAt, health.updatedAt)
           ? currentHealth
           : {
               ...health,
@@ -797,8 +797,8 @@ function requiredBoolean(value: unknown): boolean {
   throw new Error('Persisted model boolean is invalid');
 }
 
-function isLaterTimestamp(first: string, second: string): boolean {
+function isAtOrAfterTimestamp(first: string, second: string): boolean {
   const firstMs = Date.parse(first);
   const secondMs = Date.parse(second);
-  return Number.isFinite(firstMs) && Number.isFinite(secondMs) && firstMs > secondMs;
+  return Number.isFinite(firstMs) && Number.isFinite(secondMs) && firstMs >= secondMs;
 }

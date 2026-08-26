@@ -76,8 +76,10 @@ Review routing prefers a different provider family from the implementation when
 one is available. `UsageLedger` is append-only, accepts only durable run IDs
 from the current project, records per-run/provider/model telemetry without raw
 provider output or credentials, and releases an execution-bound provider
-reservation only when usage is finalized by its owning durable run and returned
-routing decision ID.
+reservation only when usage for that model attempt is finalized by its owning
+durable run and returned routing decision ID. A durable agent run may issue
+sequential model attempts, so its RUNNING state alone does not keep a completed
+model-attempt reservation active.
 
 The existing AGENT-001 execution command still accepts an explicit provider and
 model. MODEL-001 does not dispatch Linear work or turn the metadata adapters
