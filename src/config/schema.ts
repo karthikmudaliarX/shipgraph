@@ -50,7 +50,40 @@ export const modelProviderSettingsSchema = z.object({
       message: 'provider catalog arguments cannot contain NUL characters',
     })
   ).max(32).optional(),
-}).strict().default({});
+  authArgs: z.array(
+    z.string().min(1).max(1_024).refine((value) => !value.includes('\0'), {
+      message: 'provider authentication arguments cannot contain NUL characters',
+    })
+  ).max(32).optional(),
+  authenticatedOutputTokens: z.array(
+    z.string().min(1).max(1_024).refine((value) => !value.includes('\0'), {
+      message: 'provider authenticated output tokens cannot contain NUL characters',
+    })
+  ).max(32).optional(),
+  unauthenticatedOutputTokens: z.array(
+    z.string().min(1).max(1_024).refine((value) => !value.includes('\0'), {
+      message: 'provider unauthenticated output tokens cannot contain NUL characters',
+    })
+  ).max(32).optional(),
+}).strict().superRefine((settings, context) => {
+  const hasAuthArgs = settings.authArgs !== undefined;
+  const hasPositiveEvidence = settings.authenticatedOutputTokens !== undefined;
+  const hasNegativeEvidence = settings.unauthenticatedOutputTokens !== undefined;
+  if (hasAuthArgs !== hasPositiveEvidence) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: hasAuthArgs ? ['authenticatedOutputTokens'] : ['authArgs'],
+      message: 'authentication probes require command arguments and positive output evidence',
+    });
+  }
+  if (hasNegativeEvidence && !hasAuthArgs) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['unauthenticatedOutputTokens'],
+      message: 'unauthenticated output evidence requires authentication command arguments',
+    });
+  }
+}).default({});
 
 export const modelProvidersConfigSchema = z.object({
   opencodeGo: modelProviderSettingsSchema.optional(),

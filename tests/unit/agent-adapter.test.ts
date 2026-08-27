@@ -45,7 +45,13 @@ describe('OpenCode adapter and process boundary', () => {
     let captured: AgentProcessSpec | undefined;
     const adapter = new OpenCodeAdapter({
       executable: '/opt/opencode',
-      environment: { FAKE_PROVIDER_MODE: 'success' },
+      environment: {
+        FAKE_PROVIDER_MODE: 'success',
+        OPENCODE_API_KEY: 'opencode-secret',
+        OPENAI_API_KEY: 'codex-secret',
+        XAI_API_KEY: 'grok-secret',
+        GOOGLE_GENERATIVE_AI_API_KEY: 'gemini-secret',
+      },
       processRunner: {
         run: async (spec) => {
           captured = spec;
@@ -87,6 +93,10 @@ describe('OpenCode adapter and process boundary', () => {
     ]);
     expect(captured?.env.OPENCODE_CLIENT).toBe('shipgraph');
     expect(captured?.env.FAKE_PROVIDER_MODE).toBe('success');
+    expect(captured?.env.OPENCODE_API_KEY).toBe('opencode-secret');
+    expect(captured?.env.OPENAI_API_KEY).toBeUndefined();
+    expect(captured?.env.XAI_API_KEY).toBeUndefined();
+    expect(captured?.env.GOOGLE_GENERATIVE_AI_API_KEY).toBeUndefined();
     expect(result).toMatchObject({
       outcome: 'SUCCEEDED',
       providerSessionId: 'ses_123',

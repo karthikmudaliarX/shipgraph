@@ -230,7 +230,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
       executable: '/opt/agy',
       processRunner: {
         run: async (spec) => spec.args[0] === '--version'
-          ? result({ stdout: 'agy 1.0.0\n' })
+          ? result({ stdout: '1.0.0\n' })
           : result({ stdout: '--help --model\n' }),
       },
     });
@@ -371,6 +371,21 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
     expect(boundTarget.executionBound).toBe(true);
     expect(boundTarget.routingDecisionId).toBe(boundDecision.id);
     expect(boundTarget.runId).toBe(prepared.run.id);
+    db.prepare(
+      `UPDATE provider_health SET auth = 'unknown'
+       WHERE project_id = ? AND provider_id = ?`
+    ).run(project.id, boundDecision.providerId);
+    await expect(
+      modelService.executeSelectedAgentTask(
+        { db, projectDir, worktreeRoot, now: () => now },
+        boundTarget,
+        { ticketId: workspace.workspace.ticketId, instructions: 'must reject stale auth', timeoutMs: 1_000 }
+      )
+    ).rejects.toThrow(/not a current execution binding/);
+    db.prepare(
+      `UPDATE provider_health SET auth = 'authenticated'
+       WHERE project_id = ? AND provider_id = ?`
+    ).run(project.id, boundDecision.providerId);
     db.prepare('UPDATE runs SET model_provider_id = ? WHERE id = ?').run('gemini', prepared.run.id);
     await expect(
       modelService.executeSelectedAgentTask(

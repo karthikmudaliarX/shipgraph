@@ -13,6 +13,8 @@ import {
 import type { ModelProviderId } from '../../domain/model-provider.js';
 import { registerModelProviderAdapter } from './model-provider-owner.js';
 
+const AGY_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
+
 type ProviderAgentAdapterOptions = {
   enabled?: boolean;
   executable?: string;
@@ -156,6 +158,7 @@ export class GeminiAdapter extends CommandAgentExecutionAdapter {
         '--sandbox',
       ],
       expectedExecutableName: 'agy',
+      versionPattern: AGY_VERSION_PATTERN,
       credentialEnvironmentKeys: [
         'GEMINI_API_KEY',
         'GOOGLE_API_KEY',

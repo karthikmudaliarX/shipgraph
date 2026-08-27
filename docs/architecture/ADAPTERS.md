@@ -78,7 +78,10 @@ Provider configurations may supply a machine-readable `capabilityArgs` surface;
 invalid or unavailable capability evidence makes that probe unknown. When a
 provider has no such surface, its adapter-level task contract is the stable
 capability boundary and explicit model capabilities from the catalog may narrow
-it. Model identifiers never imply capabilities.
+it. Model identifiers never imply capabilities. A provider-documented login
+status command may be supplied through `authArgs` with explicit authenticated
+and unauthenticated output markers. Version/help/catalog output alone never
+upgrades authentication; missing or ambiguous auth evidence remains `unknown`.
 
 `ProviderRegistry` persists the latest provider/model metadata,
 capability-probed execution status and `ProviderHealth` state. `ModelRouter`

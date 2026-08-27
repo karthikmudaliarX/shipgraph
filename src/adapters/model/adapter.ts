@@ -67,6 +67,12 @@ export type CommandModelProviderAdapterOptions = {
   executable?: string;
   capabilityArgs?: readonly string[];
   catalogArgs?: readonly string[];
+  /** A provider-documented, non-model command that reports login state. */
+  authArgs?: readonly string[];
+  /** Output markers required before authentication can be marked positive. */
+  authenticatedOutputTokens?: readonly string[];
+  /** Output markers that explicitly report that the provider is not logged in. */
+  unauthenticatedOutputTokens?: readonly string[];
   processRunner?: ModelProviderProcessRunner;
   cwd?: string;
   environment?: Readonly<Record<string, string>>;
@@ -78,6 +84,9 @@ export type ModelProviderAdapterConfiguration = {
   executable?: string;
   capabilityArgs?: readonly string[];
   catalogArgs?: readonly string[];
+  authArgs?: readonly string[];
+  authenticatedOutputTokens?: readonly string[];
+  unauthenticatedOutputTokens?: readonly string[];
 };
 
 export type ModelProviderConfiguration = Partial<{
@@ -100,6 +109,9 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
   private readonly executable: string | undefined;
   private readonly capabilityArgs: readonly string[] | undefined;
   private readonly catalogArgs: readonly string[] | undefined;
+  private readonly authArgs: readonly string[] | undefined;
+  private readonly authenticatedOutputTokens: readonly string[] | undefined;
+  private readonly unauthenticatedOutputTokens: readonly string[];
   private readonly processRunner: ModelProviderProcessRunner;
   private readonly cwd: string;
   private readonly environment: Readonly<Record<string, string>>;
@@ -113,6 +125,28 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
     this.executable = validateExecutable(options.executable);
     this.capabilityArgs = options.capabilityArgs?.map((arg) => validateArgument(arg));
     this.catalogArgs = options.catalogArgs?.map((arg) => validateArgument(arg));
+    this.authArgs = options.authArgs?.map((arg) => validateArgument(arg));
+    this.authenticatedOutputTokens = options.authenticatedOutputTokens?.map((token) =>
+      validateText(token, 'provider authenticated output token', 1_024)
+    );
+    this.unauthenticatedOutputTokens = (options.unauthenticatedOutputTokens ?? []).map((token) =>
+      validateText(token, 'provider unauthenticated output token', 1_024)
+    );
+    if (this.authArgs !== undefined && this.authArgs.length === 0) {
+      throw new Error('provider authentication probe must define command arguments');
+    }
+    if (
+      this.authArgs !== undefined &&
+      (this.authenticatedOutputTokens === undefined || this.authenticatedOutputTokens.length === 0)
+    ) {
+      throw new Error('provider authentication probe must define positive output evidence');
+    }
+    if (this.authArgs === undefined && this.authenticatedOutputTokens !== undefined) {
+      throw new Error('provider authentication output evidence requires command arguments');
+    }
+    if (this.authArgs === undefined && this.unauthenticatedOutputTokens.length > 0) {
+      throw new Error('provider unauthenticated output evidence requires command arguments');
+    }
     this.processRunner = options.processRunner ?? createAgentProcessRunner();
     this.cwd = options.cwd ?? process.cwd();
     if (!isAbsolute(this.cwd)) throw new Error('Provider metadata probes require an absolute cwd');
@@ -197,12 +231,13 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
         reason: capabilities.reason,
       };
     }
+    const authentication = await this.probeAuthentication();
     return {
       availability: 'available',
-      // A version command proves an installed surface, not login state.
-      auth: 'unknown',
+      auth: authentication.status,
       ...(version === undefined ? {} : { version }),
       capabilities: capabilities.capabilities,
+      ...(authentication.reason === undefined ? {} : { reason: authentication.reason }),
     };
   }
 
@@ -268,6 +303,64 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
     }
     return parseCapabilities(result.stdout);
   }
+
+  private async probeAuthentication(): Promise<{
+    status: ProviderAuthStatus;
+    reason?: string;
+  }> {
+    if (this.authArgs === undefined || this.authenticatedOutputTokens === undefined) {
+      return {
+        status: 'unknown',
+        reason: 'provider authentication status surface is not configured',
+      };
+    }
+    const result = await this.run(this.authArgs, PROBE_TIMEOUT_MS, PROBE_OUTPUT_BYTES);
+    if (result.spawnErrorCode !== undefined || result.startError !== undefined) {
+      return {
+        status: 'unknown',
+        reason: 'provider authentication status surface could not be started',
+      };
+    }
+    if (result.timedOut) {
+      return {
+        status: 'unknown',
+        reason: 'provider authentication status surface timed out',
+      };
+    }
+    if (result.cancelled || result.unexpectedTermination) {
+      return {
+        status: 'unknown',
+        reason: 'provider authentication status surface terminated unexpectedly',
+      };
+    }
+    if (result.outputLimitExceeded || result.stdoutTruncated || result.stderrTruncated) {
+      return {
+        status: 'unknown',
+        reason: 'provider authentication status output exceeded the safety limit',
+      };
+    }
+
+    const output = redactSensitiveText(`${result.stdout}\n${result.stderr}`);
+    if (this.unauthenticatedOutputTokens.some((token) => output.includes(token))) {
+      return {
+        status: 'unauthenticated',
+        reason: 'provider authentication status reported that the provider is not logged in',
+      };
+    }
+    if (result.exitCode !== 0) {
+      return {
+        status: 'unknown',
+        reason: 'provider authentication status surface failed',
+      };
+    }
+    if (this.authenticatedOutputTokens.every((token) => output.includes(token))) {
+      return { status: 'authenticated' };
+    }
+    return {
+      status: 'unknown',
+      reason: 'provider authentication status did not provide positive evidence',
+    };
+  }
 }
 
 export function createCommandModelProviderAdapter(
@@ -285,9 +378,23 @@ export function createModelProviderAdapters(options: {
   const defaults: Record<ModelProviderId, {
     executable?: string;
     catalogArgs?: readonly string[];
+    authArgs?: readonly string[];
+    authenticatedOutputTokens?: readonly string[];
+    unauthenticatedOutputTokens?: readonly string[];
   }> = {
-    'opencode-go': { executable: 'opencode', catalogArgs: ['models'] },
-    codex: { executable: 'codex' },
+    'opencode-go': {
+      executable: 'opencode',
+      catalogArgs: ['models'],
+      authArgs: ['auth', 'list'],
+      authenticatedOutputTokens: ['OpenCode Go'],
+      unauthenticatedOutputTokens: ['0 credentials'],
+    },
+    codex: {
+      executable: 'codex',
+      authArgs: ['login', 'status'],
+      authenticatedOutputTokens: ['Logged in'],
+      unauthenticatedOutputTokens: ['Not logged in'],
+    },
     grok: {},
     gemini: {},
   };
@@ -308,6 +415,11 @@ export function createModelProviderAdapters(options: {
       executable: configured?.executable ?? defaultsForProvider.executable,
       capabilityArgs: configured?.capabilityArgs,
       catalogArgs: configured?.catalogArgs ?? defaultsForProvider.catalogArgs,
+      authArgs: configured?.authArgs ?? defaultsForProvider.authArgs,
+      authenticatedOutputTokens:
+        configured?.authenticatedOutputTokens ?? defaultsForProvider.authenticatedOutputTokens,
+      unauthenticatedOutputTokens:
+        configured?.unauthenticatedOutputTokens ?? defaultsForProvider.unauthenticatedOutputTokens,
       ...(options.processRunner === undefined ? {} : { processRunner: options.processRunner }),
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       ...(options.environment === undefined ? {} : { environment: options.environment }),

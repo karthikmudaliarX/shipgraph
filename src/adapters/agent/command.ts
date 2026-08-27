@@ -34,6 +34,8 @@ export type CommandAgentAdapterOptions = {
   requiredProbeTokens: readonly string[];
   /** Tokens that identify the vendor's version output, when available. */
   requiredVersionTokens?: readonly string[];
+  /** Optional provider-specific format check for the first version line. */
+  versionPattern?: RegExp;
   /** Name the configured command must have before it is considered this adapter. */
   expectedExecutableName?: string;
   /** Credentials/configuration allowed to cross this provider's process boundary. */
@@ -163,6 +165,7 @@ export class CommandAgentExecutionAdapter implements AgentExecutionAdapter {
   private readonly probeArgs: readonly string[];
   private readonly requiredProbeTokens: readonly string[];
   private readonly requiredVersionTokens: readonly string[];
+  private readonly versionPattern: RegExp | undefined;
   private readonly expectedExecutableName: string | undefined;
   private readonly credentialEnvironmentKeys: readonly string[];
   private readonly outputFormat: CommandAgentOutputFormat;
@@ -185,6 +188,9 @@ export class CommandAgentExecutionAdapter implements AgentExecutionAdapter {
     this.requiredVersionTokens = (options.requiredVersionTokens ?? []).map((token) =>
       validateText(token, 'agent version identity token', 256)
     );
+    this.versionPattern = options.versionPattern === undefined
+      ? undefined
+      : new RegExp(options.versionPattern.source, options.versionPattern.flags.replace('g', ''));
     this.expectedExecutableName = options.expectedExecutableName === undefined
       ? undefined
       : validateText(options.expectedExecutableName, 'agent executable name', 256);
@@ -225,6 +231,7 @@ export class CommandAgentExecutionAdapter implements AgentExecutionAdapter {
       probeArgs: this.probeArgs,
       requiredProbeTokens: this.requiredProbeTokens,
       requiredVersionTokens: this.requiredVersionTokens,
+      versionPattern: this.versionPattern,
       expectedExecutableName: this.expectedExecutableName,
       processRunner: this.processRunner,
       cwd: this.cwd,

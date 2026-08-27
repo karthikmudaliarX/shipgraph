@@ -42,14 +42,23 @@ const SAFE_INHERITED_ENVIRONMENT = [
   'XDG_CONFIG_HOME',
   'XDG_DATA_HOME',
   'XDG_CACHE_HOME',
-  // OpenCode can use these provider credentials. They are passed to the
-  // child only and are never included in a persisted run record.
-  'OPENAI_API_KEY',
-  'ANTHROPIC_API_KEY',
-  'GOOGLE_GENERATIVE_AI_API_KEY',
-  'XAI_API_KEY',
+  // Only the OpenCode account credential crosses this process boundary. Other
+  // provider credentials are intentionally filtered even when callers supply
+  // them as explicit environment additions.
   'OPENCODE_API_KEY',
 ] as const;
+
+const PROVIDER_CREDENTIAL_ENVIRONMENT_KEYS = new Set([
+  'CODEX_HOME',
+  'GROK_HOME',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'GOOGLE_API_KEY',
+  'GOOGLE_GENERATIVE_AI_API_KEY',
+  'GEMINI_API_KEY',
+  'XAI_API_KEY',
+  'OPENCODE_API_KEY',
+]);
 
 const BLOCKED_ENVIRONMENT_KEYS = /^(?:GIT_|NODE_OPTIONS$|BASH_ENV$|ENV$|CDPATH$|LD_PRELOAD$|DYLD_)/;
 
@@ -186,6 +195,9 @@ function buildEnvironment(
     }
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) {
       throw new Error(`Invalid OpenCode environment variable name: ${key}`);
+    }
+    if (PROVIDER_CREDENTIAL_ENVIRONMENT_KEYS.has(key) && key !== 'OPENCODE_API_KEY') {
+      continue;
     }
     environment[key] = value;
   }

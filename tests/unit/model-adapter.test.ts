@@ -150,6 +150,63 @@ describe('MODEL-001 provider adapters', () => {
     ]);
   });
 
+  it('marks authentication positive only from a provider status surface', async () => {
+    const calls: string[][] = [];
+    const runner: ModelProviderProcessRunner = {
+      run: async (spec) => {
+        calls.push([...spec.args]);
+        if (spec.args[0] === '--version') return result({ stdout: 'codex-cli 2.0.0\n' });
+        if (spec.args[0] === 'login') return result({ stdout: 'Logged in using ChatGPT\n' });
+        return result({ stdout: '[{"id":"provider/discovered"}]\n' });
+      },
+    };
+    const adapter = createCommandModelProviderAdapter({
+      providerId: 'codex',
+      family: 'openai',
+      displayName: 'Codex',
+      executable: '/tmp/codex',
+      authArgs: ['login', 'status'],
+      authenticatedOutputTokens: ['Logged in'],
+      unauthenticatedOutputTokens: ['Not logged in'],
+      catalogArgs: ['models'],
+      processRunner: runner,
+      cwd: '/tmp/project',
+    });
+
+    await expect(adapter.probe()).resolves.toMatchObject({
+      availability: 'available',
+      auth: 'authenticated',
+    });
+    expect(calls).toEqual([
+      ['--version'],
+      ['login', 'status'],
+    ]);
+  });
+
+  it('keeps authentication unknown when a status command is ambiguous', async () => {
+    const adapter = createCommandModelProviderAdapter({
+      providerId: 'codex',
+      family: 'openai',
+      displayName: 'Codex',
+      executable: '/tmp/codex',
+      authArgs: ['login', 'status'],
+      authenticatedOutputTokens: ['Logged in'],
+      unauthenticatedOutputTokens: ['Not logged in'],
+      processRunner: {
+        run: async (spec) => spec.args[0] === '--version'
+          ? result({ stdout: 'codex-cli 2.0.0\n' })
+          : result({ stdout: 'Authentication status unavailable\n' }),
+      },
+      cwd: '/tmp/project',
+    });
+
+    await expect(adapter.probe()).resolves.toMatchObject({
+      availability: 'available',
+      auth: 'unknown',
+      reason: 'provider authentication status did not provide positive evidence',
+    });
+  });
+
   it('passes only the selected MODEL provider credentials to metadata probes', async () => {
     const calls: Array<{
       command: string;

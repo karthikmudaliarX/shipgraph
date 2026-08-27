@@ -41,7 +41,7 @@ function health(overrides: Partial<ProviderHealthRecord> = {}): ProviderHealthRe
     projectId,
     providerId: 'codex',
     status: 'healthy',
-    auth: 'unknown',
+    auth: 'authenticated',
     quotaPressure: 'unknown',
     quotaRemaining: 'unknown',
     quotaResetAt: 'unknown',
@@ -346,6 +346,24 @@ describe('MODEL-001 persistence', () => {
       decision(),
       'run-1'
     )).toThrow(/routing requires a CREATED run/);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM provider_capacity_reservations').get())
+      .toEqual({ count: 0 });
+  });
+
+  it('refuses to reserve provider capacity without positive authentication evidence', () => {
+    repository.replaceProviderSnapshot({
+      provider: provider(),
+      health: health({ auth: 'unknown' }),
+      models: [model()],
+      catalogStatus: 'known',
+    });
+
+    expect(repository.reserveProviderCapacityAndAppendRoutingDecision(
+      decision(),
+      'run-1'
+    )).toBeUndefined();
+    expect(db.prepare('SELECT COUNT(*) AS count FROM routing_decisions').get())
+      .toEqual({ count: 0 });
     expect(db.prepare('SELECT COUNT(*) AS count FROM provider_capacity_reservations').get())
       .toEqual({ count: 0 });
   });

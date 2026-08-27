@@ -558,7 +558,10 @@ export function createModelRepository(db: DbConnection): ModelRepository {
         const health = rowToHealth(healthRow);
         if (
           (health.status !== 'healthy' && health.status !== 'degraded') ||
-          health.auth === 'unauthenticated' ||
+          // Router output is only a hint. Serialize the final admission check
+          // with the provider slot so an auth refresh cannot turn an unknown
+          // provider into an executable reservation.
+          health.auth !== 'authenticated' ||
           (typeof health.quotaRemaining === 'number' && health.quotaRemaining <= 0) ||
           health.activeRuns >= (
             typeof health.maxConcurrentRuns === 'number'

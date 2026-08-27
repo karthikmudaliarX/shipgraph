@@ -261,7 +261,8 @@ esac
       processRunner: scriptedRunner(
         '--print --output-format --model --mode --disable-slash-commands --sandbox\n',
         '{"type":"result","conversationId":"agy-session","text":"done"}\n',
-        calls
+        calls,
+        '1.0.0\n'
       ),
     });
 
@@ -291,10 +292,27 @@ esac
     });
   });
 
+  it('rejects an Antigravity executable with an unrecognized version identity', async () => {
+    const adapter = new GeminiAdapter({
+      executable: '/opt/agy',
+      processRunner: scriptedRunner(
+        '--print --output-format --model --mode --disable-slash-commands --sandbox\n',
+        '',
+        [],
+        'agy-cli 1.0.0\n'
+      ),
+    });
+
+    await expect(adapter.probe()).resolves.toEqual({
+      available: false,
+      reason: 'Gemini version probe did not match the expected identity format',
+    });
+  });
+
   it('keeps an executable non-routable when its claimed automation flags are absent', async () => {
     const adapter = new GeminiAdapter({
       executable: '/opt/agy',
-      processRunner: scriptedRunner('--help --model\n', '', []),
+      processRunner: scriptedRunner('--help --model\n', '', [], '1.0.0\n'),
     });
 
     await expect(adapter.probe()).resolves.toEqual({

@@ -377,6 +377,7 @@ export class ModelRoutingService {
       projectId,
       target.routingDecisionId as string
     );
+    const health = this.repository.findHealth(projectId, target.modelProviderId);
     const run = createRunRepository(options.db).findById(target.runId as string);
     // The repository owns routing decisions, while durable AGENT runs remain
     // in the general repository. Keep both identities in the same project.
@@ -390,6 +391,8 @@ export class ModelRoutingService {
       persisted.decision.modelId !== target.modelId ||
       persisted.decision.task !== target.task ||
       persisted.decision.requestFingerprint === undefined ||
+      health === undefined ||
+      health.auth !== 'authenticated' ||
       run === undefined ||
       run.projectId !== projectId ||
       run.task !== target.task ||
