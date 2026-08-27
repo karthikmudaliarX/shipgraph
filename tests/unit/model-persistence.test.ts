@@ -85,7 +85,7 @@ function usage(overrides: Partial<UsageLedgerRecord> = {}): UsageLedgerRecord {
   };
 }
 
-function decision(): ModelRoutingDecision {
+function decision(overrides: Partial<ModelRoutingDecision> = {}): ModelRoutingDecision {
   return {
     id: randomUUID(),
     projectId,
@@ -99,6 +99,7 @@ function decision(): ModelRoutingDecision {
     reason: 'selected using healthy provider and discovered model',
     candidatesConsidered: 1,
     createdAt: now,
+    ...overrides,
   };
 }
 
@@ -332,5 +333,27 @@ describe('MODEL-001 persistence', () => {
     )).toThrow(/routing requires a CREATED run/);
     expect(db.prepare('SELECT COUNT(*) AS count FROM provider_capacity_reservations').get())
       .toEqual({ count: 0 });
+  });
+
+  it('does not replay an existing reservation with a different request fingerprint', () => {
+    repository.replaceProviderSnapshot({
+      provider: provider(),
+      health: health({ maxConcurrentRuns: 1 }),
+      models: [model()],
+      catalogStatus: 'known',
+    });
+    const first = repository.reserveProviderCapacityAndAppendRoutingDecision(
+      decision({ requestFingerprint: 'a'.repeat(64) }),
+      'run-1'
+    );
+    if (first === undefined) throw new Error('missing provider reservation fixture');
+
+    expect(() => repository.reserveProviderCapacityAndAppendRoutingDecision(
+      decision({ requestFingerprint: 'b'.repeat(64) }),
+      'run-1'
+    )).toThrow(/different routing constraints/);
+    expect(repository.listRoutingDecisions(projectId)).toHaveLength(1);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM provider_capacity_reservations').get())
+      .toEqual({ count: 1 });
   });
 });

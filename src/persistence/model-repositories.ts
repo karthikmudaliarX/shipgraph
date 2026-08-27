@@ -454,9 +454,21 @@ export function createModelRepository(db: DbConnection): ModelRepository {
           if (
             existingDecision.task !== parsed.task ||
             existingDecision.risk !== parsed.risk ||
-            existingDecision.mode !== parsed.mode
+            existingDecision.mode !== parsed.mode ||
+            existingDecision.providerId !== parsed.providerId ||
+            existingDecision.providerFamily !== parsed.providerFamily ||
+            existingDecision.modelId !== parsed.modelId
           ) {
             throw new Error(`Routing request ${parsed.requestId} was reused for a different route`);
+          }
+          if (
+            existingDecision.requestFingerprint === undefined ||
+            parsed.requestFingerprint === undefined ||
+            existingDecision.requestFingerprint !== parsed.requestFingerprint
+          ) {
+            throw new Error(
+              `Routing request ${parsed.requestId} was reused with different routing constraints`
+            );
           }
           return existingDecision;
         }
