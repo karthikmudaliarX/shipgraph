@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chmodSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentExecutionRequest } from '../../src/adapters/agent/adapter.js';
@@ -115,7 +115,7 @@ describe('deferred MODEL-001 provider execution adapters', () => {
       executable: '/opt/grok',
       cwd: '/tmp/shipgraph-project',
       processRunner: scriptedRunner(
-        '--single --output-format --model --cwd --always-approve --no-subagents --no-plan --disable-web-search --sandbox\n',
+        '--single --output-format --model --cwd --permission-mode --allow --tools --disallowed-tools --no-subagents --no-plan --no-memory --disable-web-search --sandbox\n',
         '{"type":"result","conversationId":"grok-session","text":"done"}\n',
         calls,
         'grok 1.0.0\n'
@@ -134,9 +134,23 @@ describe('deferred MODEL-001 provider execution adapters', () => {
       request.model,
       '--cwd',
       request.workspacePath,
-      '--always-approve',
+      '--permission-mode',
+      'dontAsk',
+      '--allow',
+      'Read',
+      '--allow',
+      'Grep',
+      '--allow',
+      'Edit',
+      '--allow',
+      'Bash',
+      '--tools',
+      'Read,Grep,Edit,Bash',
+      '--disallowed-tools',
+      'MCPTool,WebFetch,WebSearch',
       '--no-subagents',
       '--no-plan',
+      '--no-memory',
       '--disable-web-search',
       '--sandbox',
       'workspace',
@@ -153,9 +167,13 @@ describe('deferred MODEL-001 provider execution adapters', () => {
     '--output-format',
     '--model',
     '--cwd',
-    '--always-approve',
+    '--permission-mode',
+    '--allow',
+    '--tools',
+    '--disallowed-tools',
     '--no-subagents',
     '--no-plan',
+    '--no-memory',
     '--disable-web-search',
     '--sandbox',
   ])('keeps Grok unavailable when its execution restriction %s is absent', async (missing) => {
@@ -167,9 +185,13 @@ describe('deferred MODEL-001 provider execution adapters', () => {
           '--output-format',
           '--model',
           '--cwd',
-          '--always-approve',
+          '--permission-mode',
+          '--allow',
+          '--tools',
+          '--disallowed-tools',
           '--no-subagents',
           '--no-plan',
+          '--no-memory',
           '--disable-web-search',
           '--sandbox',
         ].filter((token) => token !== missing).join(' '),
@@ -191,7 +213,7 @@ describe('deferred MODEL-001 provider execution adapters', () => {
       executable: '/opt/grok',
       environment: { XAI_API_KEY: 'grok-secret', OPENAI_API_KEY: 'openai-secret' },
       processRunner: scriptedRunner(
-        '--single --output-format --model --cwd --always-approve --no-subagents --no-plan --disable-web-search --sandbox\n',
+        '--single --output-format --model --cwd --permission-mode --allow --tools --disallowed-tools --no-subagents --no-plan --no-memory --disable-web-search --sandbox\n',
         '',
         calls,
         'grok 1.0.0\n'
@@ -201,6 +223,10 @@ describe('deferred MODEL-001 provider execution adapters', () => {
     await expect(adapter.probe()).resolves.toMatchObject({ available: true });
     expect(calls[0]?.env.XAI_API_KEY).toBe('grok-secret');
     expect(calls[0]?.env.OPENAI_API_KEY).toBeUndefined();
+    expect(calls[0]?.env.GROK_HOME).toBe(calls[0]?.env.HOME);
+    expect(calls[0]?.env.HOME).not.toBe(process.env.HOME);
+    expect(calls[0]?.env.GROK_WORKFLOWS).toBe('0');
+    expect(calls[0]?.env.HOME === undefined || existsSync(calls[0].env.HOME)).toBe(false);
   });
 
   it('pins the probed executable and refuses a replacement before launch', async () => {
@@ -211,7 +237,7 @@ describe('deferred MODEL-001 provider execution adapters', () => {
     const script = `#!/bin/sh
 case "$1" in
   --version) printf 'grok 1.0.0\\n' ;;
-  --help) printf '%s\\n' '--single --output-format --model --cwd --always-approve --no-subagents --no-plan --disable-web-search --sandbox' ;;
+  --help) printf '%s\\n' '--single --output-format --model --cwd --permission-mode --allow --tools --disallowed-tools --no-subagents --no-plan --no-memory --disable-web-search --sandbox' ;;
   *) printf '%s\\n' '{"type":"result","text":"done"}' ;;
 esac
 `;

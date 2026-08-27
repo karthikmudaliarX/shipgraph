@@ -41,6 +41,8 @@ export type CommandAgentAdapterOptions = {
   outputFormat: CommandAgentOutputFormat;
   buildArgs: (request: AgentExecutionRequest) => readonly string[];
   processRunner?: AgentProcessRunner;
+  /** Override only when a provider wrapper still preserves production provenance checks. */
+  enforceExecutableProvenance?: boolean;
   cwd?: string;
   environment?: Readonly<Record<string, string>>;
 };
@@ -192,7 +194,8 @@ export class CommandAgentExecutionAdapter implements AgentExecutionAdapter {
     // A custom runner is a deliberate dependency-injection boundary used by
     // tests and embedding applications. The production runner resolves and
     // pins the executable below before it can launch a provider.
-    this.enforceExecutableProvenance = options.processRunner === undefined;
+    this.enforceExecutableProvenance = options.enforceExecutableProvenance ??
+      options.processRunner === undefined;
   }
 
   public async probe(): Promise<AgentProbeResult> {

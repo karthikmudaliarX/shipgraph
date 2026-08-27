@@ -116,7 +116,10 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
     this.processRunner = options.processRunner ?? createAgentProcessRunner();
     this.cwd = options.cwd ?? process.cwd();
     if (!isAbsolute(this.cwd)) throw new Error('Provider metadata probes require an absolute cwd');
-    this.environment = buildEnvironment(options.environment);
+    this.environment = buildEnvironment(
+      options.environment,
+      MODEL_PROVIDER_CREDENTIAL_ENVIRONMENT_KEYS[this.providerId]
+    );
     this.capabilities = normalizeCapabilities(options.capabilities ?? MODEL_CAPABILITIES);
   }
 
@@ -500,7 +503,7 @@ function validateText(value: string, label: string, maxLength: number): string {
   return value;
 }
 
-const SAFE_ENVIRONMENT_KEYS = [
+const SAFE_INHERITED_ENVIRONMENT_KEYS = [
   'PATH',
   'HOME',
   'USER',
@@ -512,20 +515,40 @@ const SAFE_ENVIRONMENT_KEYS = [
   'XDG_CONFIG_HOME',
   'XDG_DATA_HOME',
   'XDG_CACHE_HOME',
+] as const;
+const PROVIDER_CREDENTIAL_ENVIRONMENT_KEYS = new Set([
+  'CODEX_HOME',
+  'GROK_HOME',
   'OPENAI_API_KEY',
   'GOOGLE_API_KEY',
   'GOOGLE_GENERATIVE_AI_API_KEY',
   'GEMINI_API_KEY',
   'XAI_API_KEY',
   'OPENCODE_API_KEY',
-] as const;
+]);
+
+const MODEL_PROVIDER_CREDENTIAL_ENVIRONMENT_KEYS: Record<
+  ModelProviderId,
+  readonly string[]
+> = {
+  'opencode-go': ['OPENCODE_API_KEY'],
+  codex: ['OPENAI_API_KEY', 'CODEX_HOME'],
+  grok: ['XAI_API_KEY', 'GROK_HOME'],
+  gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY'],
+};
 const BLOCKED_ENVIRONMENT_KEYS = /^(?:GIT_|NODE_OPTIONS$|BASH_ENV$|ENV$|CDPATH$|LD_PRELOAD$|DYLD_)/u;
 
 function buildEnvironment(
-  additions: Readonly<Record<string, string>> | undefined
+  additions: Readonly<Record<string, string>> | undefined,
+  credentialEnvironmentKeys: readonly string[]
 ): Readonly<Record<string, string>> {
   const environment: Record<string, string> = {};
-  for (const key of SAFE_ENVIRONMENT_KEYS) {
+  const allowedCredentials = new Set(credentialEnvironmentKeys);
+  for (const key of SAFE_INHERITED_ENVIRONMENT_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) environment[key] = value;
+  }
+  for (const key of allowedCredentials) {
     const value = process.env[key];
     if (value !== undefined) environment[key] = value;
   }
@@ -535,6 +558,9 @@ function buildEnvironment(
     }
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key) || value.includes('\0')) {
       throw new Error(`Invalid provider environment variable: ${key}`);
+    }
+    if (PROVIDER_CREDENTIAL_ENVIRONMENT_KEYS.has(key) && !allowedCredentials.has(key)) {
+      continue;
     }
     environment[key] = value;
   }

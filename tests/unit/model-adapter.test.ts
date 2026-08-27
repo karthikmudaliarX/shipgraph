@@ -150,6 +150,60 @@ describe('MODEL-001 provider adapters', () => {
     ]);
   });
 
+  it('passes only the selected MODEL provider credentials to metadata probes', async () => {
+    const calls: Array<{
+      command: string;
+      env: Readonly<Record<string, string>>;
+    }> = [];
+    const runner: ModelProviderProcessRunner = {
+      run: async (spec) => {
+        calls.push({ command: spec.command, env: spec.env });
+        return result({ stdout: 'provider-cli 2.0.0\n' });
+      },
+    };
+    const adapters = createModelProviderAdapters({
+      configuration: {
+        opencodeGo: { executable: '/tmp/opencode' },
+        codex: { executable: '/tmp/codex' },
+        grok: { executable: '/tmp/grok' },
+        gemini: { executable: '/tmp/agy' },
+      },
+      processRunner: runner,
+      cwd: '/tmp/project',
+      environment: {
+        OPENCODE_API_KEY: 'opencode-secret',
+        OPENAI_API_KEY: 'openai-secret',
+        CODEX_HOME: '/tmp/codex-home',
+        XAI_API_KEY: 'grok-secret',
+        GROK_HOME: '/tmp/grok-home',
+        GEMINI_API_KEY: 'gemini-secret',
+        GOOGLE_API_KEY: 'google-secret',
+        GOOGLE_GENERATIVE_AI_API_KEY: 'google-generative-secret',
+      },
+    });
+
+    for (const adapter of adapters) await adapter.probe();
+    const envByCommand = new Map(calls.map((call) => [call.command, call.env]));
+    expect(envByCommand.get('/tmp/opencode')).toMatchObject({ OPENCODE_API_KEY: 'opencode-secret' });
+    expect(envByCommand.get('/tmp/opencode')).not.toHaveProperty('OPENAI_API_KEY');
+    expect(envByCommand.get('/tmp/codex')).toMatchObject({
+      OPENAI_API_KEY: 'openai-secret',
+      CODEX_HOME: '/tmp/codex-home',
+    });
+    expect(envByCommand.get('/tmp/codex')).not.toHaveProperty('XAI_API_KEY');
+    expect(envByCommand.get('/tmp/grok')).toMatchObject({
+      XAI_API_KEY: 'grok-secret',
+      GROK_HOME: '/tmp/grok-home',
+    });
+    expect(envByCommand.get('/tmp/grok')).not.toHaveProperty('OPENAI_API_KEY');
+    expect(envByCommand.get('/tmp/agy')).toMatchObject({
+      GEMINI_API_KEY: 'gemini-secret',
+      GOOGLE_API_KEY: 'google-secret',
+      GOOGLE_GENERATIVE_AI_API_KEY: 'google-generative-secret',
+    });
+    expect(envByCommand.get('/tmp/agy')).not.toHaveProperty('XAI_API_KEY');
+  });
+
   it('uses an explicit machine-readable capability surface when configured', async () => {
     const runner: ModelProviderProcessRunner = {
       run: async (spec) => {

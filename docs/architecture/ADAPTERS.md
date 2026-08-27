@@ -60,7 +60,11 @@ Grok is launched with its `workspace` sandbox profile and Antigravity with its
 Codex, Grok and Antigravity probes also require the adapter-specific executable
 name/version identity and every security-relevant flag used at launch; a
 replacement executable after probing invalidates the launch. Provider
-credentials are filtered to the adapter that owns them.
+credentials are filtered to the adapter that owns them. Grok additionally
+requires a private ephemeral home/config, no memory, no subagents, no plan
+mode, disabled web/MCP tools, and a deny-by-default permission mode with only
+the local coding tools explicitly allowed. If the installed Grok surface does
+not expose those controls, it remains unavailable rather than being routed.
 
 MODEL-001 adds a separate metadata boundary for the paid engineering pools:
 OpenCode Go, Codex, Grok and Gemini. `ModelProviderAdapter` implementations
