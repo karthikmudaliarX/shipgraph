@@ -225,6 +225,7 @@ export async function executeAgentTask(
   }
 
   let adapterResult: AgentExecutionResult;
+  let executionStopped = false;
   try {
     const request: AgentExecutionRequest = {
       runId: started.id,
@@ -252,7 +253,14 @@ export async function executeAgentTask(
       },
     };
     adapterResult = await options.adapter.execute(request);
+    // A resolved adapter call has observed the provider attempt's terminal
+    // result. NEEDS_HUMAN is deliberately excluded: that outcome may be
+    // returned by an adapter that cannot prove its provider process stopped.
+    executionStopped = adapterResult.outcome !== 'NEEDS_HUMAN';
   } catch (error) {
+    // An adapter may have spawned a provider and then lost its bookkeeping
+    // channel. Keep the durable reservation until an operator can reconcile
+    // process ownership; do not infer termination from a thrown exception.
     adapterResult = {
       outcome: 'NEEDS_HUMAN',
       timedOut: false,
@@ -268,7 +276,14 @@ export async function executeAgentTask(
 
   const normalizedResult = normalizeAdapterResult(adapterResult, normalized.maxOutputBytes);
   try {
-    const finalRun = finalizeRun(options, started, normalizedResult, createEventId, now);
+    const finalRun = finalizeRun(
+      options,
+      started,
+      normalizedResult,
+      createEventId,
+      now,
+      executionStopped
+    );
     return { created: true, run: finalRun };
   } catch (error) {
     const recovered = markRunNeedsHuman(
@@ -277,7 +292,8 @@ export async function executeAgentTask(
       'Provider output was obtained but its terminal result could not be durably recorded; manual reconciliation is required',
       createEventId,
       now,
-      'persistence_error'
+      'persistence_error',
+      executionStopped
     );
     if (recovered) return { created: true, run: recovered };
     throw new Error(
@@ -646,7 +662,8 @@ function finalizeRun(
   run: AgentRunRecord,
   result: AgentExecutionResult,
   createEventId: () => string,
-  now: () => string
+  now: () => string,
+  executionStopped: boolean
 ): AgentRunRecord {
   const completedAt = now();
   const finalize = options.db.transaction((): AgentRunRecord => {
@@ -701,7 +718,12 @@ function finalizeRun(
         ...(durableUpdated.evidence === undefined ? {} : { evidence: durableUpdated.evidence }),
       },
     });
-    releaseActiveModelReservation(options, durableUpdated, completedAt);
+    // A provider adapter that returned a terminal result has proven its
+    // attempt stopped. An adapter exception leaves ownership ambiguous, so
+    // retain the reservation for reconciliation instead of releasing it.
+    if (executionStopped) {
+      releaseActiveModelReservation(options, durableUpdated, completedAt);
+    }
     return requireDurableRun(repository.findById(run.id));
   }).immediate;
   return finalize();

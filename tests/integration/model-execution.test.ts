@@ -12,6 +12,7 @@ import type {
   ModelProviderAdapter,
   ProviderProbeResult,
 } from '../../src/adapters/model/adapter.js';
+import { createModelRepository } from '../../src/persistence/model-repositories.js';
 import { createProjectRepository } from '../../src/persistence/repositories.js';
 import type { ShipgraphConfig } from '../../src/config/schema.js';
 import { ModelRoutingService } from '../../src/model/service.js';
@@ -362,5 +363,115 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
       outcomeQuality: 'good',
     });
     expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
+  });
+
+  it('retains provider capacity when a selected adapter throws after starting', async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'shipgraph-model-ambiguous-src-'));
+    const worktreeRoot = mkdtempSync(join(tmpdir(), 'shipgraph-model-ambiguous-root-'));
+    temporaryDirectories.push(projectDir, worktreeRoot);
+    git(projectDir, 'init', '-b', 'main');
+    git(projectDir, 'config', 'user.email', 'shipgraph-model@example.com');
+    git(projectDir, 'config', 'user.name', 'ShipGraph Model Test');
+    writeFileSync(join(projectDir, 'README.md'), '# ambiguous adapter\n');
+    git(projectDir, 'add', '.');
+    git(projectDir, 'commit', '-m', 'initial');
+    const config: ShipgraphConfig = {
+      version: 1,
+      project: { name: 'model-ambiguous', repository: 'owner/model-ambiguous', defaultBranch: 'main' },
+      execution: { maxConcurrentTickets: 1, maxRepairIterations: 6 },
+      release: { requireHumanApproval: true, requireCleanCI: true, requireExactShaReviews: true },
+      agents: { implementer: 'opencode', reviewers: ['correctness'] },
+    };
+    initProject(projectDir, { config });
+    writeFileSync(
+      join(projectDir, 'shipgraph.backlog.yml'),
+      stringify({ version: 1, tickets: [bridgeTicket()] })
+    );
+    syncBacklogProject(projectDir);
+    db = createDatabase(join(projectDir, '.shipgraph', 'shipgraph.db'));
+    migrate(db);
+    const project = createProjectRepository(db).findAll()[0];
+    if (project === undefined) throw new Error('missing ambiguous adapter project');
+
+    const calls: AgentProcessSpec[] = [];
+    const executionAdapter = new CodexAdapter({
+      executable: '/opt/codex',
+      processRunner: {
+        run: async (spec) => {
+          calls.push(spec);
+          if (spec.args[0] === '--version') return result({ stdout: 'codex 1.0.0\n' });
+          if (spec.args[0] === 'exec' && spec.args[1] === '--help') {
+            return result({
+              stdout: 'exec --json --model --cd --sandbox --approve-for-me --ephemeral\n',
+            });
+          }
+          await spec.onStarted?.(4242);
+          throw new Error('provider bookkeeping channel lost after spawn');
+        },
+      },
+    });
+    const workspace = await createWorkspace({ db, projectDir, worktreeRoot }, 'KAR-6001');
+    const modelService = new ModelRoutingService({
+      db,
+      projectId: project.id,
+      adapters: [providerAdapter('codex', 'openai')],
+      executionAdapters: [{ modelProviderId: 'codex', adapter: executionAdapter }],
+      now: () => now,
+    });
+    await modelService.refresh();
+    const prepared = await prepareAgentTaskRun(
+      {
+        db,
+        projectDir,
+        worktreeRoot,
+        adapter: executionAdapter,
+        now: () => now,
+        createRunId: () => 'run-ambiguous-adapter',
+      },
+      {
+        ticketId: workspace.workspace.ticketId,
+        provider: 'codex',
+        modelProviderId: 'codex',
+        model: 'codex/dynamic-model',
+        instructions: 'exercise ambiguous provider ownership',
+        timeoutMs: 1_000,
+      }
+    );
+    const decision = await modelService.route({
+      runId: prepared.run.id,
+      task: 'implementation',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 1,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    });
+    const target = modelService.resolveExecutionTarget(decision);
+    const execution = await executeSelectedAgentTask(
+      { db, projectDir, worktreeRoot, now: () => now },
+      target,
+      { ticketId: workspace.workspace.ticketId, instructions: 'exercise ambiguous provider ownership', timeoutMs: 1_000 }
+    );
+
+    expect(execution.run.status).toBe('NEEDS_HUMAN');
+    expect(execution.run.failureCategory).toBe('adapter_error');
+    expect(calls.filter((call) => call.args[0] === 'exec' && call.args[1] !== '--help')).toHaveLength(1);
+    expect(modelService.listHealth()[0]?.activeRuns).toBe(1);
+    expect(createModelRepository(db).findActiveRoutingDecisionByRun(project.id, prepared.run.id))
+      .toMatchObject({ reservationStatus: 'active', runId: prepared.run.id });
+    await modelService.recordUsage({
+      runId: prepared.run.id,
+      routingDecisionId: decision.id,
+      providerId: decision.providerId,
+      modelId: decision.modelId,
+      task: decision.task,
+      retryCount: 0,
+      elapsedMs: 0,
+      outcome: 'unknown',
+      outcomeQuality: 'unknown',
+    });
+    expect(modelService.listHealth()[0]?.activeRuns).toBe(1);
   });
 });
