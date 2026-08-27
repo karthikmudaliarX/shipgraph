@@ -14,6 +14,8 @@ import { stringify } from 'yaml';
 import { initProject } from '../../src/cli/init.js';
 import { syncBacklogProject } from '../../src/cli/backlog.js';
 import { createWorkspace } from '../../src/workspace/service.js';
+import { TicketState } from '../../src/core/state-machine/state.js';
+import { persistTicketTransition } from '../../src/persistence/ticket-state-store.js';
 import { openAndMigrate, type DbConnection } from '../../src/persistence/db.js';
 import {
   createEventRepository,
@@ -76,11 +78,14 @@ type Harness = {
 
 type FakeAdapter = AgentExecutionAdapter & { requests: AgentExecutionRequest[] };
 
-function fakeAdapter(result?: Partial<AgentExecutionResult>): FakeAdapter {
+function fakeAdapter(
+  result: Partial<AgentExecutionResult> = {},
+  capabilities: AgentExecutionAdapter['capabilities'] = ['execute']
+): FakeAdapter {
   const requests: AgentExecutionRequest[] = [];
   const adapter: FakeAdapter = {
     provider: 'opencode',
-    capabilities: ['execute'],
+    capabilities,
     requests,
     probe: () => ({ available: true, version: 'test' }),
     execute: async (request) => {
@@ -480,6 +485,98 @@ describe('AGENT-001 durable execution', () => {
       routingDecisionId: decision.id,
     });
     expect(modelService.listHealth()[0]?.activeRuns).toBe(1);
+  });
+
+  it.each([
+    {
+      task: 'review' as const,
+      states: [
+        TicketState.IMPLEMENTING,
+        TicketState.VERIFYING,
+        TicketState.PR_OPEN,
+        TicketState.CI_WAIT,
+        TicketState.REVIEWING,
+      ],
+    },
+    {
+      task: 'repair' as const,
+      states: [TicketState.IMPLEMENTING, TicketState.VERIFYING, TicketState.REPAIRING],
+    },
+  ])('executes a routed $task through its task-capable AGENT adapter', async ({ task, states }) => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    for (const next of states) {
+      persistTicketTransition(harness.db, {
+        ticketId: 'AG-001',
+        projectId,
+        next,
+        reason: `prepare ${task} execution test`,
+      });
+    }
+
+    const adapter = fakeAdapter({}, ['execute', task]);
+    const providerAdapter: ModelProviderAdapter = {
+      providerId: 'opencode-go',
+      family: 'opencode',
+      displayName: 'OpenCode Go',
+      probe: async () => ({
+        availability: 'available',
+        auth: 'authenticated',
+        version: 'test-provider',
+        capabilities: [task],
+      }),
+      discoverModels: async () => ({
+        status: 'known',
+        models: [{ modelId: `opencode/${task}-model`, capabilities: [task] }],
+      }),
+    };
+    const modelService = new ModelRoutingService({
+      db: harness.db,
+      projectId,
+      adapters: [providerAdapter],
+      executionAdapters: [{ modelProviderId: 'opencode-go', adapter }],
+    });
+    const prepared = await prepareAgentTaskRun(
+      {
+        ...harness.options,
+        adapter,
+        createRunId: () => `model-${task}-run`,
+      },
+      {
+        ticketId: 'AG-001',
+        provider: 'opencode',
+        modelProviderId: 'opencode-go',
+        model: `opencode/${task}-model`,
+        task,
+        instructions: `run the ${task} task through the selected route`,
+      }
+    );
+    const decision = await modelService.route({
+      runId: prepared.run.id,
+      task,
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 2,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    });
+    const target = modelService.resolveExecutionTarget(decision);
+    const execution = await executeSelectedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      target,
+      { ticketId: 'AG-001', instructions: `run the ${task} task through the selected route` }
+    );
+
+    expect(target.adapter).toBe(adapter);
+    expect(target.task).toBe(task);
+    expect(execution.run.status).toBe('SUCCEEDED');
+    expect(execution.run.modelProviderId).toBe('opencode-go');
+    expect(createTicketRepository(harness.db).findById('AG-001')?.status).toBe(states.at(-1));
+    expect(adapter.requests).toHaveLength(1);
+    expect(adapter.requests[0]?.model).toBe(`opencode/${task}-model`);
+    expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
   });
 
   it('durably recovers and releases a route when capability probing fails before launch', async () => {

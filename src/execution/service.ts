@@ -7,6 +7,7 @@ import type {
 } from '../adapters/agent/adapter.js';
 import {
   isModelExecutionAdapterBound,
+  MODEL_TASK_TO_AGENT_CAPABILITY,
   type ModelExecutionTarget,
 } from '../adapters/agent/registry.js';
 import {
@@ -15,7 +16,9 @@ import {
 } from '../domain/agent-provider.js';
 import {
   MODEL_PROVIDER_TO_AGENT_PROVIDER,
+  modelTaskTypeSchema,
   modelProviderIdSchema,
+  type ModelTaskType,
   type ModelProviderId,
 } from '../domain/model-provider.js';
 import {
@@ -31,7 +34,7 @@ import {
   type AgentRunRecord,
   type AgentRunState,
 } from '../domain/agent-run.js';
-import { TicketState } from '../core/state-machine/state.js';
+import { TicketState, type TicketStateValue } from '../core/state-machine/state.js';
 import { EventType } from '../events/event.js';
 import { createModelRepository } from '../persistence/model-repositories.js';
 import {
@@ -65,6 +68,8 @@ export type AgentTaskInput = {
   ticketId: string;
   model: string;
   instructions: string;
+  /** MODEL-001 task kind; direct AGENT-001 callers default to implementation. */
+  task?: ModelTaskType;
   provider?: AgentProvider;
   /** Concrete MODEL-001 identity when this run is selected by the router. */
   modelProviderId?: ModelProviderId;
@@ -86,7 +91,7 @@ export type AgentRunRecoveryResult = {
 
 export type AgentTaskPreparationInput = Omit<AgentTaskInput, 'runId'>;
 
-export type SelectedAgentTaskInput = Omit<AgentTaskInput, 'model' | 'provider' | 'runId'>;
+export type SelectedAgentTaskInput = Omit<AgentTaskInput, 'model' | 'provider' | 'runId' | 'task'>;
 
 /**
  * Persist a CREATED AGENT-001 run without launching a provider. MODEL-001 can
@@ -97,7 +102,7 @@ export async function prepareAgentTaskRun(
   input: AgentTaskPreparationInput
 ): Promise<AgentTaskResult> {
   const normalized = validateTaskInput(options, input);
-  const workspace = await getVerifiedExecutionWorkspace(options, input.ticketId);
+  const workspace = await getVerifiedExecutionWorkspace(options, input.ticketId, normalized.task);
   const now = options.now ?? (() => new Date().toISOString());
   const createEventId = options.createEventId ?? randomUUID;
   const createRunId = options.createRunId ?? randomUUID;
@@ -111,7 +116,7 @@ export async function prepareAgentTaskRun(
   );
   return {
     created: true,
-    run: persistCreatedRun(options, run, createEventId),
+    run: persistCreatedRun(options, run, createEventId, normalized.task),
   };
 }
 
@@ -125,7 +130,7 @@ export async function executeAgentTask(
   input: AgentTaskInput
 ): Promise<AgentTaskResult> {
   const normalized = validateTaskInput(options, input);
-  const workspace = await getVerifiedExecutionWorkspace(options, input.ticketId);
+  const workspace = await getVerifiedExecutionWorkspace(options, input.ticketId, normalized.task);
 
   const now = options.now ?? (() => new Date().toISOString());
   const createEventId = options.createEventId ?? randomUUID;
@@ -141,12 +146,13 @@ export async function executeAgentTask(
           createRunId(),
           createdAt
         ),
-        createEventId
+        createEventId,
+        normalized.task
       )
     : loadPreparedRun(options, input.runId, workspace, normalized);
   let started: AgentRunRecord;
   try {
-    started = startRun(options, persisted, createEventId, now);
+    started = startRun(options, persisted, normalized.task, createEventId, now);
   } catch (error) {
     const recovered = markRunNeedsHuman(
       options,
@@ -169,7 +175,12 @@ export async function executeAgentTask(
   // provider boundary; a persisted RUNNING row with no provider process is
   // safer than launching against drifted or substituted data.
   try {
-    const verifiedAgain = await getVerifiedWorkspaceForExecution(options, input.ticketId);
+    const verifiedAgain = await getVerifiedExecutionWorkspace(
+      options,
+      input.ticketId,
+      normalized.task,
+      true
+    );
     if (
       verifiedAgain.id !== started.workspaceId ||
       verifiedAgain.worktreePath !== started.workspacePath ||
@@ -326,6 +337,7 @@ export async function executeSelectedAgentTask(
     { ...options, adapter: target.adapter },
     {
       ...input,
+      task: target.task,
       runId: target.runId,
       provider: target.provider,
       modelProviderId: target.modelProviderId,
@@ -421,6 +433,7 @@ function validateTaskInput(
 ): {
   instructions: string;
   model: string;
+  task: ModelTaskType;
   timeoutMs: number;
   maxOutputBytes: number;
   modelProviderId?: ModelProviderId;
@@ -442,6 +455,12 @@ function validateTaskInput(
   ) {
     throw new Error(
       `Requested MODEL provider ${modelProviderId} is not served by the ${options.adapter.provider} adapter`
+    );
+  }
+  const task = modelTaskTypeSchema.parse(input.task ?? 'implementation');
+  if (!options.adapter.capabilities.includes(MODEL_TASK_TO_AGENT_CAPABILITY[task])) {
+    throw new Error(
+      `AGENT-001 adapter for ${options.adapter.provider} does not support MODEL task ${task}`
     );
   }
   const model = modelSchema.safeParse(input.model);
@@ -467,6 +486,7 @@ function validateTaskInput(
   return {
     instructions: input.instructions,
     model: input.model,
+    task,
     timeoutMs,
     maxOutputBytes,
     ...(modelProviderId === undefined ? {} : { modelProviderId }),
@@ -475,19 +495,40 @@ function validateTaskInput(
 
 async function getVerifiedExecutionWorkspace(
   options: AgentExecutionServiceOptions,
-  ticketId: string
+  ticketId: string,
+  task: ModelTaskType,
+  afterStart = false
 ): Promise<WorkspaceRecord> {
   const workspace = await getVerifiedWorkspaceForExecution(options, ticketId);
   const ticket = createTicketRepository(options.db).findById(ticketId);
   if (!ticket || ticket.projectId !== workspace.projectId) {
     throw new Error(`Ticket ${ticketId} does not belong to the verified workspace project`);
   }
-  if (ticket.status !== TicketState.PLANNING) {
+  const requiredStates = task === 'implementation' && afterStart
+    ? [TicketState.PLANNING, TicketState.IMPLEMENTING]
+    : [requiredTicketState(task)];
+  if (!requiredStates.includes(ticket.status)) {
     throw new Error(
-      `Ticket ${ticketId} has state ${ticket.status}; agent execution requires PLANNING`
+      `Ticket ${ticketId} has state ${ticket.status}; ${task} agent execution requires ${requiredStates.join(' or ')}`
     );
   }
   return workspace;
+}
+
+/**
+ * Keep MODEL-001 task execution aligned with the existing ticket lifecycle.
+ * Review and repair adapters use the same provider-neutral run contract, but
+ * must not be forced through the implementation-only PLANNING transition.
+ */
+function requiredTicketState(task: ModelTaskType): TicketStateValue {
+  switch (task) {
+    case 'implementation':
+      return TicketState.PLANNING;
+    case 'review':
+      return TicketState.REVIEWING;
+    case 'repair':
+      return TicketState.REPAIRING;
+  }
 }
 
 function buildAgentRun(
@@ -573,12 +614,19 @@ function loadPreparedRun(
 function persistCreatedRun(
   options: AgentExecutionServiceOptions,
   run: AgentRunRecord,
-  createEventId: () => string
+  createEventId: () => string,
+  task: ModelTaskType
 ): AgentRunRecord {
   const persist = options.db.transaction((): AgentRunRecord => {
     const ticket = createTicketRepository(options.db).findById(run.ticketId);
-    if (!ticket || ticket.projectId !== run.projectId || ticket.status !== TicketState.PLANNING) {
-      throw new Error(`Ticket ${run.ticketId} changed before the agent run was persisted`);
+    if (
+      !ticket ||
+      ticket.projectId !== run.projectId ||
+      ticket.status !== requiredTicketState(task)
+    ) {
+      throw new Error(
+        `Ticket ${run.ticketId} changed before the ${task} agent run was persisted`
+      );
     }
     const existing = createRunRepository(options.db).findByTicketId(run.ticketId);
     if (existing.length > 0) {
@@ -618,6 +666,7 @@ function persistCreatedRun(
 function startRun(
   options: AgentExecutionServiceOptions,
   run: AgentRunRecord,
+  task: ModelTaskType,
   createEventId: () => string,
   now: () => string
 ): AgentRunRecord {
@@ -642,16 +691,18 @@ function startRun(
     );
     if (!running) throw new Error(`Run ${run.id} could not enter RUNNING state`);
     appendRunStateChange(options, running, 'STARTING', 'RUNNING', createEventId, now());
-    persistTicketTransition(
-      options.db,
-      {
-        ticketId: running.ticketId,
-        projectId: running.projectId,
-        next: TicketState.IMPLEMENTING,
-        reason: `agent run ${running.id} started in workspace ${running.workspaceId}`,
-      },
-      { createEventId, now }
-    );
+    if (task === 'implementation') {
+      persistTicketTransition(
+        options.db,
+        {
+          ticketId: running.ticketId,
+          projectId: running.projectId,
+          next: TicketState.IMPLEMENTING,
+          reason: `agent run ${running.id} started in workspace ${running.workspaceId}`,
+        },
+        { createEventId, now }
+      );
+    }
     return requireDurableRun(repository.findById(run.id));
   }).immediate;
   return start();
