@@ -743,12 +743,24 @@ export function createModelRepository(db: DbConnection): ModelRepository {
     // path; a usage report alone must never admit a second process alongside a
     // timed-out, cancelled or otherwise ambiguous attempt.
     const run = db
-      .prepare('SELECT status FROM runs WHERE id = ? AND project_id = ?')
+      .prepare(
+        `SELECT status, timed_out, cancelled, stdout_truncated, stderr_truncated
+         FROM runs WHERE id = ? AND project_id = ?`
+      )
       .get(parsedRunId, projectId) as { status: string } | undefined;
     if (run === undefined) {
       throw new Error(`Routing decision ${routingDecisionId} has no owning run`);
     }
-    if (!TERMINAL_RUN_STATUSES.has(run.status) || !executionStopped) return false;
+    if (!TERMINAL_RUN_STATUSES.has(run.status)) return false;
+    const processOwnershipUncertain =
+      run.status === 'NEEDS_HUMAN' ||
+      run.status === 'TIMED_OUT' ||
+      run.status === 'CANCELLED' ||
+      run.timed_out === 1 ||
+      run.cancelled === 1 ||
+      run.stdout_truncated === 1 ||
+      run.stderr_truncated === 1;
+    if (processOwnershipUncertain && !executionStopped) return false;
 
     const healthRow = db
       .prepare(
