@@ -672,6 +672,75 @@ describe('AGENT-001 durable execution', () => {
     expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
   });
 
+  it('releases a bound route when the prepared workspace becomes invalid before launch', async () => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    const providerAdapter: ModelProviderAdapter = {
+      providerId: 'opencode-go',
+      family: 'opencode',
+      displayName: 'OpenCode Go',
+      probe: async () => ({
+        availability: 'available', auth: 'authenticated', version: 'test',
+        capabilities: ['implementation'],
+      }),
+      discoverModels: async () => ({
+        status: 'known',
+        models: [{ modelId: 'opencode/routed', capabilities: ['implementation'] }],
+      }),
+    };
+    const modelService = new ModelRoutingService({
+      db: harness.db,
+      projectId,
+      adapters: [providerAdapter],
+      executionAdapters: [{ modelProviderId: 'opencode-go', adapter: harness.options.adapter }],
+    });
+    const prepared = await prepareAgentTaskRun(
+      harness.options,
+      {
+        ticketId: 'AG-001',
+        provider: 'opencode',
+        modelProviderId: 'opencode-go',
+        model: 'opencode/routed',
+        instructions: 'must not launch after workspace drift',
+      }
+    );
+    const decision = await modelService.route({
+      runId: prepared.run.id,
+      task: 'implementation',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced', maxConcurrentTickets: 1,
+        activeConcurrentTickets: 0, budgetRemaining: 'unknown',
+      },
+    });
+    writeFileSync(join(harness.workspacePath, 'README.md'), '# drifted after binding\n');
+
+    await expect(modelService.executeSelectedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      modelService.resolveExecutionTarget(decision),
+      { ticketId: 'AG-001', instructions: 'a mismatched request must not release the route' }
+    )).rejects.toThrow(/does not match the execution request/);
+    expect(createRunRepository(harness.db).findById(prepared.run.id)?.status).toBe('CREATED');
+    expect(modelService.listHealth()[0]?.activeRuns).toBe(1);
+    expect(createModelRepository(harness.db).findActiveRoutingDecisionByRun(projectId, prepared.run.id))
+      .toMatchObject({ reservationStatus: 'active', runId: prepared.run.id });
+
+    const result = await modelService.executeSelectedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      modelService.resolveExecutionTarget(decision),
+      { ticketId: 'AG-001', instructions: 'must not launch after workspace drift' }
+    );
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe('workspace_invalid');
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(0);
+    expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
+    expect(createModelRepository(harness.db).findActiveRoutingDecisionByRun(projectId, prepared.run.id))
+      .toBeUndefined();
+    expect(createModelRepository(harness.db).findRoutingDecisionById(projectId, decision.id))
+      .toMatchObject({ reservationStatus: 'released', runId: prepared.run.id });
+  });
+
   it('falls back when the first selected provider becomes unavailable before binding', async () => {
     harness = await createHarness();
     const projectId = (await inspectAgentProjectId(harness)).projectId;

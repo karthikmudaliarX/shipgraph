@@ -366,6 +366,21 @@ esac
     expect(result.spawnErrorCode).toBeUndefined();
   });
 
+  it('proves no process group started when spawn fails without assigning a PID', async () => {
+    const result = await createAgentProcessRunner().run({
+      command: '/definitely/not/a/real/provider',
+      args: [],
+      cwd: process.cwd(),
+      env: {},
+      timeoutMs: 1_000,
+      maxOutputBytes: 128,
+    });
+
+    expect(result.processId).toBeUndefined();
+    expect(result.spawnErrorCode).toBe('ENOENT');
+    expect(result.processGroupStopped).toBe(true);
+  });
+
   it('rejects unsafe inherited environment controls', () => {
     expect(() => new OpenCodeAdapter({ environment: { NODE_OPTIONS: '--require evil' } })).toThrow(
       /unsafe OpenCode environment variable/

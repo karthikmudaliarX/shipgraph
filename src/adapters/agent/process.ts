@@ -245,7 +245,9 @@ type ProcessGroupSettlement = {
  * failure when the proof still cannot be obtained.
  */
 async function settleProcessGroup(pid: number | undefined): Promise<ProcessGroupSettlement> {
-  if (pid === undefined) return { stopped: false, terminationRequired: false };
+  // Node leaves pid undefined when spawn fails before an OS process is
+  // created (for example ENOENT or EACCES). There is no owned group to retain.
+  if (pid === undefined) return { stopped: true, terminationRequired: false };
   if (process.platform === 'win32') {
     // The Windows runner does not create a process group. Do not claim that a
     // normal leader exit proves descendant termination.

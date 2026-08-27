@@ -164,11 +164,31 @@ export async function executeAgentTask(
   options: AgentExecutionServiceOptions,
   input: AgentTaskInput
 ): Promise<AgentTaskResult> {
-  const normalized = validateTaskInput(options, input);
-  const workspace = await getVerifiedExecutionWorkspace(options, input.ticketId, normalized.task);
-
   const now = options.now ?? (() => new Date().toISOString());
   const createEventId = options.createEventId ?? randomUUID;
+  const normalized = validateTaskInput(options, input);
+  let workspace: Awaited<ReturnType<typeof getVerifiedExecutionWorkspace>>;
+  try {
+    workspace = await getVerifiedExecutionWorkspace(options, input.ticketId, normalized.task);
+  } catch (error) {
+    // A routed caller may have prepared and capacity-bound a CREATED run before
+    // this final workspace proof. No adapter boundary has been reached here, so
+    // process ownership is certain and the reservation can be released safely.
+    if (input.runId !== undefined) {
+      const recovered = markPreparedRunNeedsHumanBeforeLaunch(
+        options,
+        input.runId,
+        input.ticketId,
+        normalized,
+        `Prepared run could not be validated before provider launch: ${safeErrorMessage(error)}`,
+        createEventId,
+        now
+      );
+      if (recovered) return { created: true, run: recovered };
+    }
+    throw error;
+  }
+
   const createRunId = options.createRunId ?? randomUUID;
   const createdAt = now();
   const persisted = input.runId === undefined
@@ -576,19 +596,40 @@ function loadPreparedRun(
   }
 ): AgentRunRecord {
   const run = requireDurableRun(createRunRepository(options.db).findById(runId));
-  const instructionHash = createHash('sha256').update(normalized.instructions).digest('hex');
-  if (run.status !== 'CREATED') {
-    throw new Error(`Prepared agent run ${run.id} is ${run.status}; execution requires CREATED`);
-  }
+  assertPreparedRunMatchesRequest(options, run, workspace.ticketId, normalized);
   if (
     run.projectId !== workspace.projectId ||
-    run.ticketId !== workspace.ticketId ||
     run.workspaceId !== workspace.id ||
     run.workspacePath !== workspace.worktreePath ||
     run.baseSha !== workspace.baseSha ||
     run.branchName !== workspace.branchName
   ) {
     throw new Error(`Prepared agent run ${run.id} does not match the verified workspace`);
+  }
+  return run;
+}
+
+function assertPreparedRunMatchesRequest(
+  options: AgentExecutionServiceOptions,
+  run: AgentRunRecord,
+  ticketId: string,
+  normalized: {
+    instructions: string;
+    model: string;
+    task: ModelTaskType;
+    timeoutMs: number;
+    modelProviderId?: ModelProviderId;
+  }
+): void {
+  const instructionHash = createHash('sha256').update(normalized.instructions).digest('hex');
+  if (run.status !== 'CREATED') {
+    throw new Error(`Prepared agent run ${run.id} is ${run.status}; execution requires CREATED`);
+  }
+  if (
+    run.projectId !== getCurrentProjectId(options) ||
+    run.ticketId !== ticketId
+  ) {
+    throw new Error(`Prepared agent run ${run.id} does not match the current project/ticket`);
   }
   if (run.provider !== options.adapter.provider || run.model !== normalized.model) {
     throw new Error(`Prepared agent run ${run.id} does not match the selected provider/model`);
@@ -602,7 +643,33 @@ function loadPreparedRun(
   if (run.instructionsSha256 !== instructionHash || run.timeoutMs !== normalized.timeoutMs) {
     throw new Error(`Prepared agent run ${run.id} does not match the execution request`);
   }
-  return run;
+}
+
+function markPreparedRunNeedsHumanBeforeLaunch(
+  options: AgentExecutionServiceOptions,
+  runId: string,
+  ticketId: string,
+  normalized: Parameters<typeof assertPreparedRunMatchesRequest>[3],
+  reason: string,
+  createEventId: () => string,
+  now: () => string
+): AgentRunRecord | undefined {
+  const recover = options.db.transaction(() => {
+    const run = requireDurableRun(createRunRepository(options.db).findById(runId));
+    // Re-prove identity and CREATED state inside the same write transaction
+    // that terminalizes the run and releases its never-launched reservation.
+    assertPreparedRunMatchesRequest(options, run, ticketId, normalized);
+    return markRunNeedsHuman(
+      options,
+      run.id,
+      reason,
+      createEventId,
+      now,
+      'workspace_invalid',
+      true
+    );
+  }).immediate;
+  return recover();
 }
 
 function persistCreatedRun(
