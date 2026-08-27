@@ -180,6 +180,15 @@ describe('OpenCode adapter and process boundary', () => {
     expect(redactSensitiveText('{"credential":"credential-secret"}')).toBe(
       '{"credential":"[REDACTED_SECRET]"}'
     );
+    const punctuationSecret = redactSensitiveText(
+      '{"token":"secret,with}json]punctuation"}'
+    );
+    expect(punctuationSecret).toBe('{"token":"[REDACTED_SECRET]"}');
+    expect(punctuationSecret).not.toContain('secret,with}json]punctuation');
+    const escapedPunctuationSecret = redactSensitiveText(
+      JSON.stringify({ token: 'secret,with}]"quoted' })
+    );
+    expect(escapedPunctuationSecret).toBe('{"token":"[REDACTED_SECRET]"}');
     expect(redactSensitiveText('ordinary project output')).toBe('ordinary project output');
   });
 

@@ -18,8 +18,9 @@ export function redactSensitiveText(value: string): string {
       'Bearer [REDACTED_SECRET]'
     )
     .replace(
-      /((?:["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|secret[_-]?access[_-]?key|credential[s]?|token|secret|password)["']?)\s*[:=]\s*)(["']?)[^\s"'`,;}\]]+\2/giu,
-      '$1$2[REDACTED_SECRET]$2'
+      /((?:["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|secret[_-]?access[_-]?key|credential[s]?|token|secret|password)["']?)\s*[:=]\s*)(?:(")(?:\\.|[^"\\\r\n])*\2|(')(?:\\.|[^'\\\r\n])*\3|([^\s"'`,;}\]]+))/giu,
+      (_match, prefix: string, doubleQuote: string | undefined, singleQuote: string | undefined) =>
+        `${prefix}${doubleQuote ?? singleQuote ?? ''}[REDACTED_SECRET]${doubleQuote ?? singleQuote ?? ''}`
     )
     .replace(
       /((?:\\["'](?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|secret[_-]?access[_-]?key|credential[s]?|token|secret|password)\\["'])\s*[:=]\s*)(\\["'])[^\\\r\n]*?\2/giu,
