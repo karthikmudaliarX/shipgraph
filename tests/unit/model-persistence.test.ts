@@ -152,7 +152,7 @@ describe('MODEL-001 persistence', () => {
       'KAR-1',
       '0'.repeat(40),
       'agent/model-telemetry',
-      'SUCCEEDED',
+      'CREATED',
       now,
       projectId,
       'codex',
@@ -315,5 +315,22 @@ describe('MODEL-001 persistence', () => {
       now
     )).toBe(true);
     expect(repository.listHealth(projectId)[0]?.activeRuns).toBe(0);
+  });
+
+  it('refuses to reserve provider capacity for a non-CREATED run', () => {
+    repository.replaceProviderSnapshot({
+      provider: provider(),
+      health: health({ maxConcurrentRuns: 1 }),
+      models: [model()],
+      catalogStatus: 'known',
+    });
+    db.prepare('UPDATE runs SET status = ? WHERE id = ?').run('SUCCEEDED', 'run-1');
+
+    expect(() => repository.reserveProviderCapacityAndAppendRoutingDecision(
+      decision(),
+      'run-1'
+    )).toThrow(/routing requires a CREATED run/);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM provider_capacity_reservations').get())
+      .toEqual({ count: 0 });
   });
 });

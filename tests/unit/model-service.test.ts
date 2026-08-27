@@ -48,6 +48,23 @@ function createProject(db: DbConnection): void {
     createdAt: now,
     updatedAt: now,
   });
+  createTicketRepository(db).create({
+    id: 'KAR-2',
+    projectId,
+    title: 'Model telemetry fixture 2',
+    description: 'Second fixture for concurrent provider reservations.',
+    priority: 'medium',
+    dependsOn: [],
+    scope: { allowedPaths: [], forbiddenPaths: [] },
+    acceptanceCriteria: [],
+    verification: { commands: [] },
+    risk: 'medium',
+    agent: {},
+    release: {},
+    status: 'QUEUED',
+    createdAt: now,
+    updatedAt: now,
+  });
     db.prepare(
       `INSERT INTO runs (
         id, ticket_id, base_sha, branch_name, status, started_at, project_id,
@@ -58,7 +75,7 @@ function createProject(db: DbConnection): void {
       'KAR-1',
       '0'.repeat(40),
       'agent/model-telemetry',
-      'SUCCEEDED',
+      'CREATED',
       now,
       projectId,
       'codex',
@@ -73,10 +90,10 @@ function createProject(db: DbConnection): void {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'run-2',
-      'KAR-1',
+      'KAR-2',
       '0'.repeat(40),
       'agent/model-telemetry-2',
-      'SUCCEEDED',
+      'CREATED',
       now,
       projectId,
       'codex',

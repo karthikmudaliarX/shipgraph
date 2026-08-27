@@ -395,15 +395,21 @@ export function createModelRepository(db: DbConnection): ModelRepository {
         const parsed = modelRoutingDecisionSchema.parse(decision);
         const parsedRunId = validateRunId(runId);
         const durableRun = db
-          .prepare('SELECT project_id, provider, model FROM runs WHERE id = ?')
+          .prepare('SELECT project_id, provider, model, status FROM runs WHERE id = ?')
           .get(parsedRunId) as {
             project_id: string | null;
             provider: string | null;
             model: string | null;
+            status: string;
           } | undefined;
         if (durableRun === undefined || durableRun.project_id !== parsed.projectId) {
           throw new Error(
             `Routing run ${parsedRunId} is not a durable run in project ${parsed.projectId}`
+          );
+        }
+        if (durableRun.status !== 'CREATED') {
+          throw new Error(
+            `Routing run ${parsedRunId} is ${durableRun.status}; routing requires a CREATED run`
           );
         }
         const expectedAgentProvider = MODEL_PROVIDER_TO_AGENT_PROVIDER[parsed.providerId];
