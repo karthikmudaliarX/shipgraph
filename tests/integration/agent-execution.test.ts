@@ -27,6 +27,7 @@ import { ModelRoutingService } from '../../src/model/service.js';
 import {
   executeAgentTask,
   prepareAgentTaskRun,
+  reconcileAgentRun,
   recoverAgentRun,
   type AgentExecutionServiceOptions,
 } from '../../src/execution/service.js';
@@ -98,6 +99,7 @@ function fakeAdapter(
         exitCode: 0,
         timedOut: false,
         cancelled: false,
+        processGroupStopped: true,
         stdout: JSON.stringify({ type: 'text', sessionID: 'session-test', text: 'done' }),
         stderr: '',
         stdoutTruncated: false,
@@ -272,6 +274,28 @@ describe('AGENT-001 durable execution', () => {
     ).rejects.toThrow(/already has an agent run|requires PLANNING/);
     expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(1);
     expect(createRunRepository(harness.db).findByTicketId('AG-001')).toHaveLength(1);
+  });
+
+  it('allows a new durable attempt after terminal run history while retaining the active-run guard', async () => {
+    harness = await createHarness();
+    await executeAgentTask(harness.options, {
+      ticketId: 'AG-001',
+      model: 'openai/gpt-5',
+      instructions: 'first terminal attempt',
+    });
+
+    // The lifecycle owner would normally move the ticket back to PLANNING
+    // before a new implementation attempt. This fixture only supplies that
+    // already-authorized state so the run-history invariant is isolated.
+    harness.db.prepare('UPDATE tickets SET status = ? WHERE id = ?').run('PLANNING', 'AG-001');
+    await executeAgentTask(harness.options, {
+      ticketId: 'AG-001',
+      model: 'openai/gpt-5',
+      instructions: 'second terminal attempt',
+    });
+
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(2);
+    expect(createRunRepository(harness.db).findByTicketId('AG-001')).toHaveLength(2);
   });
 
   it.each([
@@ -486,6 +510,20 @@ describe('AGENT-001 durable execution', () => {
       routingDecisionId: decision.id,
     });
     expect(modelService.listHealth()[0]?.activeRuns).toBe(1);
+
+    const reconciled = await reconcileAgentRun(
+      {
+        db: harness.db,
+        projectDir: harness.projectDir,
+        worktreeRoot: harness.worktreeRoot,
+      },
+      prepared.run.id,
+      { executionStopped: true }
+    );
+    expect(reconciled.released).toBe(true);
+    expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
+    expect(createModelRepository(harness.db).findActiveRoutingDecisionByRun(projectId, prepared.run.id))
+      .toBeUndefined();
   });
 
   it.each([
@@ -589,6 +627,111 @@ describe('AGENT-001 durable execution', () => {
     expect(adapter.requests).toHaveLength(1);
     expect(adapter.requests[0]?.model).toBe(`opencode/${task}-model`);
     expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
+  });
+
+  it('routes, binds, and executes a task through one public operation', async () => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    const providerAdapter: ModelProviderAdapter = {
+      providerId: 'opencode-go',
+      family: 'opencode',
+      displayName: 'OpenCode Go',
+      probe: async () => ({
+        availability: 'available', auth: 'authenticated', version: 'test',
+        capabilities: ['implementation'],
+      }),
+      discoverModels: async () => ({
+        status: 'known',
+        models: [{ modelId: 'opencode/routed', capabilities: ['implementation'] }],
+      }),
+    };
+    const modelService = new ModelRoutingService({
+      db: harness.db,
+      projectId,
+      adapters: [providerAdapter],
+      executionAdapters: [{ modelProviderId: 'opencode-go', adapter: harness.options.adapter }],
+    });
+
+    const result = await modelService.executeRoutedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      {
+        task: 'implementation',
+        risk: 'medium',
+        envelope: {
+          mode: 'balanced', maxConcurrentTickets: 1,
+          activeConcurrentTickets: 0, budgetRemaining: 'unknown',
+        },
+      },
+      { ticketId: 'AG-001', instructions: 'execute the selected route' }
+    );
+
+    expect(result.decision.providerId).toBe('opencode-go');
+    expect(result.run.status).toBe('SUCCEEDED');
+    expect(result.run.model).toBe('opencode/routed');
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(1);
+    expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
+  });
+
+  it('falls back when the first selected provider becomes unavailable before binding', async () => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    let codexProbeCount = 0;
+    const codexProvider: ModelProviderAdapter = {
+      providerId: 'codex', family: 'openai', displayName: 'Codex',
+      probe: async () => ({
+        availability: 'available',
+        auth: ++codexProbeCount < 3 ? 'authenticated' : 'unknown',
+        version: 'test', capabilities: ['implementation'],
+      }),
+      discoverModels: async () => ({
+        status: 'known', models: [{ modelId: 'codex/routed', capabilities: ['implementation'] }],
+      }),
+    };
+    const openCodeProvider: ModelProviderAdapter = {
+      providerId: 'opencode-go', family: 'opencode', displayName: 'OpenCode Go',
+      probe: async () => ({
+        availability: 'available', auth: 'authenticated', version: 'test',
+        capabilities: ['implementation'],
+      }),
+      discoverModels: async () => ({
+        status: 'known', models: [{ modelId: 'opencode/fallback', capabilities: ['implementation'] }],
+      }),
+    };
+    const codexRequests: AgentExecutionRequest[] = [];
+    const codexExecution: AgentExecutionAdapter = {
+      provider: 'codex', capabilities: ['execute'],
+      probe: () => ({ available: true, version: 'test' }),
+      execute: async (request) => {
+        codexRequests.push(request);
+        throw new Error('codex should lose routing before execution');
+      },
+    };
+    registerModelProviderAdapter(codexExecution, 'codex');
+    const modelService = new ModelRoutingService({
+      db: harness.db, projectId,
+      adapters: [codexProvider, openCodeProvider],
+      executionAdapters: [
+        { modelProviderId: 'codex', adapter: codexExecution },
+        { modelProviderId: 'opencode-go', adapter: harness.options.adapter },
+      ],
+    });
+
+    const result = await modelService.executeRoutedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      {
+        task: 'implementation', risk: 'medium',
+        envelope: {
+          mode: 'balanced', maxConcurrentTickets: 1,
+          activeConcurrentTickets: 0, budgetRemaining: 'unknown',
+        },
+      },
+      { ticketId: 'AG-001', instructions: 'use the healthy fallback' }
+    );
+
+    expect(result.decision.providerId).toBe('opencode-go');
+    expect(result.run.status).toBe('SUCCEEDED');
+    expect(codexRequests).toHaveLength(0);
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(1);
   });
 
   it('durably recovers and releases a route when capability probing fails before launch', async () => {

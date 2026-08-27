@@ -1,7 +1,12 @@
-import { isAbsolute } from 'node:path';
+import { basename, isAbsolute } from 'node:path';
 import type { AgentProcessResult, AgentProcessRunner } from '../agent/process.js';
 import { createAgentProcessRunner } from '../agent/process.js';
 import { redactSensitiveText } from '../agent/safety.js';
+import {
+  resolveExecutable,
+  sameExecutable,
+  type ResolvedExecutable,
+} from '../agent/command.js';
 import { compareStableStrings } from '../../utils/sorting.js';
 import {
   MODEL_CAPABILITIES,
@@ -23,6 +28,7 @@ const CAPABILITY_OUTPUT_BYTES = 8 * 1024;
 const CATALOG_OUTPUT_BYTES = 256 * 1024;
 const MAX_CATALOG_MODELS = 10_000;
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$/u;
+const SEMVER_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
 
 export type ModelProviderProcessRunner = Pick<AgentProcessRunner, 'run'>;
 
@@ -73,6 +79,12 @@ export type CommandModelProviderAdapterOptions = {
   authenticatedOutputTokens?: readonly string[];
   /** Output markers that explicitly report that the provider is not logged in. */
   unauthenticatedOutputTokens?: readonly string[];
+  /** Tokens that identify the provider in its version output, when available. */
+  requiredVersionTokens?: readonly string[];
+  /** Optional provider-specific version identity format. */
+  versionPattern?: RegExp;
+  /** Name the configured command must have before it is considered this provider. */
+  expectedExecutableName?: string;
   processRunner?: ModelProviderProcessRunner;
   cwd?: string;
   environment?: Readonly<Record<string, string>>;
@@ -112,10 +124,15 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
   private readonly authArgs: readonly string[] | undefined;
   private readonly authenticatedOutputTokens: readonly string[] | undefined;
   private readonly unauthenticatedOutputTokens: readonly string[];
+  private readonly requiredVersionTokens: readonly string[];
+  private readonly versionPattern: RegExp | undefined;
+  private readonly expectedExecutableName: string | undefined;
   private readonly processRunner: ModelProviderProcessRunner;
   private readonly cwd: string;
   private readonly environment: Readonly<Record<string, string>>;
   private readonly capabilities: readonly ModelCapability[];
+  private readonly enforceExecutableProvenance: boolean;
+  private resolvedExecutable: ResolvedExecutable | undefined;
 
   public constructor(options: CommandModelProviderAdapterOptions) {
     this.providerId = modelProviderIdSchema.parse(options.providerId);
@@ -132,6 +149,15 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
     this.unauthenticatedOutputTokens = (options.unauthenticatedOutputTokens ?? []).map((token) =>
       validateText(token, 'provider unauthenticated output token', 1_024)
     );
+    this.requiredVersionTokens = (options.requiredVersionTokens ?? []).map((token) =>
+      validateText(token, 'provider version identity token', 256)
+    );
+    this.versionPattern = options.versionPattern === undefined
+      ? undefined
+      : new RegExp(options.versionPattern.source, options.versionPattern.flags.replace('g', ''));
+    this.expectedExecutableName = options.expectedExecutableName === undefined
+      ? undefined
+      : validateText(options.expectedExecutableName, 'provider executable name', 256);
     if (this.authArgs !== undefined && this.authArgs.length === 0) {
       throw new Error('provider authentication probe must define command arguments');
     }
@@ -155,6 +181,11 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
       MODEL_PROVIDER_CREDENTIAL_ENVIRONMENT_KEYS[this.providerId]
     );
     this.capabilities = normalizeCapabilities(options.capabilities ?? MODEL_CAPABILITIES);
+    // A custom runner is a deliberate dependency-injection boundary used by
+    // tests and embedding applications. Production metadata probes resolve
+    // and pin the executable before any provider credential crosses the
+    // process boundary.
+    this.enforceExecutableProvenance = options.processRunner === undefined;
   }
 
   public async probe(): Promise<ProviderProbeResult> {
@@ -175,6 +206,32 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
       };
     }
 
+    this.resolvedExecutable = undefined;
+    if (
+      this.expectedExecutableName !== undefined &&
+      basename(this.executable) !== this.expectedExecutableName
+    ) {
+      return {
+        availability: 'unavailable',
+        auth: 'unknown',
+        capabilities: [],
+        reason:
+          `provider executable name ${basename(this.executable)} ` +
+          `does not match ${this.expectedExecutableName}`,
+      };
+    }
+    const resolved = this.enforceExecutableProvenance
+      ? resolveExecutable(this.executable, this.cwd, this.environment.PATH)
+      : undefined;
+    if (this.enforceExecutableProvenance && resolved === undefined) {
+      return {
+        availability: 'unavailable',
+        auth: 'unknown',
+        capabilities: [],
+        reason: 'provider executable was not found or is not executable',
+      };
+    }
+    this.resolvedExecutable = resolved;
     const result = await this.run(['--version'], PROBE_TIMEOUT_MS, PROBE_OUTPUT_BYTES);
     if (result.spawnErrorCode === 'ENOENT') {
       return {
@@ -219,11 +276,37 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
       };
     }
 
-    const version = firstOutputLine(result.stdout);
+    const versionOutput = `${result.stdout}\n${result.stderr}`;
+    const missingVersionToken = this.requiredVersionTokens.find(
+      (token) => !versionOutput.includes(token)
+    );
+    if (missingVersionToken !== undefined) {
+      this.resolvedExecutable = undefined;
+      return {
+        availability: 'unknown',
+        auth: 'unknown',
+        capabilities: [],
+        reason: `provider version probe did not identify the expected executable (missing ${missingVersionToken})`,
+      };
+    }
+    const version = firstOutputLine(result.stdout || result.stderr);
+    if (
+      this.versionPattern !== undefined &&
+      (version === undefined || !this.versionPattern.test(version))
+    ) {
+      this.resolvedExecutable = undefined;
+      return {
+        availability: 'unknown',
+        auth: 'unknown',
+        capabilities: [],
+        reason: 'provider version probe did not match the expected identity format',
+      };
+    }
     const capabilities = this.capabilityArgs === undefined
       ? { status: 'known' as const, capabilities: this.capabilities }
       : await this.probeCapabilities();
     if (capabilities.status === 'unknown') {
+      this.resolvedExecutable = undefined;
       return {
         availability: 'unknown',
         auth: 'unknown',
@@ -272,14 +355,30 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
     timeoutMs: number,
     maxOutputBytes: number
   ): Promise<AgentProcessResult> {
+    const executable = this.executableForProbe();
     return this.processRunner.run({
-      command: this.executable as string,
+      command: executable,
       args,
       cwd: this.cwd,
       env: this.environment,
       timeoutMs,
       maxOutputBytes,
     });
+  }
+
+  private executableForProbe(): string {
+    if (this.executable === undefined) {
+      throw new Error('provider metadata probe requires a configured executable');
+    }
+    if (!this.enforceExecutableProvenance) return this.executable;
+    if (this.resolvedExecutable === undefined) {
+      throw new Error('provider metadata probe requires a successful executable probe');
+    }
+    const current = resolveExecutable(this.executable, this.cwd, this.environment.PATH);
+    if (current === undefined || !sameExecutable(current, this.resolvedExecutable)) {
+      throw new Error('provider metadata executable provenance changed; refusing probe');
+    }
+    return current.path;
   }
 
   private async probeCapabilities(): Promise<CapabilityProbeResult> {
@@ -381,6 +480,9 @@ export function createModelProviderAdapters(options: {
     authArgs?: readonly string[];
     authenticatedOutputTokens?: readonly string[];
     unauthenticatedOutputTokens?: readonly string[];
+    requiredVersionTokens?: readonly string[];
+    versionPattern?: RegExp;
+    expectedExecutableName?: string;
   }> = {
     'opencode-go': {
       executable: 'opencode',
@@ -388,15 +490,25 @@ export function createModelProviderAdapters(options: {
       authArgs: ['auth', 'list'],
       authenticatedOutputTokens: ['OpenCode Go'],
       unauthenticatedOutputTokens: ['0 credentials'],
+      expectedExecutableName: 'opencode',
+      versionPattern: SEMVER_VERSION_PATTERN,
     },
     codex: {
       executable: 'codex',
       authArgs: ['login', 'status'],
       authenticatedOutputTokens: ['Logged in'],
       unauthenticatedOutputTokens: ['Not logged in'],
+      expectedExecutableName: 'codex',
+      requiredVersionTokens: ['codex-cli'],
     },
-    grok: {},
-    gemini: {},
+    grok: {
+      expectedExecutableName: 'grok',
+      requiredVersionTokens: ['grok'],
+    },
+    gemini: {
+      expectedExecutableName: 'agy',
+      versionPattern: SEMVER_VERSION_PATTERN,
+    },
   };
   const configuration = options.configuration ?? {};
   const configurationByProvider: Record<ModelProviderId, ModelProviderAdapterConfiguration | undefined> = {
@@ -420,6 +532,9 @@ export function createModelProviderAdapters(options: {
         configured?.authenticatedOutputTokens ?? defaultsForProvider.authenticatedOutputTokens,
       unauthenticatedOutputTokens:
         configured?.unauthenticatedOutputTokens ?? defaultsForProvider.unauthenticatedOutputTokens,
+      requiredVersionTokens: defaultsForProvider.requiredVersionTokens,
+      versionPattern: defaultsForProvider.versionPattern,
+      expectedExecutableName: defaultsForProvider.expectedExecutableName,
       ...(options.processRunner === undefined ? {} : { processRunner: options.processRunner }),
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       ...(options.environment === undefined ? {} : { environment: options.environment }),

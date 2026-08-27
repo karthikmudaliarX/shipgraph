@@ -407,14 +407,11 @@ function buildHealth(
     projectId,
     providerId,
     status,
-    // An unknown auth probe supersedes a prior failure, but never upgrades to
-    // authenticated without positive evidence. This lets transient auth
-    // failures recover without pretending the provider is logged in.
-    auth: probe.auth === 'unknown'
-      ? previous?.auth === 'unauthenticated'
-        ? UNKNOWN
-        : previous?.auth ?? UNKNOWN
-      : probe.auth,
+    // Authentication is a current positive fact, not sticky health history.
+    // A fresh ambiguous probe must immediately revoke routability; otherwise a
+    // provider that logged out or changed credentials could keep using a stale
+    // authenticated value until some later successful refresh.
+    auth: probe.auth === 'unknown' ? UNKNOWN : probe.auth,
     quotaPressure: probe.quotaPressure ?? previous?.quotaPressure ?? UNKNOWN,
     // A refresh without current numeric/reset evidence must not keep routing
     // on a stale quota observation. Preserve qualitative pressure from the

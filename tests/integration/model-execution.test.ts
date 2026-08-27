@@ -35,6 +35,7 @@ function result(overrides: Partial<AgentProcessResult> = {}): AgentProcessResult
     unexpectedTermination: false,
     timedOut: false,
     cancelled: false,
+    processGroupStopped: true,
     outputLimitExceeded: false,
     stdout: '',
     stderr: '',
@@ -81,6 +82,7 @@ function executionTestAdapter(
       outcome: 'SUCCEEDED' as const,
       timedOut: false,
       cancelled: false,
+      processGroupStopped: true,
       stdout: '',
       stderr: '',
       stdoutTruncated: false,
@@ -423,7 +425,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
     expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
   });
 
-  it('retains provider capacity after normalization discovers truncated output', async () => {
+  it('retains provider capacity solely when process ownership remains uncertain', async () => {
     const projectDir = mkdtempSync(join(tmpdir(), 'shipgraph-model-timeout-src-'));
     const worktreeRoot = mkdtempSync(join(tmpdir(), 'shipgraph-model-timeout-root-'));
     temporaryDirectories.push(projectDir, worktreeRoot);
@@ -461,7 +463,8 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
           outcome: 'FAILED' as const,
           timedOut: false,
           cancelled: false,
-          stdout: 'x'.repeat(256),
+          processGroupStopped: false,
+          stdout: 'provider failed',
           stderr: '',
           stdoutTruncated: false,
           stderrTruncated: false,
@@ -494,7 +497,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
         provider: 'codex',
         modelProviderId: 'codex',
         model: 'codex/dynamic-model',
-        instructions: 'exercise normalized output reservation retention',
+        instructions: 'exercise uncertain process ownership reservation retention',
         timeoutMs: 1_000,
       }
     );
@@ -514,13 +517,13 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
       modelService.resolveExecutionTarget(decision),
       {
         ticketId: workspace.workspace.ticketId,
-        instructions: 'exercise normalized output reservation retention',
+        instructions: 'exercise uncertain process ownership reservation retention',
         timeoutMs: 1_000,
       }
     );
 
     expect(result.run.status).toBe('FAILED');
-    expect(result.run.stdoutTruncated).toBe(true);
+    expect(result.run.stdoutTruncated).toBe(false);
     expect(modelService.listHealth()[0]?.activeRuns).toBe(1);
     expect(createModelRepository(db).findActiveRoutingDecisionByRun(project.id, prepared.run.id))
       .toMatchObject({ reservationStatus: 'active', runId: prepared.run.id });

@@ -157,7 +157,11 @@ export async function probeCommandSurface(
  */
 export class CommandAgentExecutionAdapter implements AgentExecutionAdapter {
   public readonly provider: AgentProvider;
-  public readonly capabilities = ['execute'] as const;
+  // These provider CLIs expose one generic headless coding surface. MODEL-001
+  // supplies the task-specific instructions at the provider-neutral boundary,
+  // so the same capability-probed surface can perform implementation, review,
+  // and repair without inventing provider-specific task flags.
+  public readonly capabilities = ['execute', 'review', 'repair'] as const;
 
   private readonly displayName: string;
   private readonly enabled: boolean;
@@ -309,6 +313,7 @@ export function normalizeCommandResult(
       : { terminationSignal: result.terminationSignal }),
     timedOut: result.timedOut,
     cancelled: result.cancelled,
+    processGroupStopped: result.processGroupStopped === true,
     stdout: redactSensitiveText(result.stdout),
     stderr: redactSensitiveText(result.stderr),
     stdoutTruncated: result.stdoutTruncated,

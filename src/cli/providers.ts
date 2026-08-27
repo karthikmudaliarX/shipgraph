@@ -161,7 +161,7 @@ export function parseMode(value: string): ModelRoutingMode {
   return normalized as ModelRoutingMode;
 }
 
-function parseKnownNumber(value: string): number | 'unknown' {
+export function parseKnownNumber(value: string): number | 'unknown' {
   if (value.toLowerCase() === 'unknown') return 'unknown';
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) {
@@ -170,7 +170,7 @@ function parseKnownNumber(value: string): number | 'unknown' {
   return parsed;
 }
 
-function parseKnownInteger(value: string): number | 'unknown' {
+export function parseKnownInteger(value: string): number | 'unknown' {
   const parsed = parseKnownNumber(value);
   if (parsed !== 'unknown' && !Number.isInteger(parsed)) {
     throw new Error(`Expected a non-negative integer or unknown, received: ${value}`);

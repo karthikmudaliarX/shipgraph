@@ -80,7 +80,10 @@ type ParsedOpenCodeOutput = {
 /** First concrete adapter for the provider-neutral AGENT-001 boundary. */
 export class OpenCodeAdapter implements AgentExecutionAdapter {
   public readonly provider = OPENCODE_PROVIDER;
-  public readonly capabilities = ['execute'] as const;
+  // OpenCode's verified headless coding surface is task-neutral; the
+  // provider-neutral request carries implementation, review, or repair
+  // instructions explicitly.
+  public readonly capabilities = ['execute', 'review', 'repair'] as const;
 
   private readonly enabled: boolean;
   private readonly executable: string;
@@ -215,6 +218,7 @@ function normalizeOpenCodeResult(result: AgentProcessResult): AgentExecutionResu
       : { terminationSignal: result.terminationSignal }),
     timedOut: result.timedOut,
     cancelled: result.cancelled,
+    processGroupStopped: result.processGroupStopped === true,
     stdout: redactSensitiveText(result.stdout),
     stderr: redactSensitiveText(result.stderr),
     stdoutTruncated: result.stdoutTruncated,

@@ -151,6 +151,9 @@ shipgraph agent run AG-001 --model <discovered-provider/model> --instructions "I
 # Explicitly select the shared ACP boundary's Antigravity adapter
 shipgraph agent run AG-001 --provider acp --model-provider gemini --model <discovered-provider/model> --instructions "Implement the approved task"
 
+# Let MODEL-001 select, reserve, and execute the provider in one operation
+shipgraph agent run-routed AG-001 --task implementation --risk medium --mode balanced --max-concurrent-tickets 2 --active-concurrent-tickets 0 --instructions "Implement the approved task"
+
 # Refresh capability-probed provider and model metadata
 shipgraph providers refresh --json
 
@@ -158,7 +161,9 @@ shipgraph providers refresh --json
 # Retries without --request-id use the durable run ID as their stable key
 shipgraph providers route implementation --risk medium --mode balanced --run-id <run-id> --json
 # After a terminal run releases that reservation, use a new request ID for a new attempt. Explicit recovery retains it for human reconciliation.
-# Usage records model telemetry and is idempotent for an already released slot.
+# After independently proving the provider process stopped, release retained capacity explicitly:
+shipgraph agent reconcile <run-id> --execution-stopped
+# Usage records telemetry only; it never releases provider capacity.
 
 # Inspect persisted provider health and discovered models
 shipgraph providers list --json
@@ -173,6 +178,10 @@ has initialized the database, both `init` and `status` fail closed if the file's
 identity or validated configuration drifts from the persisted project.
 
 Provider settings identify executable and catalog surfaces, not model names.
+They are trusted local configuration: do not point them at repository-supplied
+or otherwise untrusted executables. OpenCode, Codex and Antigravity may use the
+current user's HOME/XDG stores for existing CLI authentication; ShipGraph's
+environment filtering is not host-filesystem or credential-store isolation.
 OpenCode, Codex, Grok and Antigravity (`agy`) have conservative execution
 defaults; Grok uses its `workspace` sandbox profile and Antigravity uses its
 supported `--sandbox` mode. Configure a provider's machine-readable

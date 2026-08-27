@@ -27,7 +27,9 @@ import {
 } from './registry.js';
 import { ModelRouter } from './router.js';
 import {
+  abandonPreparedAgentTaskRun,
   executeAgentTask,
+  prepareAgentTaskRun,
   type AgentExecutionServiceOptions,
   type AgentTaskResult,
   type SelectedAgentTaskInput,
@@ -67,6 +69,10 @@ export type UsageRecordResult = {
   entry: ReturnType<UsageLedger['append']>;
   health: ProviderHealthRecord;
   refreshed: boolean;
+};
+
+export type RoutedAgentTaskResult = AgentTaskResult & {
+  decision: ModelRoutingDecision;
 };
 
 /** Facade for the bounded MODEL-001 control-plane operations. */
@@ -292,6 +298,60 @@ export class ModelRoutingService {
     );
   }
 
+  /** Select, durably bind, and execute one agent task without caller-managed routing choreography. */
+  public async executeRoutedAgentTask(
+    options: Omit<AgentExecutionServiceOptions, 'adapter'>,
+    routingInput: Omit<ModelRoutingRequest, 'runId'>,
+    input: SelectedAgentTaskInput
+  ): Promise<RoutedAgentTaskResult> {
+    const request = modelRoutingRequestSchema.parse(routingInput);
+    const excluded = new Set(request.excludeProviders ?? []);
+    await this.registry.refresh();
+    const providerCount = Math.max(this.registry.list().length, 1);
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < providerCount; attempt += 1) {
+      const preview = await this.route({ ...request, excludeProviders: [...excluded] });
+      const target = this.resolveExecutionTarget(preview);
+      const prepared = await prepareAgentTaskRun(
+        { ...options, adapter: this.createExecutionAdapter(target) },
+        {
+          ...input,
+          task: target.task,
+          provider: target.provider,
+          modelProviderId: target.modelProviderId,
+          model: target.modelId,
+        }
+      );
+      const otherProviders = this.registry.list()
+        .map((provider) => provider.providerId)
+        .filter((providerId) => providerId !== target.modelProviderId);
+      let decision: ModelRoutingDecision;
+      try {
+        decision = await this.route({
+          ...request,
+          runId: prepared.run.id,
+          excludeProviders: otherProviders,
+        });
+      } catch (error) {
+        lastError = error;
+        await abandonPreparedAgentTaskRun(
+          options,
+          prepared.run.id,
+          `Selected provider could not be reserved before launch: ${error instanceof Error ? error.message : String(error)}`
+        );
+        excluded.add(target.modelProviderId);
+        continue;
+      }
+      const executionTarget = this.resolveExecutionTarget(decision);
+      const result = await this.executeSelectedAgentTask(options, executionTarget, input);
+      return { ...result, decision };
+    }
+    throw new Error(
+      `No routed provider could be bound to a durable run: ${lastError instanceof Error ? lastError.message : String(lastError)}`
+    );
+  }
+
   public async recordUsage(input: UsageRecordInput): Promise<UsageRecordResult> {
     if (input.providerError !== undefined && !PROVIDER_ERROR_KINDS.includes(input.providerError)) {
       throw new Error(`Unsupported provider error kind: ${String(input.providerError)}`);
@@ -322,17 +382,8 @@ export class ModelRoutingService {
         cost: input.cost,
         quotaRemaining: input.quotaRemaining,
       });
-      if (input.routingDecisionId !== undefined) {
-        // Finalize this specific model route, not an unrelated durable run.
-        this.repository.releaseProviderCapacity(
-          this.options.projectId,
-          entry.runId,
-          input.routingDecisionId,
-          entry.providerId,
-          entry.modelId,
-          this.now()
-        );
-      }
+      // Usage is telemetry, not proof of process ownership. Capacity is
+      // released only by execution finalization or explicit reconciliation.
       const current = this.repository.findHealth(this.options.projectId, entry.providerId);
       const health = healthAfterUsage(
         current,

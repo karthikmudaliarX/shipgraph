@@ -10,6 +10,8 @@ import { emitReady, showReady } from './ready.js';
 import {
   modelServiceOptions,
   parseMode,
+  parseKnownInteger,
+  parseKnownNumber,
   parseRisk,
   parseTask,
   providerIdForCli,
@@ -40,7 +42,9 @@ import {
   agentServiceOptions,
   runAgentInspect,
   runAgentList,
+  runAgentReconcile,
   runAgentRecover,
+  runRoutedAgentTask,
   runAgentTask,
 } from './agent.js';
 import { assertSafeShipgraphPaths } from '../utils/paths.js';
@@ -570,6 +574,63 @@ export function createProgram(): Command {
     });
 
   agent
+    .command('run-routed <ticket-id>')
+    .description('Select, reserve, and execute one provider through MODEL-001 routing')
+    .requiredOption('--task <task>', 'implementation, review, or repair')
+    .requiredOption('--risk <risk>', 'low, medium, high, or critical')
+    .requiredOption('--mode <mode>', 'eco, balanced, or max')
+    .requiredOption('--instructions <text>', 'instructions supplied to the coding agent')
+    .requiredOption('--max-concurrent-tickets <count>', 'global execution capacity')
+    .requiredOption('--active-concurrent-tickets <count>', 'currently active global executions')
+    .option('--budget-remaining <value>', 'known budget value or unknown', 'unknown')
+    .option('--timeout-ms <milliseconds>', 'execution timeout', String(DEFAULT_AGENT_TIMEOUT_MS))
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--worktree-root <path>', 'ShipGraph worktree root override')
+    .option('--json', 'output the decision and durable run as JSON')
+    .action(async (ticketId: string, options: {
+      task: string; risk: string; mode: string; instructions: string;
+      maxConcurrentTickets: string; activeConcurrentTickets: string; budgetRemaining: string;
+      timeoutMs: string; projectDir?: string; worktreeRoot?: string; json?: boolean;
+    }) => {
+      let db: DbConnection | undefined;
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        db = openInitializedDatabase(projectDir);
+        const report = await runRoutedAgentTask(
+          modelServiceOptions(db, projectDir),
+          workspaceServiceOptions(db, projectDir, options.worktreeRoot),
+          {
+            task: parseTask(options.task),
+            risk: parseRisk(options.risk),
+            envelope: {
+              mode: parseMode(options.mode),
+              maxConcurrentTickets: parseKnownInteger(options.maxConcurrentTickets),
+              activeConcurrentTickets: parseKnownInteger(options.activeConcurrentTickets),
+              budgetRemaining: parseKnownNumber(options.budgetRemaining),
+            },
+          },
+          {
+            ticketId,
+            instructions: options.instructions,
+            timeoutMs: parsePositiveInteger(options.timeoutMs, 'timeout-ms'),
+          }
+        );
+        if (options.json) console.log(JSON.stringify(report, null, 2));
+        else {
+          const decision = report.decision as Record<string, unknown>;
+          const run = report.run as Record<string, unknown>;
+          console.log(`Agent run ${String(run.id)} ${String(run.status).toLowerCase()}.`);
+          console.log(`Route: ${String(decision.providerId)}/${String(decision.modelId)}`);
+        }
+        if ((report.run as Record<string, unknown>).status !== 'SUCCEEDED') process.exitCode = 1;
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
+        db?.close();
+      }
+    });
+
+  agent
     .command('inspect <run-id>')
     .description('Inspect one durable agent run')
     .option('--project-dir <path>', 'target project directory', process.cwd())
@@ -648,6 +709,32 @@ export function createProgram(): Command {
         }
         if ((report.run as Record<string, unknown>).status !== 'SUCCEEDED') {
           process.exitCode = 1;
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
+        db?.close();
+      }
+    });
+
+  agent
+    .command('reconcile <run-id>')
+    .description('Release retained provider capacity after independently proving execution stopped')
+    .requiredOption('--execution-stopped', 'confirm that no provider process for this run remains')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--json', 'output the reconciliation result as JSON')
+    .action(async (runId: string, options: { executionStopped: boolean; projectDir?: string; json?: boolean }) => {
+      let db: DbConnection | undefined;
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        db = openInitializedDatabase(projectDir);
+        const report = await runAgentReconcile(workspaceServiceOptions(db, projectDir), runId);
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          console.log(report.released
+            ? `Released retained provider capacity for run ${runId}.`
+            : `Run ${runId} has no active provider reservation.`);
         }
       } catch (error) {
         emitCommandError(error, options.json);

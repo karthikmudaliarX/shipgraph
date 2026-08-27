@@ -66,6 +66,13 @@ mode, disabled web/MCP tools, and a deny-by-default permission mode with only
 the local coding tools explicitly allowed. If the installed Grok surface does
 not expose those controls, it remains unavailable rather than being routed.
 
+The configured provider executable and the user's local CLI configuration are
+an explicit trusted-host seam. ShipGraph prevents accidental cross-provider
+environment-variable leakage, but OpenCode, Codex and Antigravity may read the
+user HOME/XDG stores needed for an existing CLI login. ShipGraph does not claim
+credential-store or host-filesystem isolation. Only trusted local configuration
+may select executable paths or provider command arguments.
+
 MODEL-001 adds a separate metadata boundary for the paid engineering pools:
 OpenCode Go, Codex, Grok and Gemini. `ModelProviderAdapter` implementations
 capability-probe their local/provider surface and may expose a current model
@@ -91,7 +98,10 @@ implementation, review or repair only when its AGENT-001 adapter is available
 and the provider has positively authenticated,
 persists its reason, and atomically reserves the selected provider's capacity
 when the caller supplies a durable execution run whose provider/model
-identity matches the selected target. Known limits are enforced directly; an
+identity matches the selected target. The production routed-run operation owns
+preview, binding, reservation and execution so callers cannot create a
+provider/model mismatch; a changed-capacity candidate is safely abandoned and
+excluded before retry. Known limits are enforced directly; an
 unknown provider limit uses a conservative one-at-a-time local admission
 bound, not a quota estimate. A route without a run ID is a
 non-persistent decision preview and does not claim provider capacity.
@@ -108,9 +118,12 @@ Review routing prefers a different provider family from the implementation when
 one is available. `UsageLedger` is append-only, accepts only durable run IDs
 from the current project, records per-run/provider/model telemetry without raw
 provider output or credentials. A normal terminal result releases its
-execution-bound provider reservation. Timeout, cancellation, output-limit
-termination and explicit recovery retain the slot when provider-process
-ownership cannot be proven; usage finalization alone cannot release it. Each
+execution-bound provider reservation only when the adapter proves that its
+owned provider process group stopped. Timeout, cancellation, output-limit
+termination, an abnormal surviving descendant and explicit recovery retain
+the slot when provider-process ownership cannot be proven; usage finalization
+alone cannot release it. An operator may release retained capacity only through
+explicit reconciliation after independently proving execution stopped. Each
 durable AGENT run owns one provider attempt; a later attempt requires a new
 CREATED run and request ID.
 

@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 
 const TERMINATION_GRACE_MS = 1_000;
+const PROCESS_GROUP_POLL_MS = 25;
 
 export type AgentProcessSpec = {
   command: string;
@@ -22,6 +23,8 @@ export type AgentProcessResult = {
   unexpectedTermination: boolean;
   timedOut: boolean;
   cancelled: boolean;
+  /** False when an owned provider process group could not be proven stopped. */
+  processGroupStopped?: boolean;
   outputLimitExceeded: boolean;
   stdout: string;
   stderr: string;
@@ -82,6 +85,7 @@ export const defaultAgentProcessRunner: AgentProcessRunner = {
         unexpectedTermination: false,
         timedOut: false,
         cancelled: true,
+        processGroupStopped: true,
         outputLimitExceeded: false,
         stdout: '',
         stderr: '',
@@ -107,6 +111,7 @@ export const defaultAgentProcessRunner: AgentProcessRunner = {
         unexpectedTermination: false,
         timedOut: false,
         cancelled: false,
+        processGroupStopped: true,
         outputLimitExceeded: false,
         stdout: '',
         stderr: '',
@@ -178,23 +183,32 @@ export const defaultAgentProcessRunner: AgentProcessRunner = {
       if (forceKillHandle !== undefined) clearTimeout(forceKillHandle);
       spec.signal?.removeEventListener('abort', onAbort);
 
-      resolveResult({
-        processId: child.pid ?? undefined,
-        ...(exitCode === null ? {} : { exitCode }),
-        ...(signal === null ? {} : { terminationSignal: signal }),
-        ...(spawnErrorCode === undefined ? {} : { spawnErrorCode }),
-        ...(startError === undefined ? {} : { startError }),
-        unexpectedTermination:
-          terminationReason === undefined && exitCode === null && signal === null,
-        timedOut: terminationReason === 'timeout',
-        cancelled: terminationReason === 'cancelled',
-        outputLimitExceeded: stdout.truncated || stderr.truncated,
-        stdout: stdout.text(),
-        stderr: stderr.text(),
-        stdoutTruncated: stdout.truncated,
-        stderrTruncated: stderr.truncated,
-        durationMs: Date.now() - startedAt,
-      });
+      void (async () => {
+        const group = await settleProcessGroup(child.pid);
+        resolveResult({
+          processId: child.pid ?? undefined,
+          ...(exitCode === null ? {} : { exitCode }),
+          ...(signal === null ? {} : { terminationSignal: signal }),
+          ...(spawnErrorCode === undefined ? {} : { spawnErrorCode }),
+          ...(startError === undefined ? {} : { startError }),
+          // A leader that exits while a descendant remains in the owned group
+          // is not a clean provider completion. The descendants are terminated
+          // and the result records the abnormal hand-off for the adapter.
+          unexpectedTermination:
+            (terminationReason === undefined && exitCode === null && signal === null) ||
+            group.terminationRequired ||
+            !group.stopped,
+          timedOut: terminationReason === 'timeout',
+          cancelled: terminationReason === 'cancelled',
+          processGroupStopped: group.stopped,
+          outputLimitExceeded: stdout.truncated || stderr.truncated,
+          stdout: stdout.text(),
+          stderr: stderr.text(),
+          stdoutTruncated: stdout.truncated,
+          stderrTruncated: stderr.truncated,
+          durationMs: Date.now() - startedAt,
+        });
+      })();
     });
 
     const timeoutHandle = setTimeout(() => terminate('timeout'), spec.timeoutMs);
@@ -216,6 +230,67 @@ export const defaultAgentProcessRunner: AgentProcessRunner = {
 
 export function createAgentProcessRunner(): AgentProcessRunner {
   return defaultAgentProcessRunner;
+}
+
+type ProcessGroupSettlement = {
+  stopped: boolean;
+  terminationRequired: boolean;
+};
+
+/**
+ * A detached provider owns a process group, not just its direct child. The
+ * child `close` event only proves that the group leader exited; a background
+ * descendant can otherwise survive and keep modifying the worktree. On POSIX,
+ * prove the group is gone, terminate the owned group if necessary, and report
+ * failure when the proof still cannot be obtained.
+ */
+async function settleProcessGroup(pid: number | undefined): Promise<ProcessGroupSettlement> {
+  if (pid === undefined) return { stopped: false, terminationRequired: false };
+  if (process.platform === 'win32') {
+    // The Windows runner does not create a process group. Do not claim that a
+    // normal leader exit proves descendant termination.
+    return { stopped: false, terminationRequired: false };
+  }
+  if (!(await waitForProcessGroupExit(pid, 0))) {
+    const terminationRequired = true;
+    signalProcessGroup(pid, 'SIGTERM');
+    if (await waitForProcessGroupExit(pid, TERMINATION_GRACE_MS)) {
+      return { stopped: true, terminationRequired };
+    }
+    signalProcessGroup(pid, 'SIGKILL');
+    return {
+      stopped: await waitForProcessGroupExit(pid, TERMINATION_GRACE_MS),
+      terminationRequired,
+    };
+  }
+  return { stopped: true, terminationRequired: false };
+}
+
+async function waitForProcessGroupExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (!processGroupExists(pid)) return true;
+    if (timeoutMs === 0) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, PROCESS_GROUP_POLL_MS));
+  } while (Date.now() <= deadline);
+  return !processGroupExists(pid);
+}
+
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return errorCode(error) === 'EPERM';
+  }
+}
+
+function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // The group may have exited between the liveness check and the signal.
+  }
 }
 
 function errorCode(error: unknown): string | undefined {

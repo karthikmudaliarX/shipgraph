@@ -333,14 +333,15 @@ describe('MODEL-001 service', () => {
     expect(service.listHealth()[0]?.quotaRemaining).toBe('unknown');
   });
 
-  it('keeps a fresh unknown auth probe non-routable after a prior auth failure', async () => {
+  it('revokes a previously authenticated provider when a fresh auth probe is unknown', async () => {
+    let probeCount = 0;
     const authUnknownAdapter: ModelProviderAdapter = {
       providerId: 'codex',
       family: 'openai',
       displayName: 'Codex',
       probe: async () => ({
         availability: 'available' as const,
-        auth: 'unknown' as const,
+        auth: probeCount++ === 0 ? 'authenticated' : 'unknown',
         version: 'test-provider',
         capabilities: ['implementation', 'review', 'repair'] as const,
       }),
@@ -358,18 +359,8 @@ describe('MODEL-001 service', () => {
     });
 
     await service.refresh();
-    await service.recordUsage({
-      runId: 'run-1',
-      providerId: 'codex',
-      modelId: 'codex/dynamic',
-      task: 'implementation',
-      retryCount: 0,
-      elapsedMs: 10,
-      outcome: 'failed',
-      outcomeQuality: 'poor',
-      providerError: 'authentication',
-    });
-
+    expect(service.listHealth()[0]?.auth).toBe('authenticated');
+    await service.refresh();
     expect(service.listHealth()[0]?.auth).toBe('unknown');
     await expect(service.route({
       task: 'implementation',
@@ -487,6 +478,10 @@ describe('MODEL-001 service', () => {
       outcomeQuality: 'good',
       routingDecisionId: winner.id,
     });
+    service.getRepository().releaseProviderCapacity(
+      projectId, reservation.run_id, winner.id, winner.providerId, winner.modelId,
+      new Date().toISOString(), true
+    );
     expect(service.listHealth()[0]?.activeRuns).toBe(0);
     const retryRunId = reservation.run_id === 'run-1' ? 'run-2' : 'run-1';
     const retry = await service.route({
@@ -509,6 +504,10 @@ describe('MODEL-001 service', () => {
       outcomeQuality: 'good',
       routingDecisionId: retry.id,
     });
+    service.getRepository().releaseProviderCapacity(
+      projectId, retryRunId, retry.id, retry.providerId, retry.modelId,
+      new Date().toISOString(), true
+    );
     expect(service.listHealth()[0]?.activeRuns).toBe(0);
   });
 
@@ -651,6 +650,10 @@ describe('MODEL-001 service', () => {
       outcomeQuality: 'good',
       routingDecisionId: first.id,
     });
+    service.getRepository().releaseProviderCapacity(
+      projectId, 'run-1', first.id, first.providerId, first.modelId,
+      new Date().toISOString(), true
+    );
     expect(service.listHealth()[0]?.activeRuns).toBe(0);
     await expect(service.route(request)).rejects.toThrow(/released capacity reservation/);
     expect(service.listRoutingDecisions()).toHaveLength(1);
@@ -876,6 +879,10 @@ describe('MODEL-001 service', () => {
       outcomeQuality: 'good',
       routingDecisionId: decision.id,
     });
+    service.getRepository().releaseProviderCapacity(
+      projectId, 'run-1', decision.id, decision.providerId, decision.modelId,
+      new Date().toISOString(), true
+    );
     expect(service.listHealth()[0]?.activeRuns).toBe(0);
     await expect(service.recordUsage({
       runId: 'run-1',

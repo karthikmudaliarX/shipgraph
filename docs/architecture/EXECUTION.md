@@ -53,6 +53,10 @@ failure reason. A routed reservation must match the prepared run's task as
 well as its project, provider and model; legacy runs without this provenance
 are not eligible for a new MODEL-001 reservation.
 The original instructions are not stored; only a SHA-256 digest is retained.
+Terminal run history is retained for auditability, but it does not by itself
+block a later explicitly authorized attempt: a new attempt must use a new
+CREATED run and request ID, and the ticket/workspace/provider checks still
+apply.
 
 SQLite owns the single-active-run invariant for a ticket. A concurrent or
 repeated invocation cannot launch a second active run. An active run left by a
@@ -68,7 +72,10 @@ whose resolved path and device/inode are pinned until launch; they invoke it
 without a shell, pin the process cwd to the verified worktree, pass the
 selected model explicitly, use a provider-scoped allow-listed environment,
 drain bounded stdout/stderr, and terminate the owned
-POSIX process group on timeout or cancellation. OpenCode and Codex JSONL, plus
+POSIX process group on completion, timeout or cancellation. A normal leader
+exit is not sufficient when a descendant keeps the owned group alive; the
+adapter settles that group and reports whether it was proven stopped. OpenCode
+and Codex JSONL, plus
 Grok and Antigravity (`agy`) JSON, are reduced to session ID, event types/count
 and a bounded summary; raw event objects are not persisted as structured
 fields; retained stdout is bounded and redacted process text. Each adapter
@@ -77,6 +84,10 @@ execution-available. Gemini's MODEL-001 identity is implemented through
 Antigravity (`agy`), not Gemini CLI. Grok uses its `workspace` sandbox profile
 and Antigravity uses its supported `--sandbox` mode; cwd alone is not treated
 as filesystem isolation.
+Provider executables and local CLI configuration are trusted host inputs.
+OpenCode, Codex and Antigravity retain HOME/XDG access for established logins;
+environment allow-listing prevents accidental variable leakage but is not a
+sandbox or credential-store isolation mechanism.
 
 MODEL-001 now owns provider metadata discovery, health, quota/usage ledger
 records and deterministic model routing in a separate control-plane subsystem.
@@ -88,9 +99,11 @@ without a run ID is a non-persistent preview. MODEL-001 resolves only an
 active reservation to an execution-bound AGENT target, and AGENT-001 consumes
 that existing CREATED run rather than creating a second unreserved run.
 Normal terminalization releases that reservation in the same SQLite
-transaction. Timeout, cancellation, output-limit termination and explicit
-recovery retain the reservation when provider-process ownership cannot be
-proven; usage finalization cannot release an active run's slot by itself.
+transaction only after the adapter proves its owned process group stopped.
+Timeout, cancellation, output-limit termination, an abnormal surviving
+descendant, and explicit recovery retain the reservation when provider-process
+ownership cannot be proven; usage finalization cannot release an active run's
+slot by itself.
 Usage finalization remains append-only and idempotent for capacity release.
 Unknown quota and usage values remain unknown.
 The AGENT-001 command remains explicit-provider execution; MODEL-001 resolves an

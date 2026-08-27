@@ -77,6 +77,8 @@ export const agentExecutionResultSchema = z.object({
   terminationSignal: z.string().min(1).max(32).optional(),
   timedOut: z.boolean(),
   cancelled: z.boolean(),
+  /** Concrete command adapters must prove their owned process group stopped. */
+  processGroupStopped: z.boolean().optional(),
   stdout: z.string().max(AGENT_OUTPUT_LIMIT_BYTES),
   stderr: z.string().max(AGENT_OUTPUT_LIMIT_BYTES),
   stdoutTruncated: z.boolean(),

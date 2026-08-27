@@ -123,6 +123,10 @@ describe('CLI smoke tests', () => {
       'workspace',
       'agent',
     ]);
+    expect(program.commands.find((command) => command.name() === 'agent')?.commands
+      .map((command) => command.name())).toContain('run-routed');
+    expect(program.commands.find((command) => command.name() === 'agent')?.commands
+      .map((command) => command.name())).toContain('reconcile');
   });
 
   it('renders human-readable status output', () => {

@@ -63,6 +63,8 @@ export type AgentExecutionResult = {
   terminationSignal?: string;
   timedOut: boolean;
   cancelled: boolean;
+  /** True only when the process runner proved the owned provider group stopped. */
+  processGroupStopped?: boolean;
   stdout: string;
   stderr: string;
   stdoutTruncated: boolean;

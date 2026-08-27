@@ -85,6 +85,11 @@ export type AgentRunRecoveryResult = {
   run: AgentRunRecord;
 };
 
+export type AgentRunReconciliationResult = {
+  released: boolean;
+  run: AgentRunRecord;
+};
+
 export type AgentTaskPreparationInput = Omit<AgentTaskInput, 'runId'>;
 
 export type SelectedAgentTaskInput = Omit<AgentTaskInput, 'model' | 'provider' | 'runId' | 'task'>;
@@ -115,6 +120,39 @@ export async function prepareAgentTaskRun(
     created: true,
     run: persistCreatedRun(options, run, createEventId, normalized.task),
   };
+}
+
+/** Terminalize a CREATED run that never acquired provider capacity. */
+export async function abandonPreparedAgentTaskRun(
+  options: WorkspaceServiceOptions,
+  runId: string,
+  reason: string
+): Promise<AgentRunRecord> {
+  const { run } = await loadCurrentDurableRun(options, runId);
+  if (run.status !== 'CREATED') {
+    throw new Error(`Run ${run.id} is ${run.status}; only CREATED runs can be abandoned`);
+  }
+  const abandon = options.db.transaction(() => {
+    const active = createModelRepository(options.db).findActiveRoutingDecisionByRun(
+      run.projectId,
+      run.id
+    );
+    if (active !== undefined) {
+      throw new Error(`Run ${run.id} owns provider capacity and cannot be abandoned`);
+    }
+    return markRunNeedsHuman(
+      options,
+      run.id,
+      reason,
+      options.createEventId ?? randomUUID,
+      options.now ?? (() => new Date().toISOString()),
+      'persistence_error',
+      false
+    );
+  }).immediate;
+  const updated = abandon();
+  if (!updated) throw new Error(`Run ${run.id} changed before it could be abandoned`);
+  return updated;
 }
 
 /**
@@ -279,16 +317,10 @@ export async function executeAgentTask(
   }
 
   const normalizedResult = normalizeAdapterResult(adapterResult, normalized.maxOutputBytes);
-  // Derive release eligibility from the normalized result, not the adapter's
-  // untrusted raw flags. Normalization can discover oversized output or a
-  // malformed/contradictory result after the adapter returns; those cases do
-  // not prove that a provider process stopped safely.
-  executionStopped =
-    normalizedResult.outcome !== 'NEEDS_HUMAN' &&
-    !normalizedResult.timedOut &&
-    !normalizedResult.cancelled &&
-    !normalizedResult.stdoutTruncated &&
-    !normalizedResult.stderrTruncated;
+  // Capacity ownership depends only on the normalized process-group proof.
+  // Outcome quality, timeout and bounded-output evidence affect the run result,
+  // but cannot keep a slot once the owned process group is proven stopped.
+  executionStopped = normalizedResult.processGroupStopped === true;
   try {
     const finalRun = finalizeRun(
       options,
@@ -354,6 +386,29 @@ export async function recoverAgentRun(
     throw new Error(`Run ${run.id} changed while recovery was being recorded`);
   }
   return { recovered: true, run: updated };
+}
+
+/**
+ * Release retained MODEL capacity only after an operator has independently
+ * established that the provider process is no longer running.
+ */
+export async function reconcileAgentRun(
+  options: WorkspaceServiceOptions,
+  runId: string,
+  confirmation: { executionStopped: true }
+): Promise<AgentRunReconciliationResult> {
+  if (confirmation.executionStopped !== true) {
+    throw new Error('Agent-run reconciliation requires proof that execution stopped');
+  }
+  const { run } = await loadCurrentDurableRun(options, runId);
+  if (isActiveRunState(run.status)) {
+    throw new Error(`Run ${run.id} is still active; recover it before reconciliation`);
+  }
+  const releasedAt = (options.now ?? (() => new Date().toISOString()))();
+  const reconcile = options.db.transaction(() =>
+    releaseActiveModelReservation(options, run, releasedAt)
+  ).immediate;
+  return { released: reconcile(), run };
 }
 
 function validateTaskInput(
@@ -570,10 +625,10 @@ function persistCreatedRun(
     if (run.task !== task) {
       throw new Error(`Agent run ${run.id} does not record the selected MODEL task`);
     }
-    const existing = createRunRepository(options.db).findByTicketId(run.ticketId);
-    if (existing.length > 0) {
+    const existing = createRunRepository(options.db).findActiveByTicket(run.projectId, run.ticketId);
+    if (existing !== undefined) {
       throw new Error(
-        `Ticket ${run.ticketId} already has an agent run; refusing duplicate execution`
+        `Ticket ${run.ticketId} already has an active agent run; refusing duplicate execution`
       );
     }
     createRunRepository(options.db).create(run);
@@ -712,9 +767,10 @@ function finalizeRun(
         ...(durableUpdated.evidence === undefined ? {} : { evidence: durableUpdated.evidence }),
       },
     });
-    // A provider adapter that returned a terminal result has proven its
-    // attempt stopped. An adapter exception leaves ownership ambiguous, so
-    // retain the reservation for reconciliation instead of releasing it.
+    // Release only when the adapter carried proof that its owned provider
+    // process group stopped. A normalized result without that proof, or an
+    // adapter exception, leaves ownership ambiguous and retains the
+    // reservation for reconciliation.
     if (executionStopped) {
       releaseActiveModelReservation(options, durableUpdated, completedAt);
     }
@@ -787,13 +843,13 @@ function releaseActiveModelReservation(
   options: WorkspaceServiceOptions,
   run: AgentRunRecord,
   releasedAt: string
-): void {
+): boolean {
   const modelRepository = createModelRepository(options.db);
   const active = modelRepository.findActiveRoutingDecisionByRun(
     run.projectId,
     run.id
   );
-  if (active === undefined) return;
+  if (active === undefined) return false;
   if (
     !active.hasReservation ||
     active.reservationStatus !== 'active' ||
@@ -813,6 +869,7 @@ function releaseActiveModelReservation(
   if (!released) {
     throw new Error(`Active routing reservation for run ${run.id} changed before release`);
   }
+  return true;
 }
 
 function appendRunStateChange(

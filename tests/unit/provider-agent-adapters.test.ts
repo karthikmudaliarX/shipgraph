@@ -31,6 +31,7 @@ function result(overrides: Partial<AgentProcessResult> = {}): AgentProcessResult
     unexpectedTermination: false,
     timedOut: false,
     cancelled: false,
+    processGroupStopped: true,
     outputLimitExceeded: false,
     stdout: '',
     stderr: '',
@@ -349,7 +350,7 @@ esac
 
     expect(target).not.toHaveProperty('adapter');
     expect(target.provider).toBe('acp');
-    expect(registry.capabilities(target)).toEqual(['execute']);
+    expect(registry.capabilities(target)).toEqual(['execute', 'review', 'repair']);
     expect(() => registry.capabilities({ ...target, provider: 'codex' }))
       .toThrow(/trustworthy AGENT-001 execution adapter/);
     expect(() => new AgentExecutionAdapterRegistry([

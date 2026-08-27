@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chmodSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -61,6 +61,7 @@ describe('OpenCode adapter and process boundary', () => {
             unexpectedTermination: false,
             timedOut: false,
             cancelled: false,
+            processGroupStopped: true,
             outputLimitExceeded: false,
             stdout: `${successfulOutput}\n`,
             stderr: '',
@@ -170,6 +171,7 @@ esac
           unexpectedTermination: false,
           timedOut: false,
           cancelled: false,
+          processGroupStopped: true,
           outputLimitExceeded: false,
           stdout: successfulOutput,
           stderr: '',
@@ -251,6 +253,7 @@ esac
           unexpectedTermination: false,
           timedOut: false,
           cancelled: false,
+          processGroupStopped: true,
           outputLimitExceeded: false,
           stdout: `${JSON.stringify({ type: 'text', text: 'api_key=secret-value' })}\n`,
           stderr: '',
@@ -290,6 +293,35 @@ esac
     expect(Buffer.byteLength(result.stdout, 'utf8')).toBeLessThanOrEqual(128);
     expect(result.stdoutTruncated).toBe(true);
     expect(result.outputLimitExceeded).toBe(true);
+  });
+
+  it('does not report a clean result while a normal provider leader leaves a descendant', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'shipgraph-agent-descendant-'));
+    temporaryDirectories.push(directory);
+    const script = join(directory, 'provider.sh');
+    writeFileSync(
+      script,
+      '#!/bin/sh\n' +
+        `sh -c 'echo $$ > "${join(directory, 'descendant.pid')}"; sleep 30' >/dev/null 2>/dev/null &\n` +
+        `while [ ! -s "${join(directory, 'descendant.pid')}" ]; do sleep 0.01; done\n` +
+        'printf "provider-complete\\n"\n'
+    );
+    chmodSync(script, 0o700);
+
+    const result = await createAgentProcessRunner().run({
+      command: script,
+      args: [],
+      cwd: directory,
+      env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+      timeoutMs: 5_000,
+      maxOutputBytes: 128,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.unexpectedTermination).toBe(true);
+    expect(result.processGroupStopped).toBe(true);
+    const descendantPid = Number(readFileSync(join(directory, 'descendant.pid'), 'utf8').trim());
+    expect(() => process.kill(descendantPid, 0)).toThrow();
   });
 
   it('terminates the provider process tree on timeout', async () => {
