@@ -1,4 +1,5 @@
-import { isAbsolute } from 'node:path';
+import { accessSync, constants, realpathSync, statSync } from 'node:fs';
+import { basename, delimiter, isAbsolute, resolve } from 'node:path';
 import type {
   AgentExecutionAdapter,
   AgentExecutionRequest,
@@ -31,6 +32,12 @@ export type CommandAgentAdapterOptions = {
   executable?: string;
   probeArgs: readonly string[];
   requiredProbeTokens: readonly string[];
+  /** Tokens that identify the vendor's version output, when available. */
+  requiredVersionTokens?: readonly string[];
+  /** Name the configured command must have before it is considered this adapter. */
+  expectedExecutableName?: string;
+  /** Credentials/configuration allowed to cross this provider's process boundary. */
+  credentialEnvironmentKeys?: readonly string[];
   outputFormat: CommandAgentOutputFormat;
   buildArgs: (request: AgentExecutionRequest) => readonly string[];
   processRunner?: AgentProcessRunner;
@@ -44,6 +51,10 @@ export type CommandSurfaceProbeOptions = {
   executable?: string;
   probeArgs: readonly string[];
   requiredProbeTokens: readonly string[];
+  requiredVersionTokens?: readonly string[];
+  expectedExecutableName?: string;
+  /** Original configured name, kept separate from the canonical pinned path. */
+  configuredExecutable?: string;
   processRunner: AgentProcessRunner;
   cwd: string;
   environment: Readonly<Record<string, string>>;
@@ -66,6 +77,19 @@ export async function probeCommandSurface(
     };
   }
 
+  const executableName = options.configuredExecutable ?? options.executable;
+  if (
+    options.expectedExecutableName !== undefined &&
+    basename(executableName) !== options.expectedExecutableName
+  ) {
+    return {
+      available: false,
+      reason:
+        `${options.displayName} executable name ${basename(executableName)} ` +
+        `does not match ${options.expectedExecutableName}`,
+    };
+  }
+
   const run = (args: readonly string[]): Promise<AgentProcessResult> =>
     options.processRunner.run({
       command: options.executable as string,
@@ -78,6 +102,18 @@ export async function probeCommandSurface(
   const version = await run(['--version']);
   const versionFailure = probeFailure(version, `${options.displayName} version probe`);
   if (versionFailure !== undefined) return { available: false, reason: versionFailure };
+  const versionOutput = `${version.stdout}\n${version.stderr}`;
+  const missingVersionToken = (options.requiredVersionTokens ?? []).find(
+    (token) => !versionOutput.includes(token)
+  );
+  if (missingVersionToken !== undefined) {
+    return {
+      available: false,
+      reason:
+        `${options.displayName} version probe did not identify the expected executable ` +
+        `(missing ${missingVersionToken})`,
+    };
+  }
 
   const capability = await run(options.probeArgs);
   const capabilityFailure = probeFailure(
@@ -94,7 +130,7 @@ export async function probeCommandSurface(
       reason: `${options.displayName} execution capability probe did not advertise ${missing}`,
     };
   }
-  const firstLine = firstOutputLine(version.stdout);
+  const firstLine = firstOutputLine(version.stdout || version.stderr);
   return firstLine === undefined
     ? { available: true }
     : { available: true, version: firstLine };
@@ -115,11 +151,16 @@ export class CommandAgentExecutionAdapter implements AgentExecutionAdapter {
   private readonly executable: string | undefined;
   private readonly probeArgs: readonly string[];
   private readonly requiredProbeTokens: readonly string[];
+  private readonly requiredVersionTokens: readonly string[];
+  private readonly expectedExecutableName: string | undefined;
+  private readonly credentialEnvironmentKeys: readonly string[];
   private readonly outputFormat: CommandAgentOutputFormat;
   private readonly buildArgs: (request: AgentExecutionRequest) => readonly string[];
   private readonly processRunner: AgentProcessRunner;
   private readonly cwd: string;
   private readonly environment: Readonly<Record<string, string>>;
+  private readonly enforceExecutableProvenance: boolean;
+  private resolvedExecutable: ResolvedExecutable | undefined;
 
   public constructor(options: CommandAgentAdapterOptions) {
     this.provider = options.provider;
@@ -130,6 +171,15 @@ export class CommandAgentExecutionAdapter implements AgentExecutionAdapter {
     this.requiredProbeTokens = options.requiredProbeTokens.map((token) =>
       validateText(token, 'agent capability token', 256)
     );
+    this.requiredVersionTokens = (options.requiredVersionTokens ?? []).map((token) =>
+      validateText(token, 'agent version identity token', 256)
+    );
+    this.expectedExecutableName = options.expectedExecutableName === undefined
+      ? undefined
+      : validateText(options.expectedExecutableName, 'agent executable name', 256);
+    this.credentialEnvironmentKeys = (options.credentialEnvironmentKeys ?? []).map((key) =>
+      validateEnvironmentKey(key)
+    );
     if (this.probeArgs.length === 0 || this.requiredProbeTokens.length === 0) {
       throw new Error('agent capability probe must define command arguments and required tokens');
     }
@@ -138,20 +188,38 @@ export class CommandAgentExecutionAdapter implements AgentExecutionAdapter {
     this.processRunner = options.processRunner ?? createAgentProcessRunner();
     this.cwd = options.cwd ?? process.cwd();
     if (!isAbsolute(this.cwd)) throw new Error('Agent probes require an absolute cwd');
-    this.environment = buildEnvironment(options.environment);
+    this.environment = buildEnvironment(options.environment, this.credentialEnvironmentKeys);
+    // A custom runner is a deliberate dependency-injection boundary used by
+    // tests and embedding applications. The production runner resolves and
+    // pins the executable below before it can launch a provider.
+    this.enforceExecutableProvenance = options.processRunner === undefined;
   }
 
   public async probe(): Promise<AgentProbeResult> {
-    return probeCommandSurface({
+    const resolved = this.enforceExecutableProvenance && this.enabled
+      ? this.resolveExecutable()
+      : undefined;
+    if (this.enforceExecutableProvenance && this.enabled && resolved === undefined) {
+      return {
+        available: false,
+        reason: `${this.displayName} executable was not found or is not executable`,
+      };
+    }
+    const result = await probeCommandSurface({
       displayName: this.displayName,
       enabled: this.enabled,
-      executable: this.executable,
+      executable: resolved?.path ?? this.executable,
+      configuredExecutable: this.executable,
       probeArgs: this.probeArgs,
       requiredProbeTokens: this.requiredProbeTokens,
+      requiredVersionTokens: this.requiredVersionTokens,
+      expectedExecutableName: this.expectedExecutableName,
       processRunner: this.processRunner,
       cwd: this.cwd,
       environment: this.environment,
     });
+    this.resolvedExecutable = result.available ? resolved : undefined;
+    return result;
   }
 
   public async execute(request: AgentExecutionRequest): Promise<AgentExecutionResult> {
@@ -171,7 +239,7 @@ export class CommandAgentExecutionAdapter implements AgentExecutionAdapter {
     }
 
     const processResult = await this.processRunner.run({
-      command: this.executable as string,
+      command: this.executableForExecution(),
       args: [...this.buildArgs(request)],
       cwd: request.workspacePath,
       env: this.environment,
@@ -182,6 +250,28 @@ export class CommandAgentExecutionAdapter implements AgentExecutionAdapter {
     });
 
     return normalizeCommandResult(processResult, this.displayName, this.outputFormat);
+  }
+
+  private executableForExecution(): string {
+    if (this.executable === undefined) {
+      throw new Error(`${this.displayName} execution executable is not configured`);
+    }
+    if (!this.enforceExecutableProvenance) return this.executable;
+    if (this.resolvedExecutable === undefined) {
+      throw new Error(`${this.displayName} execution requires a successful capability probe`);
+    }
+    const current = this.resolveExecutable();
+    if (current === undefined || !sameExecutable(current, this.resolvedExecutable)) {
+      throw new Error(
+        `${this.displayName} executable provenance changed after capability probing; refusing launch`
+      );
+    }
+    return current.path;
+  }
+
+  private resolveExecutable(): ResolvedExecutable | undefined {
+    if (this.executable === undefined) return undefined;
+    return resolveExecutable(this.executable, this.cwd, this.environment.PATH);
   }
 
 }
@@ -445,10 +535,16 @@ function firstOutputLine(value: string): string | undefined {
 }
 
 function buildEnvironment(
-  additions: Readonly<Record<string, string>> | undefined
+  additions: Readonly<Record<string, string>> | undefined,
+  credentialEnvironmentKeys: readonly string[]
 ): Readonly<Record<string, string>> {
   const environment: Record<string, string> = {};
-  for (const key of SAFE_ENVIRONMENT_KEYS) {
+  const allowedCredentials = new Set(credentialEnvironmentKeys);
+  for (const key of SAFE_INHERITED_ENVIRONMENT_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) environment[key] = value;
+  }
+  for (const key of allowedCredentials) {
     const value = process.env[key];
     if (value !== undefined) environment[key] = value;
   }
@@ -459,12 +555,18 @@ function buildEnvironment(
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key) || value.includes('\0')) {
       throw new Error(`Invalid agent environment variable: ${key}`);
     }
+    if (PROVIDER_CREDENTIAL_ENVIRONMENT_KEYS.has(key) && !allowedCredentials.has(key)) {
+      // The adapter factory shares explicit additions among providers. Known
+      // credentials are filtered so one provider's secret cannot cross into
+      // another provider's process boundary.
+      continue;
+    }
     environment[key] = value;
   }
   return environment;
 }
 
-const SAFE_ENVIRONMENT_KEYS = [
+const SAFE_INHERITED_ENVIRONMENT_KEYS = [
   'PATH',
   'HOME',
   'USER',
@@ -476,6 +578,9 @@ const SAFE_ENVIRONMENT_KEYS = [
   'XDG_CONFIG_HOME',
   'XDG_DATA_HOME',
   'XDG_CACHE_HOME',
+] as const;
+
+const PROVIDER_CREDENTIAL_ENVIRONMENT_KEYS = new Set([
   'CODEX_HOME',
   'GEMINI_API_KEY',
   'GOOGLE_API_KEY',
@@ -483,13 +588,20 @@ const SAFE_ENVIRONMENT_KEYS = [
   'XAI_API_KEY',
   'OPENAI_API_KEY',
   'OPENCODE_API_KEY',
-] as const;
+]);
 
 const BLOCKED_ENVIRONMENT_KEYS = /^(?:GIT_|NODE_OPTIONS$|BASH_ENV$|ENV$|CDPATH$|LD_PRELOAD$|DYLD_)/u;
 
 function validateExecutable(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   return validateText(value, 'agent executable', 4_096);
+}
+
+function validateEnvironmentKey(value: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(value)) {
+    throw new Error(`Invalid agent credential environment variable: ${value}`);
+  }
+  return value;
 }
 
 function validateArgument(value: string): string {
@@ -501,6 +613,40 @@ function validateText(value: string, label: string, maxLength: number): string {
     throw new Error(`${label} is invalid`);
   }
   return value;
+}
+
+type ResolvedExecutable = {
+  path: string;
+  device: string;
+  inode: string;
+};
+
+function resolveExecutable(
+  executable: string,
+  cwd: string,
+  pathValue: string | undefined
+): ResolvedExecutable | undefined {
+  const candidates = executable.includes('/')
+    ? [isAbsolute(executable) ? executable : resolve(cwd, executable)]
+    : (pathValue ?? '').split(delimiter)
+        .filter((directory) => directory.length > 0)
+        .map((directory) => resolve(directory, executable));
+  for (const candidate of candidates) {
+    try {
+      const path = realpathSync(candidate);
+      const stats = statSync(path, { bigint: true });
+      accessSync(path, constants.X_OK);
+      if (!stats.isFile()) continue;
+      return { path, device: stats.dev.toString(), inode: stats.ino.toString() };
+    } catch {
+      // Failure to resolve is unavailable, not a reason to invoke a fallback.
+    }
+  }
+  return undefined;
+}
+
+function sameExecutable(left: ResolvedExecutable, right: ResolvedExecutable): boolean {
+  return left.path === right.path && left.device === right.device && left.inode === right.inode;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

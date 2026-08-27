@@ -5,6 +5,7 @@ import {
 } from './command.js';
 import type { AgentProcessRunner } from './process.js';
 import type { ModelProviderId } from '../../domain/model-provider.js';
+import { registerModelProviderAdapter } from './model-provider-owner.js';
 
 type ProviderAgentAdapterOptions = {
   enabled?: boolean;
@@ -32,6 +33,9 @@ export class CodexAdapter extends CommandAgentExecutionAdapter {
         '--approve-for-me',
         '--ephemeral',
       ],
+      requiredVersionTokens: ['codex-cli'],
+      expectedExecutableName: 'codex',
+      credentialEnvironmentKeys: ['OPENAI_API_KEY', 'CODEX_HOME'],
       outputFormat: 'jsonl',
       buildArgs: (request) => [
         'exec',
@@ -47,6 +51,7 @@ export class CodexAdapter extends CommandAgentExecutionAdapter {
         request.instructions,
       ],
     } satisfies CommandAgentAdapterOptions);
+    registerModelProviderAdapter(this, 'codex');
   }
 }
 
@@ -70,8 +75,14 @@ export class GrokAdapter extends CommandAgentExecutionAdapter {
         '--model',
         '--cwd',
         '--always-approve',
+        '--no-subagents',
+        '--no-plan',
+        '--disable-web-search',
         '--sandbox',
       ],
+      requiredVersionTokens: ['grok'],
+      expectedExecutableName: 'grok',
+      credentialEnvironmentKeys: ['XAI_API_KEY'],
       outputFormat: 'json',
       buildArgs: (request) => [
         '--single',
@@ -90,6 +101,7 @@ export class GrokAdapter extends CommandAgentExecutionAdapter {
         'workspace',
       ],
     } satisfies CommandAgentAdapterOptions);
+    registerModelProviderAdapter(this, 'grok');
   }
 }
 
@@ -115,6 +127,12 @@ export class GeminiAdapter extends CommandAgentExecutionAdapter {
         '--disable-slash-commands',
         '--sandbox',
       ],
+      expectedExecutableName: 'agy',
+      credentialEnvironmentKeys: [
+        'GEMINI_API_KEY',
+        'GOOGLE_API_KEY',
+        'GOOGLE_GENERATIVE_AI_API_KEY',
+      ],
       outputFormat: 'json',
       buildArgs: (request) => [
         '--print',
@@ -129,6 +147,7 @@ export class GeminiAdapter extends CommandAgentExecutionAdapter {
         '--sandbox',
       ],
     } satisfies CommandAgentAdapterOptions);
+    registerModelProviderAdapter(this, 'gemini');
   }
 }
 

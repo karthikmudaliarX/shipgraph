@@ -226,6 +226,23 @@ export async function resolveCommitSha(
   return /^[0-9a-f]{40}$|^[0-9a-f]{64}$/i.test(sha) ? sha : undefined;
 }
 
+/** Prove that a live worktree commit descends from the recorded base commit. */
+export async function isCommitAncestor(
+  runner: GitRunner,
+  repoPath: string,
+  ancestor: string,
+  descendant: string
+): Promise<boolean> {
+  if (!isObjectName(ancestor) || !isObjectName(descendant)) return false;
+  const result = await runGit(runner, repoPath, [
+    'merge-base',
+    '--is-ancestor',
+    ancestor,
+    descendant,
+  ]);
+  return result.exitCode === 0;
+}
+
 /** Validate a branch name using Git's own reference rules. */
 export async function isBranchNameValid(
   runner: GitRunner,
@@ -417,6 +434,10 @@ function realpathSyncSafe(path: string): string {
   } catch {
     return path;
   }
+}
+
+function isObjectName(value: string): boolean {
+  return /^[0-9a-f]{40}$|^[0-9a-f]{64}$/i.test(value);
 }
 
 /**

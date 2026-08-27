@@ -30,6 +30,7 @@ repair the actual change:
 - the workspace is the recorded plain directory under the deterministic root;
 - the Git worktree is registered with the bound source repository;
 - its branch is the deterministic recorded branch;
+- a changed review/repair HEAD descends from the recorded creation base;
 - its HEAD is the recorded base SHA for a new implementation hand-off; and
 - tracked, untracked and ignored content is clean for that new hand-off.
 
@@ -62,9 +63,11 @@ completed; later verification owns engineering success.
 
 ## Process boundary
 
-Command adapters invoke their executable without a shell, pin the process cwd
-to the verified worktree, pass the selected model explicitly, use a small
-allow-listed environment, drain bounded stdout/stderr, and terminate the owned
+Command adapters invoke a capability-probed, identity-checked executable
+whose resolved path and device/inode are pinned until launch; they invoke it
+without a shell, pin the process cwd to the verified worktree, pass the
+selected model explicitly, use a provider-scoped allow-listed environment,
+drain bounded stdout/stderr, and terminate the owned
 POSIX process group on timeout or cancellation. OpenCode and Codex JSONL, plus
 Grok and Antigravity (`agy`) JSON, are reduced to session ID, event types/count
 and a bounded summary; raw event objects are not persisted as structured

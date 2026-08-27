@@ -18,6 +18,7 @@ import {
   type AgentProcessRunner,
 } from './process.js';
 import { redactSensitiveText } from './safety.js';
+import { registerModelProviderAdapter } from './model-provider-owner.js';
 
 export { redactSensitiveText } from './safety.js';
 
@@ -78,6 +79,7 @@ export class OpenCodeAdapter implements AgentExecutionAdapter {
     this.executable = options.executable ?? 'opencode';
     this.processRunner = options.processRunner ?? createAgentProcessRunner();
     this.environment = buildEnvironment(options.environment);
+    registerModelProviderAdapter(this, 'opencode-go');
   }
 
   public async probe(): Promise<AgentProbeResult> {

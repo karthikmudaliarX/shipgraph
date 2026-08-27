@@ -25,6 +25,9 @@ import {
 import { createOpenCodeAdapter, type OpenCodeAdapterOptions } from './opencode.js';
 import type { AgentProcessRunner } from './process.js';
 import type { ModelProviderConfiguration } from '../model/adapter.js';
+import {
+  modelProviderOwner,
+} from './model-provider-owner.js';
 
 export type { ModelExecutionAdapterBinding } from './providers.js';
 
@@ -35,6 +38,7 @@ export type { ModelExecutionAdapterBinding } from './providers.js';
  * their binding remains distinct and is selected by model provider ID.
  */
 export { MODEL_PROVIDER_TO_AGENT_PROVIDER } from '../../domain/model-provider.js';
+export { registerModelProviderAdapter } from './model-provider-owner.js';
 
 export type ModelExecutionTarget = Readonly<{
   modelProviderId: ModelProviderId;
@@ -61,12 +65,6 @@ export type ModelExecutionAdapterFactoryOptions = {
   environment?: Readonly<Record<string, string>>;
 };
 
-// Keep the MODEL-001 owner of each concrete adapter out-of-band. The
-// provider-neutral AGENT-001 interface intentionally has no model-provider
-// identity, so the execution bridge must not trust a caller-supplied target
-// that swaps one ACP adapter for another.
-const adapterModelProviderOwners = new WeakMap<AgentExecutionAdapter, ModelProviderId>();
-
 /**
  * Indexes execution adapters by MODEL-001 identity while preserving the
  * provider-neutral AGENT-001 adapter contract.
@@ -90,13 +88,13 @@ export class AgentExecutionAdapterRegistry {
       if (!binding.adapter.capabilities.includes('execute')) {
         throw new Error(`Execution adapter for ${modelProviderId} does not support execute`);
       }
-      const existingOwner = adapterModelProviderOwners.get(binding.adapter);
-      if (existingOwner !== undefined && existingOwner !== modelProviderId) {
+      const owner = modelProviderOwner(binding.adapter);
+      if (owner !== modelProviderId) {
         throw new Error(
-          `Execution adapter is already bound to ${existingOwner}; cannot bind it to ${modelProviderId}`
+          `Execution adapter for ${modelProviderId} is not branded for that MODEL provider ` +
+            `(owner=${owner ?? 'unknown'})`
         );
       }
-      adapterModelProviderOwners.set(binding.adapter, modelProviderId);
       indexed.set(modelProviderId, { modelProviderId, adapter: binding.adapter });
     }
     this.bindings = indexed;

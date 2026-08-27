@@ -8,7 +8,10 @@ import type {
   ProviderProbeResult,
 } from '../../src/adapters/model/adapter.js';
 import type { AgentCapability, AgentProvider } from '../../src/domain/agent-provider.js';
-import type { ModelExecutionAdapterBinding } from '../../src/adapters/agent/registry.js';
+import {
+  registerModelProviderAdapter,
+  type ModelExecutionAdapterBinding,
+} from '../../src/adapters/agent/registry.js';
 import { ModelRoutingService } from '../../src/model/service.js';
 
 const projectId = 'project-1';
@@ -146,7 +149,7 @@ function executionBinding(
     : modelProviderId === 'codex'
       ? 'codex'
       : 'acp';
-  return {
+  const adapter = {
     modelProviderId,
     adapter: {
       provider,
@@ -157,6 +160,8 @@ function executionBinding(
       },
     },
   };
+  registerModelProviderAdapter(adapter.adapter, modelProviderId);
+  return adapter;
 }
 
 describe('MODEL-001 service', () => {
@@ -660,7 +665,8 @@ describe('MODEL-001 service', () => {
       adapters: [adapter('codex', 'openai', { probe: 0, discover: 0 })],
       executionAdapters: [{
         modelProviderId: 'codex',
-        adapter: {
+        adapter: (() => {
+          const adapter = {
           provider: 'codex',
           capabilities: ['execute'],
           probe: () => executionAvailable
@@ -669,7 +675,10 @@ describe('MODEL-001 service', () => {
           execute: async () => {
             throw new Error('test execution adapter is not invoked here');
           },
-        },
+          } satisfies ModelExecutionAdapterBinding['adapter'];
+          registerModelProviderAdapter(adapter, 'codex');
+          return adapter;
+        })(),
       }],
       now: () => now,
     });

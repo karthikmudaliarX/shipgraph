@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { chmodSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AgentExecutionRequest } from '../../src/adapters/agent/adapter.js';
 import type { AgentProcessResult, AgentProcessSpec, AgentProcessRunner } from '../../src/adapters/agent/process.js';
 import { CodexAdapter, GeminiAdapter, GrokAdapter } from '../../src/adapters/agent/providers.js';
@@ -41,12 +44,13 @@ function result(overrides: Partial<AgentProcessResult> = {}): AgentProcessResult
 function scriptedRunner(
   helpOutput: string,
   executionOutput: string,
-  calls: AgentProcessSpec[]
+  calls: AgentProcessSpec[],
+  versionOutput = 'provider 1.0.0\n'
 ): AgentProcessRunner {
   return {
     run: async (spec) => {
       calls.push(spec);
-      if (spec.args[0] === '--version') return result({ stdout: 'provider 1.0.0\n' });
+      if (spec.args[0] === '--version') return result({ stdout: versionOutput });
       if (spec.args.includes('--help')) return result({ stdout: helpOutput });
       return result({ stdout: executionOutput });
     },
@@ -54,6 +58,13 @@ function scriptedRunner(
 }
 
 describe('deferred MODEL-001 provider execution adapters', () => {
+  const temporaryDirectories: string[] = [];
+
+  afterEach(() => {
+    for (const directory of temporaryDirectories) rmSync(directory, { recursive: true, force: true });
+    temporaryDirectories.length = 0;
+  });
+
   it('probes and executes Codex through its JSONL exec surface', async () => {
     const calls: AgentProcessSpec[] = [];
     const adapter = new CodexAdapter({
@@ -62,11 +73,12 @@ describe('deferred MODEL-001 provider execution adapters', () => {
       processRunner: scriptedRunner(
         'exec --json --model --cd --sandbox --approve-for-me --ephemeral\n',
         '{"type":"result","session_id":"codex-session","text":"done"}\n',
-        calls
+        calls,
+        'codex-cli 1.0.0\n'
       ),
     });
 
-    await expect(adapter.probe()).resolves.toMatchObject({ available: true, version: 'provider 1.0.0' });
+    await expect(adapter.probe()).resolves.toMatchObject({ available: true, version: 'codex-cli 1.0.0' });
     const execution = await adapter.execute(request);
 
     expect(calls.slice(0, 2).map((call) => call.args)).toEqual([
@@ -103,9 +115,10 @@ describe('deferred MODEL-001 provider execution adapters', () => {
       executable: '/opt/grok',
       cwd: '/tmp/shipgraph-project',
       processRunner: scriptedRunner(
-        '--single --output-format --model --cwd --always-approve --sandbox\n',
+        '--single --output-format --model --cwd --always-approve --no-subagents --no-plan --disable-web-search --sandbox\n',
         '{"type":"result","conversationId":"grok-session","text":"done"}\n',
-        calls
+        calls,
+        'grok 1.0.0\n'
       ),
     });
 
@@ -133,6 +146,86 @@ describe('deferred MODEL-001 provider execution adapters', () => {
       providerSessionId: 'grok-session',
       evidence: { outputFormat: 'json', eventCount: 1 },
     });
+  });
+
+  it.each([
+    '--single',
+    '--output-format',
+    '--model',
+    '--cwd',
+    '--always-approve',
+    '--no-subagents',
+    '--no-plan',
+    '--disable-web-search',
+    '--sandbox',
+  ])('keeps Grok unavailable when its execution restriction %s is absent', async (missing) => {
+    const adapter = new GrokAdapter({
+      executable: '/opt/grok',
+      processRunner: scriptedRunner(
+        [
+          '--single',
+          '--output-format',
+          '--model',
+          '--cwd',
+          '--always-approve',
+          '--no-subagents',
+          '--no-plan',
+          '--disable-web-search',
+          '--sandbox',
+        ].filter((token) => token !== missing).join(' '),
+        '',
+        [],
+        'grok 1.0.0\n'
+      ),
+    });
+
+    await expect(adapter.probe()).resolves.toEqual({
+      available: false,
+      reason: `Grok execution capability probe did not advertise ${missing}`,
+    });
+  });
+
+  it('does not pass another provider credential into the Grok process', async () => {
+    const calls: AgentProcessSpec[] = [];
+    const adapter = new GrokAdapter({
+      executable: '/opt/grok',
+      environment: { XAI_API_KEY: 'grok-secret', OPENAI_API_KEY: 'openai-secret' },
+      processRunner: scriptedRunner(
+        '--single --output-format --model --cwd --always-approve --no-subagents --no-plan --disable-web-search --sandbox\n',
+        '',
+        calls,
+        'grok 1.0.0\n'
+      ),
+    });
+
+    await expect(adapter.probe()).resolves.toMatchObject({ available: true });
+    expect(calls[0]?.env.XAI_API_KEY).toBe('grok-secret');
+    expect(calls[0]?.env.OPENAI_API_KEY).toBeUndefined();
+  });
+
+  it('pins the probed executable and refuses a replacement before launch', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'shipgraph-agent-probe-'));
+    temporaryDirectories.push(directory);
+    const executable = join(directory, 'grok');
+    const replacement = join(directory, 'grok-replacement');
+    const script = `#!/bin/sh
+case "$1" in
+  --version) printf 'grok 1.0.0\\n' ;;
+  --help) printf '%s\\n' '--single --output-format --model --cwd --always-approve --no-subagents --no-plan --disable-web-search --sandbox' ;;
+  *) printf '%s\\n' '{"type":"result","text":"done"}' ;;
+esac
+`;
+    writeFileSync(executable, script, { mode: 0o700 });
+    writeFileSync(replacement, script, { mode: 0o700 });
+    chmodSync(executable, 0o700);
+
+    const adapter = new GrokAdapter({ executable, cwd: process.cwd() });
+    await expect(adapter.probe()).resolves.toMatchObject({ available: true });
+    renameSync(replacement, executable);
+
+    await expect(adapter.execute({ ...request, provider: 'acp' })).rejects.toThrow(
+      /executable provenance changed/
+    );
   });
 
   it('uses Antigravity agy, not Gemini CLI, for the Gemini model provider', async () => {
@@ -174,7 +267,7 @@ describe('deferred MODEL-001 provider execution adapters', () => {
 
   it('keeps an executable non-routable when its claimed automation flags are absent', async () => {
     const adapter = new GeminiAdapter({
-      executable: '/opt/not-agy',
+      executable: '/opt/agy',
       processRunner: scriptedRunner('--help --model\n', '', []),
     });
 
@@ -215,5 +308,8 @@ describe('deferred MODEL-001 provider execution adapters', () => {
     expect(registry.capabilities(target)).toEqual(['execute']);
     expect(() => registry.capabilities({ ...target, provider: 'codex' }))
       .toThrow(/trustworthy AGENT-001 execution adapter/);
+    expect(() => new AgentExecutionAdapterRegistry([
+      { modelProviderId: 'gemini', adapter: grok },
+    ])).toThrow(/not branded for that MODEL provider/);
   });
 });

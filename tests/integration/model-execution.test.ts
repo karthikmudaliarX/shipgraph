@@ -17,6 +17,7 @@ import { createModelRepository } from '../../src/persistence/model-repositories.
 import { createProjectRepository } from '../../src/persistence/repositories.js';
 import type { ShipgraphConfig } from '../../src/config/schema.js';
 import { ModelRoutingService } from '../../src/model/service.js';
+import { registerModelProviderAdapter } from '../../src/adapters/agent/registry.js';
 import { initProject } from '../../src/cli/init.js';
 import { syncBacklogProject } from '../../src/cli/backlog.js';
 import { createWorkspace } from '../../src/workspace/service.js';
@@ -72,7 +73,7 @@ function executionTestAdapter(
   provider: 'codex' | 'acp',
   capabilities: AgentExecutionAdapter['capabilities']
 ): AgentExecutionAdapter {
-  return {
+  const adapter: AgentExecutionAdapter = {
     provider,
     capabilities,
     probe: async () => ({ available: true as const, version: 'test-agent 1.0.0' }),
@@ -86,6 +87,8 @@ function executionTestAdapter(
       stderrTruncated: false,
     }),
   };
+  registerModelProviderAdapter(adapter, provider === 'codex' ? 'codex' : 'gemini');
+  return adapter;
 }
 
 function createProject(db: DbConnection): void {
@@ -142,7 +145,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
     createProject(db);
     const processRunner: AgentProcessRunner = {
       run: async (spec) => {
-        if (spec.args[0] === '--version') return result({ stdout: 'codex 1.0.0\n' });
+        if (spec.args[0] === '--version') return result({ stdout: 'codex-cli 1.0.0\n' });
         if (spec.args[0] === 'exec' && spec.args[1] === '--help') {
           return result({
             stdout: 'exec --json --model --cd --sandbox --approve-for-me --ephemeral\n',
@@ -224,10 +227,10 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
     migrate(db);
     createProject(db);
     const executionAdapter = new GeminiAdapter({
-      executable: '/opt/unsupported-agy',
+      executable: '/opt/agy',
       processRunner: {
         run: async (spec) => spec.args[0] === '--version'
-          ? result({ stdout: 'not-agy 1.0.0\n' })
+          ? result({ stdout: 'agy 1.0.0\n' })
           : result({ stdout: '--help --model\n' }),
       },
     });
@@ -294,7 +297,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
       processRunner: {
         run: async (spec) => {
           calls.push(spec);
-          if (spec.args[0] === '--version') return result({ stdout: 'codex 1.0.0\n' });
+          if (spec.args[0] === '--version') return result({ stdout: 'codex-cli 1.0.0\n' });
           if (spec.args[0] === 'exec' && spec.args[1] === '--help') {
             return result({
               stdout: 'exec --json --model --cd --sandbox --approve-for-me --ephemeral\n',
@@ -405,7 +408,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
     expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
   });
 
-  it('retains provider capacity after timeout until process ownership is reconciled', async () => {
+  it('retains provider capacity after normalization discovers truncated output', async () => {
     const projectDir = mkdtempSync(join(tmpdir(), 'shipgraph-model-timeout-src-'));
     const worktreeRoot = mkdtempSync(join(tmpdir(), 'shipgraph-model-timeout-root-'));
     temporaryDirectories.push(projectDir, worktreeRoot);
@@ -440,18 +443,19 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
       execute: async (request) => {
         await request.onProcessStarted?.(4343);
         return {
-          outcome: 'TIMED_OUT' as const,
-          timedOut: true,
+          outcome: 'FAILED' as const,
+          timedOut: false,
           cancelled: false,
-          stdout: '',
+          stdout: 'x'.repeat(256),
           stderr: '',
           stdoutTruncated: false,
           stderrTruncated: false,
-          failureCategory: 'timeout' as const,
-          failureReason: 'test timeout',
+          failureCategory: 'non_zero_exit' as const,
+          failureReason: 'test oversized output',
         };
       },
     };
+    registerModelProviderAdapter(executionAdapter, 'codex');
     const workspace = await createWorkspace({ db, projectDir, worktreeRoot }, 'KAR-6001');
     const modelService = new ModelRoutingService({
       db,
@@ -475,7 +479,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
         provider: 'codex',
         modelProviderId: 'codex',
         model: 'codex/dynamic-model',
-        instructions: 'exercise timeout reservation retention',
+        instructions: 'exercise normalized output reservation retention',
         timeoutMs: 1_000,
       }
     );
@@ -491,12 +495,17 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
       },
     });
     const result = await modelService.executeSelectedAgentTask(
-      { db, projectDir, worktreeRoot, now: () => now },
+      { db, projectDir, worktreeRoot, now: () => now, maxOutputBytes: 128 },
       modelService.resolveExecutionTarget(decision),
-      { ticketId: workspace.workspace.ticketId, instructions: 'exercise timeout reservation retention', timeoutMs: 1_000 }
+      {
+        ticketId: workspace.workspace.ticketId,
+        instructions: 'exercise normalized output reservation retention',
+        timeoutMs: 1_000,
+      }
     );
 
-    expect(result.run.status).toBe('TIMED_OUT');
+    expect(result.run.status).toBe('FAILED');
+    expect(result.run.stdoutTruncated).toBe(true);
     expect(modelService.listHealth()[0]?.activeRuns).toBe(1);
     expect(createModelRepository(db).findActiveRoutingDecisionByRun(project.id, prepared.run.id))
       .toMatchObject({ reservationStatus: 'active', runId: prepared.run.id });
@@ -548,7 +557,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
       processRunner: {
         run: async (spec) => {
           calls.push(spec);
-          if (spec.args[0] === '--version') return result({ stdout: 'codex 1.0.0\n' });
+          if (spec.args[0] === '--version') return result({ stdout: 'codex-cli 1.0.0\n' });
           if (spec.args[0] === 'exec' && spec.args[1] === '--help') {
             return result({
               stdout: 'exec --json --model --cd --sandbox --approve-for-me --ephemeral\n',

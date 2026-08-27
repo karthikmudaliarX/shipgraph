@@ -261,18 +261,6 @@ export async function executeAgentTask(
       },
     };
     adapterResult = await options.adapter.execute(request);
-    // A resolved adapter call normally observes the provider attempt's
-    // terminal result. Timeout, cancellation and output-limit termination are
-    // different: the runner only proves that the launched process group was
-    // signalled, not that a provider-created descendant cannot still modify
-    // the workspace. Keep the provider reservation in those cases until an
-    // operator explicitly reconciles process ownership.
-    executionStopped =
-      adapterResult.outcome !== 'NEEDS_HUMAN' &&
-      !adapterResult.timedOut &&
-      !adapterResult.cancelled &&
-      !adapterResult.stdoutTruncated &&
-      !adapterResult.stderrTruncated;
   } catch (error) {
     // An adapter may have spawned a provider and then lost its bookkeeping
     // channel. Keep the durable reservation until an operator can reconcile
@@ -291,6 +279,16 @@ export async function executeAgentTask(
   }
 
   const normalizedResult = normalizeAdapterResult(adapterResult, normalized.maxOutputBytes);
+  // Derive release eligibility from the normalized result, not the adapter's
+  // untrusted raw flags. Normalization can discover oversized output or a
+  // malformed/contradictory result after the adapter returns; those cases do
+  // not prove that a provider process stopped safely.
+  executionStopped =
+    normalizedResult.outcome !== 'NEEDS_HUMAN' &&
+    !normalizedResult.timedOut &&
+    !normalizedResult.cancelled &&
+    !normalizedResult.stdoutTruncated &&
+    !normalizedResult.stderrTruncated;
   try {
     const finalRun = finalizeRun(
       options,

@@ -47,7 +47,8 @@ Current execution surfaces:
 The MODEL-001 provider identity is intentionally kept separate from the
 provider-neutral AGENT-001 identity. The exhaustive mapping is
 `opencode-go → opencode`, `codex → codex`, and `grok`/`gemini → acp`; the two
-ACP-bound providers still have distinct adapter instances. A provider is
+ACP-bound providers still have distinct, immutably MODEL-branded adapter
+instances. A provider is
 execution-available only after its adapter proves the exact installed
 headless command surface. In particular, Gemini execution uses Antigravity
 (`agy`), not Gemini CLI. Missing or unsupported automation evidence remains
@@ -56,6 +57,10 @@ unknown and cannot be routed.
 Command execution also uses each supported surface's workspace restriction:
 Grok is launched with its `workspace` sandbox profile and Antigravity with its
 `--sandbox` mode. CWD alone is not treated as isolation.
+Codex, Grok and Antigravity probes also require the adapter-specific executable
+name/version identity and every security-relevant flag used at launch; a
+replacement executable after probing invalidates the launch. Provider
+credentials are filtered to the adapter that owns them.
 
 MODEL-001 adds a separate metadata boundary for the paid engineering pools:
 OpenCode Go, Codex, Grok and Gemini. `ModelProviderAdapter` implementations

@@ -20,6 +20,7 @@ import {
   inspectWorktreeState,
   isStrictlyClean,
   hasGitlinkEntries,
+  isCommitAncestor,
   resolveCommitSha,
   resolveGitRepositoryIdentity,
   sameGitRepositoryIdentity,
@@ -873,6 +874,15 @@ async function verifyChangedWorkspace(
   worktreeRoot: string
 ): Promise<void> {
   const live = await verifyWorkspaceIdentity(options, runner, row, worktreeRoot);
+  if (
+    live.head === undefined ||
+    !(await isCommitAncestor(runner, row.sourceRepositoryPath, row.baseSha, live.head))
+  ) {
+    throw new Error(
+      `Worktree HEAD ${live.head ?? '<unknown>'} does not descend from recorded base SHA ${row.baseSha}; ` +
+        'refusing review or repair of substituted history'
+    );
+  }
   if (live.statusKnown !== true) {
     throw new Error(
       `Worktree status could not be verified for review or repair: ${row.worktreePath}`

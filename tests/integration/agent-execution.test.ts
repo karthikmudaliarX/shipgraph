@@ -36,6 +36,7 @@ import type {
   AgentExecutionResult,
 } from '../../src/adapters/agent/adapter.js';
 import { OpenCodeAdapter } from '../../src/adapters/agent/opencode.js';
+import { registerModelProviderAdapter } from '../../src/adapters/agent/registry.js';
 import type { ModelProviderAdapter } from '../../src/adapters/model/adapter.js';
 
 const BASE_CONFIG = {
@@ -106,6 +107,7 @@ function fakeAdapter(
       };
     },
   };
+  registerModelProviderAdapter(adapter, 'opencode-go');
   return adapter;
 }
 
