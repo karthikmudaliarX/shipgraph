@@ -3,6 +3,7 @@ import {
   modelRoutingDecisionSchema,
   MODEL_PROVIDER_TO_AGENT_PROVIDER,
   modelProviderIdSchema,
+  UNKNOWN_PROVIDER_CONCURRENCY_LIMIT,
   modelCatalogRecordSchema,
   providerHealthRecordSchema,
   providerRegistryRecordSchema,
@@ -61,7 +62,8 @@ export interface ModelRepository {
     routingDecisionId: string,
     providerId: ModelProviderId,
     modelId: string,
-    releasedAt: string
+    releasedAt: string,
+    executionStopped?: boolean
   ): boolean;
   listRoutingDecisions(projectId: string): readonly ModelRoutingDecision[];
 }
@@ -395,11 +397,12 @@ export function createModelRepository(db: DbConnection): ModelRepository {
         const parsed = modelRoutingDecisionSchema.parse(decision);
         const parsedRunId = validateRunId(runId);
         const durableRun = db
-          .prepare('SELECT project_id, provider, model, status FROM runs WHERE id = ?')
+          .prepare('SELECT project_id, provider, model, model_provider_id, status FROM runs WHERE id = ?')
           .get(parsedRunId) as {
             project_id: string | null;
             provider: string | null;
             model: string | null;
+            model_provider_id: string | null;
             status: string;
           } | undefined;
         if (durableRun === undefined || durableRun.project_id !== parsed.projectId) {
@@ -415,7 +418,8 @@ export function createModelRepository(db: DbConnection): ModelRepository {
         const expectedAgentProvider = MODEL_PROVIDER_TO_AGENT_PROVIDER[parsed.providerId];
         if (
           durableRun.provider !== expectedAgentProvider ||
-          durableRun.model !== parsed.modelId
+          durableRun.model !== parsed.modelId ||
+          durableRun.model_provider_id !== parsed.providerId
         ) {
           throw new Error(
             `Routing run ${parsedRunId} does not identify ${parsed.providerId}/${parsed.modelId}`
@@ -538,7 +542,11 @@ export function createModelRepository(db: DbConnection): ModelRepository {
           (health.status !== 'healthy' && health.status !== 'degraded') ||
           health.auth === 'unauthenticated' ||
           (typeof health.quotaRemaining === 'number' && health.quotaRemaining <= 0) ||
-          (typeof health.maxConcurrentRuns === 'number' && health.activeRuns >= health.maxConcurrentRuns) ||
+          health.activeRuns >= (
+            typeof health.maxConcurrentRuns === 'number'
+              ? health.maxConcurrentRuns
+              : UNKNOWN_PROVIDER_CONCURRENCY_LIMIT
+          ) ||
           health.activeRuns >= 1_000_000
         ) {
           return undefined;
@@ -678,7 +686,8 @@ export function createModelRepository(db: DbConnection): ModelRepository {
     routingDecisionId: string,
     providerId: ModelProviderId,
     modelId: string,
-    releasedAt: string
+    releasedAt: string,
+    executionStopped = false
   ): boolean {
     const parsedRunId = validateRunId(runId);
     const reservation = db
@@ -709,6 +718,23 @@ export function createModelRepository(db: DbConnection): ModelRepository {
     if (reservation.status !== 'active') {
       throw new Error(`Routing decision ${routingDecisionId} has an invalid reservation state`);
     }
+
+    // Telemetry may be recorded while a durable run is still active, but it
+    // cannot release the provider slot until the AGENT-001 attempt is known to
+    // have stopped. This keeps a premature usage report from admitting a
+    // second process alongside the first one.
+    const run = db
+      .prepare('SELECT status FROM runs WHERE id = ? AND project_id = ?')
+      .get(parsedRunId, projectId) as { status: string } | undefined;
+    if (run === undefined) {
+      throw new Error(`Routing decision ${routingDecisionId} has no owning run`);
+    }
+    if (!TERMINAL_RUN_STATUSES.has(run.status)) return false;
+    // NEEDS_HUMAN is also the explicit post-restart recovery state. In that
+    // case ShipGraph deliberately cannot prove that a provider process stopped;
+    // only the execution service, which has just observed the owned attempt
+    // stop, may release that terminal state.
+    if (run.status === 'NEEDS_HUMAN' && !executionStopped) return false;
 
     const healthRow = db
       .prepare(
@@ -858,6 +884,14 @@ export function createModelRepository(db: DbConnection): ModelRepository {
     return value;
   }
 }
+
+const TERMINAL_RUN_STATUSES = new Set([
+  'SUCCEEDED',
+  'FAILED',
+  'TIMED_OUT',
+  'CANCELLED',
+  'NEEDS_HUMAN',
+]);
 
 function parseJson(value: unknown): unknown {
   if (typeof value !== 'string') throw new Error('Persisted model metadata is not JSON text');

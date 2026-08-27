@@ -7,7 +7,7 @@ import {
   type ModelRoutingSelection,
 } from '../../domain/model-provider.js';
 import type { AgentProvider } from '../../domain/agent-provider.js';
-import type { AgentExecutionAdapter } from './adapter.js';
+import type { AgentCapability, AgentExecutionAdapter } from './adapter.js';
 import {
   createCodexAdapter,
   createGeminiAdapter,
@@ -39,6 +39,13 @@ export type ModelExecutionTarget = {
   routingDecisionId?: string;
   runId?: string;
 };
+
+/** Exhaustive bridge from MODEL-001 task names to AGENT-001 capabilities. */
+export const MODEL_TASK_TO_AGENT_CAPABILITY = {
+  implementation: 'execute',
+  review: 'review',
+  repair: 'repair',
+} as const satisfies Record<ModelTaskType, AgentCapability>;
 
 export type ModelExecutionAdapterFactoryOptions = {
   configuration?: ModelProviderConfiguration;
@@ -105,6 +112,12 @@ export class AgentExecutionAdapterRegistry {
     if (binding === undefined) {
       throw new Error(`No AGENT-001 execution adapter is bound to ${selection.providerId}`);
     }
+    const requiredCapability = MODEL_TASK_TO_AGENT_CAPABILITY[selection.task];
+    if (!binding.adapter.capabilities.includes(requiredCapability)) {
+      throw new Error(
+        `AGENT-001 adapter for ${selection.providerId} does not support MODEL task ${selection.task}`
+      );
+    }
     return {
       modelProviderId: selection.providerId,
       provider: binding.adapter.provider,
@@ -122,13 +135,13 @@ export class AgentExecutionAdapterRegistry {
  * assembled outside an AgentExecutionAdapterRegistry.
  */
 export function isModelExecutionAdapterBound(
-  target: Pick<ModelExecutionTarget, 'modelProviderId' | 'provider' | 'adapter'>
+  target: Pick<ModelExecutionTarget, 'modelProviderId' | 'provider' | 'task' | 'adapter'>
 ): boolean {
   return (
     adapterModelProviderOwners.get(target.adapter) === target.modelProviderId &&
     target.provider === MODEL_PROVIDER_TO_AGENT_PROVIDER[target.modelProviderId] &&
     target.adapter.provider === target.provider &&
-    target.adapter.capabilities.includes('execute')
+    target.adapter.capabilities.includes(MODEL_TASK_TO_AGENT_CAPABILITY[target.task])
   );
 }
 

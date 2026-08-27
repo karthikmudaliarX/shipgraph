@@ -164,6 +164,11 @@ export class ModelRoutingService {
         requestFingerprint: fingerprint,
         createdAt: this.now(),
       };
+      // Do not persist a route that cannot be consumed by the concrete
+      // provider-neutral AGENT-001 capability for this task. This check is
+      // deliberately before reservation so unsupported review/repair routes
+      // cannot strand capacity.
+      this.resolveExecutionTarget(decision);
       if (request.runId === undefined) {
         // A route without a durable execution run is a read-only preview.
         // Only an execution-bound route may persist a decision or claim

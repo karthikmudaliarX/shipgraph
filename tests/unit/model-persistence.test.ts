@@ -146,8 +146,8 @@ describe('MODEL-001 persistence', () => {
     db.prepare(
       `INSERT INTO runs (
         id, ticket_id, base_sha, branch_name, status, started_at, project_id,
-        provider, model, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        provider, model, model_provider_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'run-1',
       'KAR-1',
@@ -158,14 +158,15 @@ describe('MODEL-001 persistence', () => {
       projectId,
       'codex',
       'provider/dynamic-model',
+      'codex',
       now,
       now
     );
     db.prepare(
       `INSERT INTO runs (
         id, ticket_id, base_sha, branch_name, status, started_at, project_id,
-        provider, model, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        provider, model, model_provider_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'run-2',
       'KAR-1',
@@ -176,6 +177,7 @@ describe('MODEL-001 persistence', () => {
       projectId,
       'codex',
       'provider/dynamic-model',
+      'codex',
       now,
       now
     );
@@ -307,6 +309,16 @@ describe('MODEL-001 persistence', () => {
     )).toThrow(/does not belong to run/);
 
     repository.appendUsage(usage({ routingDecisionId: routed.id }));
+    expect(repository.releaseProviderCapacity(
+      projectId,
+      'run-1',
+      routed.id,
+      routed.providerId,
+      routed.modelId,
+      now
+    )).toBe(false);
+    expect(repository.listHealth(projectId)[0]?.activeRuns).toBe(1);
+    db.prepare('UPDATE runs SET status = ? WHERE id = ?').run('SUCCEEDED', 'run-1');
     expect(repository.releaseProviderCapacity(
       projectId,
       'run-1',

@@ -448,6 +448,16 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE routing_decisions ADD COLUMN request_fingerprint TEXT;
     `,
   },
+  {
+    version: 13,
+    name: 'persist_model_provider_identity_on_runs',
+    up: `
+      -- AGENT-001 keeps its provider-neutral adapter identity in provider;
+      -- routed MODEL-001 runs also retain the concrete model-provider identity
+      -- so ACP-backed Grok and Antigravity runs cannot be substituted.
+      ALTER TABLE runs ADD COLUMN model_provider_id TEXT;
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {

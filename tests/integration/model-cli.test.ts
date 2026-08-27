@@ -61,8 +61,8 @@ describe('MODEL-001 CLI', () => {
     db.prepare(
       `INSERT INTO runs (
         id, ticket_id, base_sha, branch_name, status, started_at, project_id,
-        provider, model, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        provider, model, model_provider_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'run-cli-1',
       'KAR-6001',
@@ -73,6 +73,7 @@ describe('MODEL-001 CLI', () => {
       project.id,
       'opencode',
       'future/provider-model',
+      'opencode-go',
       now,
       now
     );

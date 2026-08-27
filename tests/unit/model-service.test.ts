@@ -68,8 +68,8 @@ function createProject(db: DbConnection): void {
     db.prepare(
       `INSERT INTO runs (
         id, ticket_id, base_sha, branch_name, status, started_at, project_id,
-        provider, model, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        provider, model, model_provider_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'run-1',
       'KAR-1',
@@ -80,14 +80,15 @@ function createProject(db: DbConnection): void {
       projectId,
       'codex',
       'codex/dynamic',
+      'codex',
       now,
       now
     );
     db.prepare(
       `INSERT INTO runs (
         id, ticket_id, base_sha, branch_name, status, started_at, project_id,
-        provider, model, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        provider, model, model_provider_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'run-2',
       'KAR-2',
@@ -98,6 +99,7 @@ function createProject(db: DbConnection): void {
       projectId,
       'codex',
       'codex/dynamic',
+      'codex',
       now,
       now
     );
@@ -396,6 +398,7 @@ describe('MODEL-001 service', () => {
       )
       .get(winner.id) as { run_id: string } | undefined;
     if (reservation === undefined) throw new Error('missing provider reservation fixture');
+    db.prepare('UPDATE runs SET status = ? WHERE id = ?').run('SUCCEEDED', reservation.run_id);
     await service.recordUsage({
       runId: reservation.run_id,
       providerId: winner.providerId,
@@ -417,6 +420,7 @@ describe('MODEL-001 service', () => {
     expect(retry).toMatchObject({
       providerId: 'codex',
     });
+    db.prepare('UPDATE runs SET status = ? WHERE id = ?').run('SUCCEEDED', retryRunId);
     await service.recordUsage({
       runId: retryRunId,
       providerId: retry.providerId,
@@ -464,9 +468,33 @@ describe('MODEL-001 service', () => {
         activeConcurrentTickets: 0,
         budgetRemaining: 'unknown',
       },
-    })).rejects.toThrow(/No usable provider\/model|capacity changed/);
+    })).rejects.toThrow(/No usable provider\/model|capacity changed|capability-probed AGENT-001/);
     expect(service.listRoutingDecisions()).toHaveLength(0);
     expect(service.listHealth()[0]?.activeRuns).toBe(0);
+  });
+
+  it('fails closed when a selected MODEL task has no matching AGENT capability', async () => {
+    const calls = { probe: 0, discover: 0 };
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [adapter('codex', 'openai', calls)],
+      executionAdapters: [executionBinding('codex')],
+      now: () => now,
+    });
+    await service.refresh();
+
+    await expect(service.route({
+      task: 'review',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 4,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    })).rejects.toThrow(/does not support MODEL task review/);
+    expect(service.listRoutingDecisions()).toHaveLength(0);
   });
 
   it('replays a request idempotently without creating another reservation', async () => {
@@ -508,6 +536,7 @@ describe('MODEL-001 service', () => {
       /different durable run/
     );
 
+    db.prepare('UPDATE runs SET status = ? WHERE id = ?').run('SUCCEEDED', 'run-1');
     await service.recordUsage({
       runId: 'run-1',
       providerId: first.providerId,
@@ -728,6 +757,7 @@ describe('MODEL-001 service', () => {
       },
     })).rejects.toThrow(/No usable provider\/model|capacity/);
 
+    db.prepare('UPDATE runs SET status = ? WHERE id = ?').run('SUCCEEDED', 'run-1');
     await service.recordUsage({
       runId: 'run-1',
       providerId: decision.providerId,

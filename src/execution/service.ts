@@ -13,7 +13,11 @@ import {
   AGENT_PROVIDERS,
   type AgentProvider,
 } from '../domain/agent-provider.js';
-import { MODEL_PROVIDER_TO_AGENT_PROVIDER } from '../domain/model-provider.js';
+import {
+  MODEL_PROVIDER_TO_AGENT_PROVIDER,
+  modelProviderIdSchema,
+  type ModelProviderId,
+} from '../domain/model-provider.js';
 import {
   ACTIVE_AGENT_RUN_STATES,
   AGENT_INSTRUCTIONS_LIMIT_BYTES,
@@ -62,6 +66,8 @@ export type AgentTaskInput = {
   model: string;
   instructions: string;
   provider?: AgentProvider;
+  /** Concrete MODEL-001 identity when this run is selected by the router. */
+  modelProviderId?: ModelProviderId;
   /** Existing CREATED run to execute after MODEL-001 binds its route. */
   runId?: string;
   timeoutMs?: number;
@@ -185,6 +191,39 @@ export async function executeAgentTask(
     throw new Error(`Run ${started.id} changed while workspace re-verification was recorded`);
   }
 
+  // Re-probe after the final workspace proof and immediately before the
+  // adapter can spawn a provider. The earlier MODEL-001 refresh is only a
+  // routing snapshot; it is not launch authority.
+  let executionProbe: Awaited<ReturnType<AgentExecutionAdapter['probe']>>;
+  try {
+    executionProbe = await options.adapter.probe();
+  } catch (error) {
+    const recovered = markRunNeedsHuman(
+      options,
+      started.id,
+      `Agent execution capability could not be verified before provider launch: ${safeErrorMessage(error)}`,
+      createEventId,
+      now,
+      'adapter_error',
+      true
+    );
+    if (recovered) return { created: true, run: recovered };
+    throw new Error(`Run ${started.id} changed while capability recovery was being recorded`);
+  }
+  if (!executionProbe.available) {
+    const recovered = markRunNeedsHuman(
+      options,
+      started.id,
+      `Agent execution surface became unavailable before provider launch: ${executionProbe.reason}`,
+      createEventId,
+      now,
+      'executable_unavailable',
+      true
+    );
+    if (recovered) return { created: true, run: recovered };
+    throw new Error(`Run ${started.id} changed while capability recovery was being recorded`);
+  }
+
   let adapterResult: AgentExecutionResult;
   try {
     const request: AgentExecutionRequest = {
@@ -267,18 +306,13 @@ export async function executeSelectedAgentTask(
     );
   }
   verifyExecutionBinding(options, target);
-  const executionProbe = await target.adapter.probe();
-  if (!executionProbe.available) {
-    throw new Error(
-      `MODEL-001 execution surface became unavailable before provider launch: ${executionProbe.reason}`
-    );
-  }
   return executeAgentTask(
     { ...options, adapter: target.adapter },
     {
       ...input,
       runId: target.runId,
       provider: target.provider,
+      modelProviderId: target.modelProviderId,
       model: target.modelId,
     }
   );
@@ -300,6 +334,7 @@ function verifyExecutionBinding(
     projectId,
     decisionId
   );
+  const run = createRunRepository(options.db).findById(runId);
   const expectedProvider = MODEL_PROVIDER_TO_AGENT_PROVIDER[target.modelProviderId];
   if (
     persisted === undefined ||
@@ -310,6 +345,11 @@ function verifyExecutionBinding(
     persisted.decision.modelId !== target.modelId ||
     persisted.decision.task !== target.task ||
     persisted.decision.requestFingerprint === undefined ||
+    run === undefined ||
+    run.projectId !== projectId ||
+    run.modelProviderId !== target.modelProviderId ||
+    run.provider !== target.provider ||
+    run.model !== target.modelId ||
     target.provider !== expectedProvider ||
     !isModelExecutionAdapterBound(target)
   ) {
@@ -349,7 +389,9 @@ export async function recoverAgentRun(
     run.id,
     'Run was explicitly recovered after restart; ShipGraph could not prove that its provider process is still owned',
     options.createEventId ?? randomUUID,
-    now
+    now,
+    'stale_run',
+    false
   );
   if (!updated) {
     throw new Error(`Run ${run.id} changed while recovery was being recorded`);
@@ -360,13 +402,30 @@ export async function recoverAgentRun(
 function validateTaskInput(
   options: AgentExecutionServiceOptions,
   input: AgentTaskInput
-): { instructions: string; model: string; timeoutMs: number; maxOutputBytes: number } {
+): {
+  instructions: string;
+  model: string;
+  timeoutMs: number;
+  maxOutputBytes: number;
+  modelProviderId?: ModelProviderId;
+} {
   if (!agentProviderSchema.safeParse(options.adapter.provider).success) {
     throw new Error(`Unsupported agent adapter provider: ${options.adapter.provider}`);
   }
   if (input.provider !== undefined && input.provider !== options.adapter.provider) {
     throw new Error(
       `Requested provider ${input.provider} is not served by the ${options.adapter.provider} adapter`
+    );
+  }
+  const modelProviderId = input.modelProviderId === undefined
+    ? undefined
+    : modelProviderIdSchema.parse(input.modelProviderId);
+  if (
+    modelProviderId !== undefined &&
+    MODEL_PROVIDER_TO_AGENT_PROVIDER[modelProviderId] !== options.adapter.provider
+  ) {
+    throw new Error(
+      `Requested MODEL provider ${modelProviderId} is not served by the ${options.adapter.provider} adapter`
     );
   }
   const model = modelSchema.safeParse(input.model);
@@ -389,7 +448,13 @@ function validateTaskInput(
   if (!Number.isInteger(maxOutputBytes) || maxOutputBytes <= 0 || maxOutputBytes > AGENT_OUTPUT_LIMIT_BYTES) {
     throw new Error(`Agent output limit must be an integer between 1 and ${AGENT_OUTPUT_LIMIT_BYTES} bytes`);
   }
-  return { instructions: input.instructions, model: input.model, timeoutMs, maxOutputBytes };
+  return {
+    instructions: input.instructions,
+    model: input.model,
+    timeoutMs,
+    maxOutputBytes,
+    ...(modelProviderId === undefined ? {} : { modelProviderId }),
+  };
 }
 
 async function getVerifiedExecutionWorkspace(
@@ -412,7 +477,12 @@ async function getVerifiedExecutionWorkspace(
 function buildAgentRun(
   workspace: WorkspaceRecord,
   provider: AgentProvider,
-  normalized: { instructions: string; model: string; timeoutMs: number },
+  normalized: {
+    instructions: string;
+    model: string;
+    timeoutMs: number;
+    modelProviderId?: ModelProviderId;
+  },
   runId: string,
   createdAt: string
 ): AgentRunRecord {
@@ -426,6 +496,9 @@ function buildAgentRun(
     branchName: workspace.branchName,
     status: 'CREATED',
     provider,
+    ...(normalized.modelProviderId === undefined
+      ? {}
+      : { modelProviderId: normalized.modelProviderId }),
     model: normalized.model,
     createdAt,
     // The legacy schema requires started_at to be non-null. It is replaced by
@@ -447,7 +520,12 @@ function loadPreparedRun(
   options: AgentExecutionServiceOptions,
   runId: string,
   workspace: WorkspaceRecord,
-  normalized: { instructions: string; model: string; timeoutMs: number }
+  normalized: {
+    instructions: string;
+    model: string;
+    timeoutMs: number;
+    modelProviderId?: ModelProviderId;
+  }
 ): AgentRunRecord {
   const run = requireDurableRun(createRunRepository(options.db).findById(runId));
   const instructionHash = createHash('sha256').update(normalized.instructions).digest('hex');
@@ -466,6 +544,9 @@ function loadPreparedRun(
   }
   if (run.provider !== options.adapter.provider || run.model !== normalized.model) {
     throw new Error(`Prepared agent run ${run.id} does not match the selected provider/model`);
+  }
+  if (run.modelProviderId !== normalized.modelProviderId) {
+    throw new Error(`Prepared agent run ${run.id} does not match the selected MODEL provider`);
   }
   if (run.instructionsSha256 !== instructionHash || run.timeoutMs !== normalized.timeoutMs) {
     throw new Error(`Prepared agent run ${run.id} does not match the execution request`);
@@ -506,6 +587,7 @@ function persistCreatedRun(
         workspacePath: run.workspacePath,
         branchName: run.branchName,
         provider: run.provider,
+        ...(run.modelProviderId === undefined ? {} : { modelProviderId: run.modelProviderId }),
         model: run.model,
         createdAt: run.createdAt,
         timeoutMs: run.timeoutMs,
@@ -631,7 +713,8 @@ function markRunNeedsHuman(
   reason: string,
   createEventId: () => string,
   now: () => string,
-  category: AgentFailureCategory = 'stale_run'
+  category: AgentFailureCategory = 'stale_run',
+  releaseCapacity = true
 ): AgentRunRecord | undefined {
   const timestamp = now();
   const apply = options.db.transaction((): AgentRunRecord | undefined => {
@@ -673,7 +756,7 @@ function markRunNeedsHuman(
         failureReason: durableUpdated.failureReason,
       },
     });
-    releaseActiveModelReservation(options, durableUpdated, timestamp);
+    if (releaseCapacity) releaseActiveModelReservation(options, durableUpdated, timestamp);
     return requireDurableRun(repository.findById(runId));
   }).immediate;
   return apply();
@@ -689,7 +772,8 @@ function releaseActiveModelReservation(
   run: AgentRunRecord,
   releasedAt: string
 ): void {
-  const active = createModelRepository(options.db).findActiveRoutingDecisionByRun(
+  const modelRepository = createModelRepository(options.db);
+  const active = modelRepository.findActiveRoutingDecisionByRun(
     run.projectId,
     run.id
   );
@@ -701,13 +785,14 @@ function releaseActiveModelReservation(
   ) {
     throw new Error(`Active routing reservation for run ${run.id} is ambiguous; refusing release`);
   }
-  const released = createModelRepository(options.db).releaseProviderCapacity(
+  const released = modelRepository.releaseProviderCapacity(
     run.projectId,
     run.id,
     active.decision.id,
     active.decision.providerId,
     active.decision.modelId,
-    releasedAt
+    releasedAt,
+    true
   );
   if (!released) {
     throw new Error(`Active routing reservation for run ${run.id} changed before release`);

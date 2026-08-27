@@ -167,6 +167,19 @@ describe('OpenCode adapter and process boundary', () => {
     );
     expect(redactedJson).not.toContain('json-secret-value');
     expect(redactedJson).not.toContain('another-json-secret');
+    expect(redactSensitiveText('Authorization: Basic dXNlcjpzdXBlci1zZWNyZXQ=')).toBe(
+      'Authorization: Basic [REDACTED_SECRET]'
+    );
+    expect(redactSensitiveText('{"secretAccessKey":"aws-secret-value"}')).toBe(
+      '{"secretAccessKey":"[REDACTED_SECRET]"}'
+    );
+    const escapedJson = String.raw`{\"client_secret\":\"escaped-json-secret\"}`;
+    expect(redactSensitiveText(escapedJson)).toBe(
+      String.raw`{\"client_secret\":\"[REDACTED_SECRET]\"}`
+    );
+    expect(redactSensitiveText('{"credential":"credential-secret"}')).toBe(
+      '{"credential":"[REDACTED_SECRET]"}'
+    );
     expect(redactSensitiveText('ordinary project output')).toBe('ordinary project output');
   });
 

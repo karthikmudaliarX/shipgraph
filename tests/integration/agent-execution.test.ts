@@ -24,6 +24,7 @@ import { createModelRepository } from '../../src/persistence/model-repositories.
 import { ModelRoutingService } from '../../src/model/service.js';
 import {
   executeAgentTask,
+  executeSelectedAgentTask,
   prepareAgentTaskRun,
   recoverAgentRun,
   type AgentExecutionServiceOptions,
@@ -268,16 +269,28 @@ describe('AGENT-001 durable execution', () => {
   });
 
   it.each([
-    ['missing executable', '/definitely/not/opencode', undefined, 'executable_missing', 'FAILED'],
-    ['malformed output', providerScript('printf "not-json\\n"'), undefined, 'malformed_output', 'FAILED'],
+    ['missing executable', '/definitely/not/opencode', undefined, 'executable_unavailable', 'NEEDS_HUMAN'],
+    [
+      'malformed output',
+      providerScript('if [ "$1" = "--version" ]; then printf -- "provider 1.0\\n"; exit 0; fi; if [ "$1" = "run" ] && [ "$2" = "--help" ]; then printf -- "--format --dir --model --auto\\n"; exit 0; fi; printf "not-json\\n"'),
+      undefined,
+      'malformed_output',
+      'FAILED',
+    ],
     [
       'non-zero exit',
-      providerScript('printf \'{"type":"text"}\\n\'; exit 7'),
+      providerScript('if [ "$1" = "--version" ]; then printf -- "provider 1.0\\n"; exit 0; fi; if [ "$1" = "run" ] && [ "$2" = "--help" ]; then printf -- "--format --dir --model --auto\\n"; exit 0; fi; printf \'{"type":"text"}\\n\'; exit 7'),
       undefined,
       'non_zero_exit',
       'FAILED',
     ],
-    ['timeout', providerScript('while true; do sleep 1; done'), 100, 'timeout', 'TIMED_OUT'],
+    [
+      'timeout',
+      providerScript('if [ "$1" = "--version" ]; then printf -- "provider 1.0\\n"; exit 0; fi; if [ "$1" = "run" ] && [ "$2" = "--help" ]; then printf -- "--format --dir --model --auto\\n"; exit 0; fi; while true; do sleep 1; done'),
+      100,
+      'timeout',
+      'TIMED_OUT',
+    ],
   ])('persists %s as a bounded terminal outcome', async (_name, executable, timeoutMs, category, state) => {
     harness = await createHarness();
     const options: AgentExecutionServiceOptions = {
@@ -313,7 +326,7 @@ describe('AGENT-001 durable execution', () => {
 
   it('records cancellation and never persists the instructions or environment', async () => {
     harness = await createHarness();
-    const script = providerScript('sleep 30');
+    const script = providerScript('if [ "$1" = "--version" ]; then printf -- "provider 1.0\\n"; exit 0; fi; if [ "$1" = "run" ] && [ "$2" = "--help" ]; then printf -- "--format --dir --model --auto\\n"; exit 0; fi; sleep 30');
     const options: AgentExecutionServiceOptions = {
       ...harness.options,
       adapter: new OpenCodeAdapter({ executable: script, environment: { TEST_SECRET: 'do-not-persist' } }),
@@ -395,7 +408,7 @@ describe('AGENT-001 durable execution', () => {
     expect(result.run.failureCategory).toBe('stale_run');
   });
 
-  it('releases a routed provider reservation when explicit recovery terminalizes the run', async () => {
+  it('retains a routed provider reservation when recovery cannot prove process ownership', async () => {
     harness = await createHarness();
     const projectId = (await inspectAgentProjectId(harness)).projectId;
     const prepared = await prepareAgentTaskRun(
@@ -406,6 +419,7 @@ describe('AGENT-001 durable execution', () => {
       {
         ticketId: 'AG-001',
         provider: 'opencode',
+        modelProviderId: 'opencode-go',
         model: 'opencode/dynamic-model',
         instructions: 'prepare a recoverable routed run',
       }
@@ -431,7 +445,7 @@ describe('AGENT-001 durable execution', () => {
       adapters: [providerAdapter],
       executionAdapters: [{ modelProviderId: 'opencode-go', adapter: harness.options.adapter }],
     });
-    await modelService.route({
+    const decision = await modelService.route({
       runId: prepared.run.id,
       task: 'implementation',
       risk: 'medium',
@@ -451,6 +465,86 @@ describe('AGENT-001 durable execution', () => {
     }, prepared.run.id);
 
     expect(recovered.run.status).toBe('NEEDS_HUMAN');
+    expect(modelService.listHealth()[0]?.activeRuns).toBe(1);
+    expect(createModelRepository(harness.db).findActiveRoutingDecisionByRun(projectId, prepared.run.id))
+      .toMatchObject({ reservationStatus: 'active' });
+    await modelService.recordUsage({
+      runId: prepared.run.id,
+      providerId: 'opencode-go',
+      modelId: 'opencode/dynamic-model',
+      task: 'implementation',
+      retryCount: 0,
+      elapsedMs: 0,
+      outcome: 'unknown',
+      outcomeQuality: 'unknown',
+      routingDecisionId: decision.id,
+    });
+    expect(modelService.listHealth()[0]?.activeRuns).toBe(1);
+  });
+
+  it('durably recovers and releases a route when capability probing fails before launch', async () => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    const prepared = await prepareAgentTaskRun(
+      {
+        ...harness.options,
+        createRunId: () => 'capability-drift-run',
+      },
+      {
+        ticketId: 'AG-001',
+        provider: 'opencode',
+        modelProviderId: 'opencode-go',
+        model: 'opencode/dynamic-model',
+        instructions: 'must not launch after capability drift',
+      }
+    );
+    const providerAdapter: ModelProviderAdapter = {
+      providerId: 'opencode-go',
+      family: 'opencode',
+      displayName: 'OpenCode Go',
+      probe: async () => ({
+        availability: 'available',
+        auth: 'authenticated',
+        version: 'test',
+        capabilities: ['implementation'],
+      }),
+      discoverModels: async () => ({
+        status: 'known',
+        models: [{ modelId: 'opencode/dynamic-model', capabilities: ['implementation'] }],
+      }),
+    };
+    const modelService = new ModelRoutingService({
+      db: harness.db,
+      projectId,
+      adapters: [providerAdapter],
+      executionAdapters: [{ modelProviderId: 'opencode-go', adapter: harness.options.adapter }],
+    });
+    const decision = await modelService.route({
+      runId: prepared.run.id,
+      task: 'implementation',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 1,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    });
+    const target = modelService.resolveExecutionTarget(decision);
+    harness.options.adapter.probe = () => ({
+      available: false,
+      reason: 'test executable disappeared',
+    });
+
+    const result = await executeSelectedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      target,
+      { ticketId: 'AG-001', instructions: 'must not launch after capability drift' }
+    );
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe('executable_unavailable');
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(0);
     expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
     expect(createModelRepository(harness.db).findActiveRoutingDecisionByRun(projectId, prepared.run.id))
       .toBeUndefined();

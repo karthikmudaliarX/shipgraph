@@ -2,6 +2,7 @@ import { compareStableStrings } from '../utils/sorting.js';
 import {
   modelRoutingRequestSchema,
   MODEL_PROVIDER_TO_AGENT_PROVIDER,
+  UNKNOWN_PROVIDER_CONCURRENCY_LIMIT,
   providerHealthRecordSchema,
   providerRegistryRecordSchema,
   modelCatalogRecordSchema,
@@ -189,7 +190,10 @@ function isUsableProvider(
 }
 
 function isProviderAtCapacity(health: ProviderHealthRecord): boolean {
-  return isKnownNumber(health.maxConcurrentRuns) && health.activeRuns >= health.maxConcurrentRuns;
+  const limit = isKnownNumber(health.maxConcurrentRuns)
+    ? health.maxConcurrentRuns
+    : UNKNOWN_PROVIDER_CONCURRENCY_LIMIT;
+  return health.activeRuns >= limit;
 }
 
 function groupModels(

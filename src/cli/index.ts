@@ -531,6 +531,7 @@ export function createProgram(): Command {
           {
             ticketId,
             provider,
+            modelProviderId: modelProvider,
             model: options.model,
             instructions: options.instructions,
             timeoutMs: parsePositiveInteger(options.timeoutMs, 'timeout-ms'),

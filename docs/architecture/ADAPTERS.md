@@ -76,9 +76,11 @@ capability-probed execution status and `ProviderHealth` state. `ModelRouter`
 receives only an explicit execution envelope (Eco, Balanced or Max plus the
 caller's budget/concurrency values), selects a discovered usable model for
 implementation, review or repair only when its AGENT-001 adapter is available,
-persists its reason, and atomically reserves the selected provider's known
-capacity when the caller supplies a durable execution run whose provider/model
-identity matches the selected target. A route without a run ID is a
+persists its reason, and atomically reserves the selected provider's capacity
+when the caller supplies a durable execution run whose provider/model
+identity matches the selected target. Known limits are enforced directly; an
+unknown provider limit uses a conservative one-at-a-time local admission
+bound, not a quota estimate. A route without a run ID is a
 non-persistent decision preview and does not claim provider capacity.
 `ModelRoutingService.resolveExecutionTarget()` returns the exact
 capability-probed adapter for a route; only its active, run-bound target is
@@ -91,11 +93,13 @@ does not claim or mutate global ticket capacity.
 Review routing prefers a different provider family from the implementation when
 one is available. `UsageLedger` is append-only, accepts only durable run IDs
 from the current project, records per-run/provider/model telemetry without raw
-provider output or credentials. Terminalizing or explicitly recovering the
-owning durable run releases its execution-bound provider reservation; usage
-finalization remains append-only and idempotent for capacity release. A durable
-agent run may issue sequential model attempts, so its RUNNING state alone does
-not keep a completed model-attempt reservation active.
+provider output or credentials. Terminalizing the owning durable run releases
+its execution-bound provider reservation. Explicit recovery marks the run
+`NEEDS_HUMAN` but retains the slot when provider-process ownership cannot be
+proven. Usage finalization remains append-only and idempotent for capacity
+release. A durable agent run may issue sequential model attempts, so its
+RUNNING state alone does not keep a completed model-attempt reservation
+active.
 
 The AGENT-001 execution command accepts an explicit provider/model and can use
 the bounded Codex, Grok or Antigravity adapters as well as OpenCode. MODEL-001

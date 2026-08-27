@@ -80,6 +80,12 @@ export const quotaPressureSchema = z.enum(QUOTA_PRESSURES);
 
 export const UNKNOWN = 'unknown' as const;
 export type UnknownValue = typeof UNKNOWN;
+/**
+ * Conservative local admission bound used when a provider exposes no
+ * trustworthy concurrency limit. This is not a quota estimate; it prevents
+ * ShipGraph from admitting concurrent work on an unmeasured surface.
+ */
+export const UNKNOWN_PROVIDER_CONCURRENCY_LIMIT = 1;
 export type KnownNumber = number | UnknownValue;
 export type KnownTimestamp = string | UnknownValue;
 

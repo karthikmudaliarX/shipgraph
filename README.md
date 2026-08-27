@@ -98,15 +98,18 @@ or merges code.
 The execution envelope is a Scheduler-owned snapshot: MODEL-001 validates the
 supplied global mode, budget and ticket counts but does not claim global ticket
 capacity. A route supplied with a durable `--run-id` reserves a provider run
-slot when that limit is known; the durable run must already identify the exact
-AGENT adapter and discovered model. A route without one is a non-persistent
-decision preview. Only a target resolved from an active run-bound reservation
-may enter `executeSelectedAgentTask`; preview targets are rejected by that
-bridge. Usage finalization releases an execution-bound reservation only when
-the same durable run and routing decision ID are supplied; terminalizing or
-explicitly recovering that AGENT run releases its active provider slot in the
-same durable transition. Usage finalization remains append-only and idempotent
-for capacity release.
+slot. Known provider limits are enforced directly; when a provider exposes no
+trustworthy concurrency limit, ShipGraph uses a conservative one-at-a-time
+local admission bound, without estimating quota. The durable run must already
+identify the exact AGENT adapter and discovered model. A route without one is a
+non-persistent decision preview. Only a target resolved from an active
+run-bound reservation may enter `executeSelectedAgentTask`; preview targets are
+rejected by that bridge. Usage finalization releases an execution-bound
+reservation only when the same durable run and routing decision ID are
+supplied and the owning AGENT run is terminal. Terminalizing releases the slot;
+explicit recovery marks the run `NEEDS_HUMAN` and retains the slot when
+provider-process ownership cannot be proven. Usage finalization remains
+append-only and idempotent for capacity release.
 
 ## CLI examples
 
@@ -153,7 +156,7 @@ shipgraph providers refresh --json
 # Preview a route; --run-id <run-id> binds it to a durable execution reservation
 # Retries without --request-id use the durable run ID as their stable key
 shipgraph providers route implementation --risk medium --mode balanced --run-id <run-id> --json
-# After a terminal run or explicit recovery releases that reservation, use a new request ID for a new attempt.
+# After a terminal run releases that reservation, use a new request ID for a new attempt. Explicit recovery retains it for human reconciliation.
 # Usage records model telemetry and is idempotent for an already released slot.
 
 # Inspect persisted provider health and discovered models

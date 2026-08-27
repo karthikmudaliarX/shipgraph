@@ -1,4 +1,5 @@
 import type { AgentProvider } from '../domain/agent-provider.js';
+import type { ModelProviderId } from '../domain/model-provider.js';
 import {
   executeAgentTask,
   inspectAgentRun,
@@ -25,6 +26,7 @@ export async function runAgentTask(
   input: {
     ticketId: string;
     provider?: AgentProvider;
+    modelProviderId?: ModelProviderId;
     model: string;
     instructions: string;
     timeoutMs?: number;
