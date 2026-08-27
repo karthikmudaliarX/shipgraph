@@ -21,7 +21,6 @@ import { initProject } from '../../src/cli/init.js';
 import { syncBacklogProject } from '../../src/cli/backlog.js';
 import { createWorkspace } from '../../src/workspace/service.js';
 import {
-  executeSelectedAgentTask,
   prepareAgentTaskRun,
 } from '../../src/execution/service.js';
 
@@ -137,14 +136,12 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
 
   afterEach(() => db?.close());
 
-  it('resolves a routed Codex model to the provider-neutral adapter and executes it', async () => {
+  it('resolves a routed Codex model without exposing a raw adapter', async () => {
     db = createDatabase(':memory:');
     migrate(db);
     createProject(db);
-    const calls: AgentProcessSpec[] = [];
     const processRunner: AgentProcessRunner = {
       run: async (spec) => {
-        calls.push(spec);
         if (spec.args[0] === '--version') return result({ stdout: 'codex 1.0.0\n' });
         if (spec.args[0] === 'exec' && spec.args[1] === '--help') {
           return result({
@@ -178,27 +175,10 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
       },
     });
     const target = service.resolveExecutionTarget(decision);
-    const execution = await target.adapter.execute({
-      runId: 'run-1',
-      projectId,
-      ticketId: 'KAR-6001',
-      workspaceId: 'workspace-1',
-      workspacePath: '/tmp/shipgraph-model-worktree',
-      branchName: 'shipgraph/kar-6001',
-      baseSha: '0123456789012345678901234567890123456789',
-      provider: target.provider,
-      model: target.modelId,
-      instructions: 'Implement the approved task',
-      timeoutMs: 1_000,
-      maxOutputBytes: 4_096,
-    });
 
     expect(target.modelProviderId).toBe('codex');
     expect(target.provider).toBe('codex');
-    expect(target.adapter).toBe(executionAdapter);
-    expect(execution.outcome).toBe('SUCCEEDED');
-    const executionCall = calls.find((call) => call.args.includes(target.modelId));
-    expect(executionCall?.cwd).toBe('/tmp/shipgraph-model-worktree');
+    expect(target).not.toHaveProperty('adapter');
   });
 
   it('routes review around an available adapter without the requested AGENT capability', async () => {
@@ -235,7 +215,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
     const target = service.resolveExecutionTarget(decision);
 
     expect(decision.providerId).toBe('gemini');
-    expect(target.adapter).toBe(geminiAdapter);
+    expect(target).not.toHaveProperty('adapter');
     expect(target.provider).toBe('acp');
   });
 
@@ -347,7 +327,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
     const target = modelService.resolveExecutionTarget(decision);
     expect(target.executionBound).toBe(false);
     await expect(
-      executeSelectedAgentTask(
+      modelService.executeSelectedAgentTask(
         { db, projectDir, worktreeRoot },
         target,
         { ticketId: workspace.workspace.ticketId, instructions: 'must be bound first' }
@@ -359,7 +339,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
         db,
         projectDir,
         worktreeRoot,
-        adapter: target.adapter,
+        adapter: executionAdapter,
         now: () => now,
         createRunId: () => 'run-model-bridge',
       },
@@ -390,14 +370,14 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
     expect(boundTarget.runId).toBe(prepared.run.id);
     db.prepare('UPDATE runs SET model_provider_id = ? WHERE id = ?').run('gemini', prepared.run.id);
     await expect(
-      executeSelectedAgentTask(
+      modelService.executeSelectedAgentTask(
         { db, projectDir, worktreeRoot, now: () => now },
         boundTarget,
         { ticketId: workspace.workspace.ticketId, instructions: 'must reject substituted provider', timeoutMs: 1_000 }
       )
     ).rejects.toThrow(/not a current execution binding/);
     db.prepare('UPDATE runs SET model_provider_id = ? WHERE id = ?').run('codex', prepared.run.id);
-    const execution = await executeSelectedAgentTask(
+    const execution = await modelService.executeSelectedAgentTask(
       { db, projectDir, worktreeRoot, now: () => now },
       boundTarget,
       { ticketId: workspace.workspace.ticketId, instructions: 'Implement through the selected route', timeoutMs: 1_000 }
@@ -423,6 +403,115 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
       outcomeQuality: 'good',
     });
     expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
+  });
+
+  it('retains provider capacity after timeout until process ownership is reconciled', async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'shipgraph-model-timeout-src-'));
+    const worktreeRoot = mkdtempSync(join(tmpdir(), 'shipgraph-model-timeout-root-'));
+    temporaryDirectories.push(projectDir, worktreeRoot);
+    git(projectDir, 'init', '-b', 'main');
+    git(projectDir, 'config', 'user.email', 'shipgraph-model@example.com');
+    git(projectDir, 'config', 'user.name', 'ShipGraph Model Test');
+    writeFileSync(join(projectDir, 'README.md'), '# timeout bridge\n');
+    git(projectDir, 'add', '.');
+    git(projectDir, 'commit', '-m', 'initial');
+    const config: ShipgraphConfig = {
+      version: 1,
+      project: { name: 'model-timeout', repository: 'owner/model-timeout', defaultBranch: 'main' },
+      execution: { maxConcurrentTickets: 1, maxRepairIterations: 6 },
+      release: { requireHumanApproval: true, requireCleanCI: true, requireExactShaReviews: true },
+      agents: { implementer: 'opencode', reviewers: ['correctness'] },
+    };
+    initProject(projectDir, { config });
+    writeFileSync(
+      join(projectDir, 'shipgraph.backlog.yml'),
+      stringify({ version: 1, tickets: [bridgeTicket()] })
+    );
+    syncBacklogProject(projectDir);
+    db = createDatabase(join(projectDir, '.shipgraph', 'shipgraph.db'));
+    migrate(db);
+    const project = createProjectRepository(db).findAll()[0];
+    if (project === undefined) throw new Error('missing timeout bridge project');
+
+    const executionAdapter: AgentExecutionAdapter = {
+      provider: 'codex',
+      capabilities: ['execute'],
+      probe: async () => ({ available: true as const, version: 'test-codex' }),
+      execute: async (request) => {
+        await request.onProcessStarted?.(4343);
+        return {
+          outcome: 'TIMED_OUT' as const,
+          timedOut: true,
+          cancelled: false,
+          stdout: '',
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          failureCategory: 'timeout' as const,
+          failureReason: 'test timeout',
+        };
+      },
+    };
+    const workspace = await createWorkspace({ db, projectDir, worktreeRoot }, 'KAR-6001');
+    const modelService = new ModelRoutingService({
+      db,
+      projectId: project.id,
+      adapters: [providerAdapter('codex', 'openai')],
+      executionAdapters: [{ modelProviderId: 'codex', adapter: executionAdapter }],
+      now: () => now,
+    });
+    await modelService.refresh();
+    const prepared = await prepareAgentTaskRun(
+      {
+        db,
+        projectDir,
+        worktreeRoot,
+        adapter: executionAdapter,
+        now: () => now,
+        createRunId: () => 'run-model-timeout',
+      },
+      {
+        ticketId: workspace.workspace.ticketId,
+        provider: 'codex',
+        modelProviderId: 'codex',
+        model: 'codex/dynamic-model',
+        instructions: 'exercise timeout reservation retention',
+        timeoutMs: 1_000,
+      }
+    );
+    const decision = await modelService.route({
+      runId: prepared.run.id,
+      task: 'implementation',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 1,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    });
+    const result = await modelService.executeSelectedAgentTask(
+      { db, projectDir, worktreeRoot, now: () => now },
+      modelService.resolveExecutionTarget(decision),
+      { ticketId: workspace.workspace.ticketId, instructions: 'exercise timeout reservation retention', timeoutMs: 1_000 }
+    );
+
+    expect(result.run.status).toBe('TIMED_OUT');
+    expect(modelService.listHealth()[0]?.activeRuns).toBe(1);
+    expect(createModelRepository(db).findActiveRoutingDecisionByRun(project.id, prepared.run.id))
+      .toMatchObject({ reservationStatus: 'active', runId: prepared.run.id });
+    await modelService.recordUsage({
+      runId: prepared.run.id,
+      routingDecisionId: decision.id,
+      providerId: decision.providerId,
+      modelId: decision.modelId,
+      task: decision.task,
+      retryCount: 0,
+      elapsedMs: 0,
+      outcome: 'unknown',
+      outcomeQuality: 'unknown',
+    });
+    expect(modelService.listHealth()[0]?.activeRuns).toBe(1);
   });
 
   it('retains provider capacity when a selected adapter throws after starting', async () => {
@@ -509,7 +598,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
       },
     });
     const target = modelService.resolveExecutionTarget(decision);
-    const execution = await executeSelectedAgentTask(
+    const execution = await modelService.executeSelectedAgentTask(
       { db, projectDir, worktreeRoot, now: () => now },
       target,
       { ticketId: workspace.workspace.ticketId, instructions: 'exercise ambiguous provider ownership', timeoutMs: 1_000 }

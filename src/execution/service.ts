@@ -5,11 +5,7 @@ import type {
   AgentExecutionRequest,
   AgentExecutionResult,
 } from '../adapters/agent/adapter.js';
-import {
-  isModelExecutionAdapterBound,
-  MODEL_TASK_TO_AGENT_CAPABILITY,
-  type ModelExecutionTarget,
-} from '../adapters/agent/registry.js';
+import { MODEL_TASK_TO_AGENT_CAPABILITY } from '../adapters/agent/registry.js';
 import {
   AGENT_PROVIDERS,
   type AgentProvider,
@@ -95,7 +91,8 @@ export type SelectedAgentTaskInput = Omit<AgentTaskInput, 'model' | 'provider' |
 
 /**
  * Persist a CREATED AGENT-001 run without launching a provider. MODEL-001 can
- * then bind a route to this run before executeSelectedAgentTask starts it.
+ * then bind a route to this run before ModelRoutingService starts it through
+ * the provider-neutral execution bridge.
  */
 export async function prepareAgentTaskRun(
   options: AgentExecutionServiceOptions,
@@ -264,10 +261,18 @@ export async function executeAgentTask(
       },
     };
     adapterResult = await options.adapter.execute(request);
-    // A resolved adapter call has observed the provider attempt's terminal
-    // result. NEEDS_HUMAN is deliberately excluded: that outcome may be
-    // returned by an adapter that cannot prove its provider process stopped.
-    executionStopped = adapterResult.outcome !== 'NEEDS_HUMAN';
+    // A resolved adapter call normally observes the provider attempt's
+    // terminal result. Timeout, cancellation and output-limit termination are
+    // different: the runner only proves that the launched process group was
+    // signalled, not that a provider-created descendant cannot still modify
+    // the workspace. Keep the provider reservation in those cases until an
+    // operator explicitly reconciles process ownership.
+    executionStopped =
+      adapterResult.outcome !== 'NEEDS_HUMAN' &&
+      !adapterResult.timedOut &&
+      !adapterResult.cancelled &&
+      !adapterResult.stdoutTruncated &&
+      !adapterResult.stderrTruncated;
   } catch (error) {
     // An adapter may have spawned a provider and then lost its bookkeeping
     // channel. Keep the durable reservation until an operator can reconcile
@@ -309,81 +314,6 @@ export async function executeAgentTask(
     if (recovered) return { created: true, run: recovered };
     throw new Error(
       `Run ${started.id} terminal result could not be persisted and the run could not be marked NEEDS_HUMAN: ${safeErrorMessage(error)}`
-    );
-  }
-}
-
-/**
- * Execute a selection returned by MODEL-001 through the AGENT-001 boundary.
- * The target carries the already-resolved adapter and model ID; this helper
- * deliberately does not perform scheduling or choose another provider.
- */
-export async function executeSelectedAgentTask(
-  options: Omit<AgentExecutionServiceOptions, 'adapter'>,
-  target: ModelExecutionTarget,
-  input: SelectedAgentTaskInput
-): Promise<AgentTaskResult> {
-  if (
-    !target.executionBound ||
-    target.routingDecisionId === undefined ||
-    target.runId === undefined
-  ) {
-    throw new Error(
-      'MODEL-001 route is not execution-bound; durable agent execution requires an active run reservation'
-    );
-  }
-  verifyExecutionBinding(options, target);
-  return executeAgentTask(
-    { ...options, adapter: target.adapter },
-    {
-      ...input,
-      task: target.task,
-      runId: target.runId,
-      provider: target.provider,
-      modelProviderId: target.modelProviderId,
-      model: target.modelId,
-    }
-  );
-}
-
-function verifyExecutionBinding(
-  options: Omit<AgentExecutionServiceOptions, 'adapter'>,
-  target: ModelExecutionTarget
-): void {
-  const decisionId = target.routingDecisionId;
-  const runId = target.runId;
-  if (decisionId === undefined || runId === undefined) {
-    throw new Error(
-      'MODEL-001 route is not execution-bound; durable agent execution requires an active run reservation'
-    );
-  }
-  const projectId = getCurrentProjectId(options);
-  const persisted = createModelRepository(options.db).findRoutingDecisionById(
-    projectId,
-    decisionId
-  );
-  const run = createRunRepository(options.db).findById(runId);
-  const expectedProvider = MODEL_PROVIDER_TO_AGENT_PROVIDER[target.modelProviderId];
-  if (
-    persisted === undefined ||
-    !persisted.hasReservation ||
-    persisted.reservationStatus !== 'active' ||
-    persisted.runId !== runId ||
-    persisted.decision.providerId !== target.modelProviderId ||
-    persisted.decision.modelId !== target.modelId ||
-    persisted.decision.task !== target.task ||
-    persisted.decision.requestFingerprint === undefined ||
-    run === undefined ||
-    run.projectId !== projectId ||
-    run.task !== target.task ||
-    run.modelProviderId !== target.modelProviderId ||
-    run.provider !== target.provider ||
-    run.model !== target.modelId ||
-    target.provider !== expectedProvider ||
-    !isModelExecutionAdapterBound(target)
-  ) {
-    throw new Error(
-      `MODEL-001 route ${decisionId} is not a current execution binding`
     );
   }
 }

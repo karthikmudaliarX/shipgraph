@@ -82,9 +82,10 @@ identity matches the selected target. Known limits are enforced directly; an
 unknown provider limit uses a conservative one-at-a-time local admission
 bound, not a quota estimate. A route without a run ID is a
 non-persistent decision preview and does not claim provider capacity.
-`ModelRoutingService.resolveExecutionTarget()` returns the exact
-capability-probed adapter for a route; only its active, run-bound target is
-accepted by `executeSelectedAgentTask`, so a preview cannot bypass capacity.
+`ModelRoutingService.resolveExecutionTarget()` returns an opaque route target,
+not a concrete adapter. Only `ModelRoutingService.executeSelectedAgentTask()`
+can turn an active, run-bound target into the provider-neutral AGENT-001
+execution call, so a preview cannot bypass capacity or workspace validation.
 When no separate request ID is supplied, the durable run ID is the stable
 replay key for that reservation until it is finalized; a new attempt after
 finalization must use a new request ID.
@@ -93,13 +94,12 @@ does not claim or mutate global ticket capacity.
 Review routing prefers a different provider family from the implementation when
 one is available. `UsageLedger` is append-only, accepts only durable run IDs
 from the current project, records per-run/provider/model telemetry without raw
-provider output or credentials. Terminalizing the owning durable run releases
-its execution-bound provider reservation. Explicit recovery marks the run
-`NEEDS_HUMAN` but retains the slot when provider-process ownership cannot be
-proven. Usage finalization remains append-only and idempotent for capacity
-release. A durable agent run may issue sequential model attempts, so its
-RUNNING state alone does not keep a completed model-attempt reservation
-active.
+provider output or credentials. A normal terminal result releases its
+execution-bound provider reservation. Timeout, cancellation, output-limit
+termination and explicit recovery retain the slot when provider-process
+ownership cannot be proven; usage finalization alone cannot release it. Each
+durable AGENT run owns one provider attempt; a later attempt requires a new
+CREATED run and request ID.
 
 The AGENT-001 execution command accepts an explicit provider/model and can use
 the bounded Codex, Grok or Antigravity adapters as well as OpenCode. MODEL-001

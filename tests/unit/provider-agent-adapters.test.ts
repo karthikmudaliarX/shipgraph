@@ -4,7 +4,6 @@ import type { AgentProcessResult, AgentProcessSpec, AgentProcessRunner } from '.
 import { CodexAdapter, GeminiAdapter, GrokAdapter } from '../../src/adapters/agent/providers.js';
 import {
   AgentExecutionAdapterRegistry,
-  isModelExecutionAdapterBound,
   MODEL_PROVIDER_TO_AGENT_PROVIDER,
 } from '../../src/adapters/agent/registry.js';
 
@@ -155,6 +154,7 @@ describe('deferred MODEL-001 provider execution adapters', () => {
       cwd: request.workspacePath,
       args: [
         '--print',
+        request.instructions,
         '--output-format',
         'json',
         '--model',
@@ -163,7 +163,6 @@ describe('deferred MODEL-001 provider execution adapters', () => {
         'accept-edits',
         '--disable-slash-commands',
         '--sandbox',
-        request.instructions,
       ],
     });
     expect(execution).toMatchObject({
@@ -211,8 +210,10 @@ describe('deferred MODEL-001 provider execution adapters', () => {
       task: 'implementation',
     });
 
-    expect(isModelExecutionAdapterBound(target)).toBe(true);
-    expect(isModelExecutionAdapterBound({ ...target, adapter: grok })).toBe(false);
-    expect(isModelExecutionAdapterBound({ ...target, adapter: new GeminiAdapter({ executable: '/opt/agy' }) })).toBe(false);
+    expect(target).not.toHaveProperty('adapter');
+    expect(target.provider).toBe('acp');
+    expect(registry.capabilities(target)).toEqual(['execute']);
+    expect(() => registry.capabilities({ ...target, provider: 'codex' }))
+      .toThrow(/trustworthy AGENT-001 execution adapter/);
   });
 });

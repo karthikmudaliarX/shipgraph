@@ -118,6 +118,7 @@ export class GeminiAdapter extends CommandAgentExecutionAdapter {
       outputFormat: 'json',
       buildArgs: (request) => [
         '--print',
+        request.instructions,
         '--output-format',
         'json',
         '--model',
@@ -126,7 +127,6 @@ export class GeminiAdapter extends CommandAgentExecutionAdapter {
         'accept-edits',
         '--disable-slash-commands',
         '--sandbox',
-        request.instructions,
       ],
     } satisfies CommandAgentAdapterOptions);
   }

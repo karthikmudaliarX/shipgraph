@@ -9,7 +9,13 @@ import {
   type ModelRoutingSelection,
 } from '../../domain/model-provider.js';
 import type { AgentProvider } from '../../domain/agent-provider.js';
-import type { AgentCapability, AgentExecutionAdapter } from './adapter.js';
+import type {
+  AgentCapability,
+  AgentExecutionAdapter,
+  AgentExecutionRequest,
+  AgentExecutionResult,
+  AgentProbeResult,
+} from './adapter.js';
 import {
   createCodexAdapter,
   createGeminiAdapter,
@@ -30,17 +36,16 @@ export type { ModelExecutionAdapterBinding } from './providers.js';
  */
 export { MODEL_PROVIDER_TO_AGENT_PROVIDER } from '../../domain/model-provider.js';
 
-export type ModelExecutionTarget = {
+export type ModelExecutionTarget = Readonly<{
   modelProviderId: ModelProviderId;
   provider: AgentProvider;
   modelId: string;
   task: ModelTaskType;
-  adapter: AgentExecutionAdapter;
   /** True only when MODEL-001 durably reserved this exact target for a run. */
   executionBound: boolean;
   routingDecisionId?: string;
   runId?: string;
-};
+}>;
 
 /** Exhaustive bridge from MODEL-001 task names to AGENT-001 capabilities. */
 export const MODEL_TASK_TO_AGENT_CAPABILITY = {
@@ -128,41 +133,70 @@ export class AgentExecutionAdapterRegistry {
   public resolve(
     selection: Pick<ModelRoutingSelection, 'providerId' | 'modelId' | 'task'>
   ): ModelExecutionTarget {
-    const binding = this.bindings.get(selection.providerId);
-    if (binding === undefined) {
-      throw new Error(`No AGENT-001 execution adapter is bound to ${selection.providerId}`);
-    }
-    const requiredCapability = MODEL_TASK_TO_AGENT_CAPABILITY[selection.task];
-    if (!binding.adapter.capabilities.includes(requiredCapability)) {
-      throw new Error(
-        `AGENT-001 adapter for ${selection.providerId} does not support MODEL task ${selection.task}`
-      );
-    }
-    return {
+    this.adapterForTarget({
       modelProviderId: selection.providerId,
-      provider: binding.adapter.provider,
+      provider: MODEL_PROVIDER_TO_AGENT_PROVIDER[selection.providerId],
       modelId: selection.modelId,
       task: selection.task,
-      adapter: binding.adapter,
       executionBound: false,
-    };
+    });
+    return Object.freeze({
+      modelProviderId: selection.providerId,
+      provider: MODEL_PROVIDER_TO_AGENT_PROVIDER[selection.providerId],
+      modelId: selection.modelId,
+      task: selection.task,
+      executionBound: false,
+    });
   }
-}
 
-/**
- * Verify that a target carries the concrete adapter registered for its
- * MODEL-001 provider identity. This is deliberately fail-closed for targets
- * assembled outside an AgentExecutionAdapterRegistry.
- */
-export function isModelExecutionAdapterBound(
-  target: Pick<ModelExecutionTarget, 'modelProviderId' | 'provider' | 'task' | 'adapter'>
-): boolean {
-  return (
-    adapterModelProviderOwners.get(target.adapter) === target.modelProviderId &&
-    target.provider === MODEL_PROVIDER_TO_AGENT_PROVIDER[target.modelProviderId] &&
-    target.adapter.provider === target.provider &&
-    target.adapter.capabilities.includes(MODEL_TASK_TO_AGENT_CAPABILITY[target.task])
-  );
+  /** Probe the concrete AGENT-001 surface without exposing the adapter. */
+  public probe(target: ModelExecutionTarget): Promise<AgentProbeResult> | AgentProbeResult {
+    return this.adapterForTarget(target).probe();
+  }
+
+  /**
+   * Execute only through a target issued by this registry. The concrete
+   * adapter remains private to the registry; callers must use the
+   * ModelRoutingService execution bridge, which performs durable route and
+   * workspace validation before calling this method.
+   */
+  public execute(
+    target: ModelExecutionTarget,
+    request: AgentExecutionRequest
+  ): Promise<AgentExecutionResult> {
+    if (request.provider !== target.provider || request.model !== target.modelId) {
+      throw new Error(
+        `AGENT-001 request does not match routed target ${target.modelProviderId}/${target.modelId}`
+      );
+    }
+    return this.adapterForTarget(target).execute(request);
+  }
+
+  /** Return the target's capabilities without returning its concrete adapter. */
+  public capabilities(target: ModelExecutionTarget): readonly AgentCapability[] {
+    return [...this.adapterForTarget(target).capabilities];
+  }
+
+  private adapterForTarget(target: ModelExecutionTarget): AgentExecutionAdapter {
+    const binding = this.bindings.get(target.modelProviderId);
+    const expectedProvider = MODEL_PROVIDER_TO_AGENT_PROVIDER[target.modelProviderId];
+    if (
+      binding === undefined ||
+      target.provider !== expectedProvider ||
+      binding.adapter.provider !== expectedProvider
+    ) {
+      throw new Error(
+        `No trustworthy AGENT-001 execution adapter is bound to ${target.modelProviderId}`
+      );
+    }
+    const requiredCapability = MODEL_TASK_TO_AGENT_CAPABILITY[target.task];
+    if (!binding.adapter.capabilities.includes(requiredCapability)) {
+      throw new Error(
+        `AGENT-001 adapter for ${target.modelProviderId} does not support MODEL task ${target.task}`
+      );
+    }
+    return binding.adapter;
+  }
 }
 
 export function createModelExecutionAdapterBindings(

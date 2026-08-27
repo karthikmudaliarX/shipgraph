@@ -82,16 +82,16 @@ atomic, provider/model- and run-bound provider-capacity reservation; a route
 without a run ID is a non-persistent preview. MODEL-001 resolves only an
 active reservation to an execution-bound AGENT target, and AGENT-001 consumes
 that existing CREATED run rather than creating a second unreserved run.
-Terminalizing the owning run releases that reservation in the same SQLite
-transaction. Explicit recovery marks the run `NEEDS_HUMAN` but retains the
-reservation when provider-process ownership cannot be proven; usage
-finalization cannot release an active run's slot. Usage finalization remains
-append-only and idempotent for capacity release. Unknown quota and usage values
-remain unknown.
-The AGENT-001 command remains explicit-provider execution; MODEL-001 resolves a
-routed selection to the exact adapter but does not automatically dispatch a
-ticket, replace that execution contract, or add post-execution PR/review/release
-automation.
+Normal terminalization releases that reservation in the same SQLite
+transaction. Timeout, cancellation, output-limit termination and explicit
+recovery retain the reservation when provider-process ownership cannot be
+proven; usage finalization cannot release an active run's slot by itself.
+Usage finalization remains append-only and idempotent for capacity release.
+Unknown quota and usage values remain unknown.
+The AGENT-001 command remains explicit-provider execution; MODEL-001 resolves an
+opaque routed target and executes it only through its own durable bridge. It does
+not automatically dispatch a ticket, replace that execution contract, or add
+post-execution PR/review/release automation.
 
 ## Known limitations
 

@@ -327,7 +327,8 @@ describe('MODEL-001 persistence', () => {
       routed.id,
       routed.providerId,
       routed.modelId,
-      now
+      now,
+      true
     )).toBe(true);
     expect(repository.listHealth(projectId)[0]?.activeRuns).toBe(0);
   });

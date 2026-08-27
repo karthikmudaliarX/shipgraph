@@ -10,6 +10,12 @@ import {
   type ModelExecutionAdapterBinding,
   type ModelExecutionTarget,
 } from '../adapters/agent/registry.js';
+import type {
+  AgentCapability,
+  AgentExecutionRequest,
+  AgentExecutionResult,
+  AgentProbeResult,
+} from '../adapters/agent/adapter.js';
 import { createModelProviderAdapters } from '../adapters/model/adapter.js';
 import {
   MODEL_PROVIDER_DEFINITIONS,
@@ -167,6 +173,22 @@ export class ProviderRegistry {
         ? []
         : [{ providerId: provider.providerId, capabilities }];
     });
+  }
+
+  /** Proxy the opaque target execution surface without exposing a concrete adapter. */
+  public probeExecution(target: ModelExecutionTarget): Promise<AgentProbeResult> | AgentProbeResult {
+    return this.executionAdapters.probe(target);
+  }
+
+  public executeExecution(
+    target: ModelExecutionTarget,
+    request: AgentExecutionRequest
+  ): Promise<AgentExecutionResult> {
+    return this.executionAdapters.execute(target, request);
+  }
+
+  public executionCapabilitiesFor(target: ModelExecutionTarget): readonly AgentCapability[] {
+    return this.executionAdapters.capabilities(target);
   }
 
   public getRepository(): ModelRepository {

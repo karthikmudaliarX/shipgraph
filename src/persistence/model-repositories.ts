@@ -739,20 +739,16 @@ export function createModelRepository(db: DbConnection): ModelRepository {
 
     // Telemetry may be recorded while a durable run is still active, but it
     // cannot release the provider slot until the AGENT-001 attempt is known to
-    // have stopped. This keeps a premature usage report from admitting a
-    // second process alongside the first one.
+    // have stopped. The proof is supplied only by the execution/reconciliation
+    // path; a usage report alone must never admit a second process alongside a
+    // timed-out, cancelled or otherwise ambiguous attempt.
     const run = db
       .prepare('SELECT status FROM runs WHERE id = ? AND project_id = ?')
       .get(parsedRunId, projectId) as { status: string } | undefined;
     if (run === undefined) {
       throw new Error(`Routing decision ${routingDecisionId} has no owning run`);
     }
-    if (!TERMINAL_RUN_STATUSES.has(run.status)) return false;
-    // NEEDS_HUMAN is also the explicit post-restart recovery state. In that
-    // case ShipGraph deliberately cannot prove that a provider process stopped;
-    // only the execution service, which has just observed the owned attempt
-    // stop, may release that terminal state.
-    if (run.status === 'NEEDS_HUMAN' && !executionStopped) return false;
+    if (!TERMINAL_RUN_STATUSES.has(run.status) || !executionStopped) return false;
 
     const healthRow = db
       .prepare(

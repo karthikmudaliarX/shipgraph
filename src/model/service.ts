@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   UNKNOWN,
+  MODEL_PROVIDER_TO_AGENT_PROVIDER,
   modelRoutingRequestSchema,
   type ModelProviderId,
   type ModelRoutingDecision,
@@ -15,11 +16,23 @@ import type {
   ModelExecutionAdapterBinding,
   ModelExecutionTarget,
 } from '../adapters/agent/registry.js';
+import type { AgentExecutionAdapter } from '../adapters/agent/adapter.js';
 import type { DbConnection } from '../persistence/db.js';
 import { createModelRepository, type ModelRepository } from '../persistence/model-repositories.js';
+import { createRunRepository } from '../persistence/repositories.js';
 import { UsageLedger, type UsageLedgerInput } from './ledger.js';
-import { ProviderRegistry, type ProviderRefreshResult } from './registry.js';
+import {
+  ProviderRegistry,
+  type ProviderRefreshResult,
+} from './registry.js';
 import { ModelRouter } from './router.js';
+import {
+  executeAgentTask,
+  type AgentExecutionServiceOptions,
+  type AgentTaskResult,
+  type SelectedAgentTaskInput,
+} from '../execution/service.js';
+import { getCurrentProjectId } from '../workspace/service.js';
 
 export type ProviderErrorKind =
   | 'model_not_found'
@@ -193,8 +206,8 @@ export class ModelRoutingService {
   }
 
   /**
-   * Resolve a routed MODEL-001 selection to the exact provider-neutral
-   * AGENT-001 adapter that was capability-probed during refresh.
+   * Resolve a routed MODEL-001 selection to an opaque target for the exact
+   * provider-neutral AGENT-001 adapter capability-probed during refresh.
    */
   public resolveExecutionTarget(
     selection: Pick<ModelRoutingSelection, 'providerId' | 'modelId' | 'task'> & {
@@ -236,12 +249,47 @@ export class ModelRoutingService {
     ) {
       return target;
     }
-    return {
+    return Object.freeze({
       ...target,
       executionBound: true,
       routingDecisionId: selection.id,
       runId: persisted.runId,
-    };
+    });
+  }
+
+  /**
+   * Execute a durable MODEL-001 route through the provider-neutral AGENT-001
+   * lifecycle. The target is intentionally opaque: callers cannot obtain a
+   * concrete adapter and launch it against an arbitrary path. This service
+   * re-checks the persisted reservation and creates a private adapter facade
+   * whose only implementation is the registry's exact target dispatch.
+   */
+  public async executeSelectedAgentTask(
+    options: Omit<AgentExecutionServiceOptions, 'adapter'>,
+    target: ModelExecutionTarget,
+    input: SelectedAgentTaskInput
+  ): Promise<AgentTaskResult> {
+    if (
+      !target.executionBound ||
+      target.routingDecisionId === undefined ||
+      target.runId === undefined
+    ) {
+      throw new Error(
+        'MODEL-001 route is not execution-bound; durable agent execution requires an active run reservation'
+      );
+    }
+    this.verifyExecutionBinding(options, target);
+    return executeAgentTask(
+      { ...options, adapter: this.createExecutionAdapter(target) },
+      {
+        ...input,
+        task: target.task,
+        runId: target.runId,
+        provider: target.provider,
+        modelProviderId: target.modelProviderId,
+        model: target.modelId,
+      }
+    );
   }
 
   public async recordUsage(input: UsageRecordInput): Promise<UsageRecordResult> {
@@ -275,8 +323,7 @@ export class ModelRoutingService {
         quotaRemaining: input.quotaRemaining,
       });
       if (input.routingDecisionId !== undefined) {
-        // A durable agent run can contain multiple sequential model attempts.
-        // This finalizes the specific model route, not the parent run itself.
+        // Finalize this specific model route, not an unrelated durable run.
         this.repository.releaseProviderCapacity(
           this.options.projectId,
           entry.runId,
@@ -310,6 +357,55 @@ export class ModelRoutingService {
 
   public getRepository(): ModelRepository {
     return this.repository;
+  }
+
+  private createExecutionAdapter(target: ModelExecutionTarget): AgentExecutionAdapter {
+    return {
+      provider: target.provider,
+      capabilities: this.registry.executionCapabilitiesFor(target),
+      probe: () => this.registry.probeExecution(target),
+      execute: (request) => this.registry.executeExecution(target, request),
+    };
+  }
+
+  private verifyExecutionBinding(
+    options: Omit<AgentExecutionServiceOptions, 'adapter'>,
+    target: ModelExecutionTarget
+  ): void {
+    const projectId = getCurrentProjectId(options);
+    const persisted = this.repository.findRoutingDecisionById(
+      projectId,
+      target.routingDecisionId as string
+    );
+    const run = createRunRepository(options.db).findById(target.runId as string);
+    // The repository owns routing decisions, while durable AGENT runs remain
+    // in the general repository. Keep both identities in the same project.
+    if (
+      projectId !== this.options.projectId ||
+      persisted === undefined ||
+      !persisted.hasReservation ||
+      persisted.reservationStatus !== 'active' ||
+      persisted.runId !== target.runId ||
+      persisted.decision.providerId !== target.modelProviderId ||
+      persisted.decision.modelId !== target.modelId ||
+      persisted.decision.task !== target.task ||
+      persisted.decision.requestFingerprint === undefined ||
+      run === undefined ||
+      run.projectId !== projectId ||
+      run.task !== target.task ||
+      run.modelProviderId !== target.modelProviderId ||
+      run.provider !== target.provider ||
+      run.model !== target.modelId ||
+      target.provider !== MODEL_PROVIDER_TO_AGENT_PROVIDER[target.modelProviderId]
+    ) {
+      throw new Error(
+        `MODEL-001 route ${target.routingDecisionId} is not a current execution binding`
+      );
+    }
+    // Resolving capabilities is also the final in-memory binding check. It
+    // fails closed if a caller supplies a target with a substituted provider
+    // identity or task that this registry did not bind.
+    this.registry.executionCapabilitiesFor(target);
   }
 
   private snapshot(): ModelRoutingSnapshot {

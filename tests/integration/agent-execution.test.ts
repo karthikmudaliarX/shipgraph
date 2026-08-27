@@ -26,7 +26,6 @@ import { createModelRepository } from '../../src/persistence/model-repositories.
 import { ModelRoutingService } from '../../src/model/service.js';
 import {
   executeAgentTask,
-  executeSelectedAgentTask,
   prepareAgentTaskRun,
   recoverAgentRun,
   type AgentExecutionServiceOptions,
@@ -574,13 +573,13 @@ describe('AGENT-001 durable execution', () => {
       },
     });
     const target = modelService.resolveExecutionTarget(decision);
-    const execution = await executeSelectedAgentTask(
+    const execution = await modelService.executeSelectedAgentTask(
       { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
       target,
       { ticketId: 'AG-001', instructions: `run the ${task} task through the selected route` }
     );
 
-    expect(target.adapter).toBe(adapter);
+    expect(target).not.toHaveProperty('adapter');
     expect(target.task).toBe(task);
     expect(execution.run.status).toBe('SUCCEEDED');
     expect(execution.run.modelProviderId).toBe('opencode-go');
@@ -644,7 +643,7 @@ describe('AGENT-001 durable execution', () => {
       reason: 'test executable disappeared',
     });
 
-    const result = await executeSelectedAgentTask(
+    const result = await modelService.executeSelectedAgentTask(
       { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
       target,
       { ticketId: 'AG-001', instructions: 'must not launch after capability drift' }

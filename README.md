@@ -102,14 +102,15 @@ slot. Known provider limits are enforced directly; when a provider exposes no
 trustworthy concurrency limit, ShipGraph uses a conservative one-at-a-time
 local admission bound, without estimating quota. The durable run must already
 identify the exact AGENT adapter and discovered model. A route without one is a
-non-persistent decision preview. Only a target resolved from an active
-run-bound reservation may enter `executeSelectedAgentTask`; preview targets are
-rejected by that bridge. Usage finalization releases an execution-bound
+non-persistent decision preview. `resolveExecutionTarget()` returns only an
+opaque target; only `ModelRoutingService.executeSelectedAgentTask()` accepts an
+active run-bound reservation and enters the AGENT-001 lifecycle. Usage finalization releases an execution-bound
 reservation only when the same durable run and routing decision ID are
-supplied and the owning AGENT run is terminal. Terminalizing releases the slot;
-explicit recovery marks the run `NEEDS_HUMAN` and retains the slot when
-provider-process ownership cannot be proven. Usage finalization remains
-append-only and idempotent for capacity release.
+supplied and the owning AGENT run is terminal. A normal terminal result
+releases the slot; timeout, cancellation, output-limit termination and
+ambiguous recovery retain it until provider-process ownership is explicitly
+reconciled. Usage finalization remains append-only and idempotent for capacity
+release.
 
 ## CLI examples
 
