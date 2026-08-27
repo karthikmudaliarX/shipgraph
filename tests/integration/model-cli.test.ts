@@ -68,7 +68,7 @@ describe('MODEL-001 CLI', () => {
       'KAR-6001',
       '0'.repeat(40),
       'agent/cli-model',
-      'RUNNING',
+      'CREATED',
       now,
       project.id,
       'opencode',
