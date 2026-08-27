@@ -184,6 +184,40 @@ describe('CLI smoke tests', () => {
     consoleSpy.mockRestore();
   });
 
+  it('honors a disabled MODEL provider for direct agent execution', async () => {
+    initProject(projectDir, {
+      config: {
+        ...TEST_CONFIG,
+        providers: { opencodeGo: { enabled: false } },
+      },
+    });
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    process.exitCode = undefined;
+
+    await createProgram().parseAsync(
+      [
+        'agent',
+        'run',
+        'AG-001',
+        '--model',
+        'provider/dynamic-model',
+        '--instructions',
+        'must be refused',
+        '--project-dir',
+        projectDir,
+        '--json',
+      ],
+      { from: 'user' }
+    );
+
+    expect(process.exitCode).toBe(1);
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining('disabled by configuration')
+    );
+    process.exitCode = undefined;
+    consoleSpy.mockRestore();
+  });
+
   it('writes an idempotent first-run template without initializing placeholder identity', async () => {
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 

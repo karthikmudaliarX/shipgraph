@@ -31,6 +31,10 @@ import {
   normalizeModelProviderId,
   type ModelProviderId,
 } from '../domain/model-provider.js';
+import type {
+  ModelProviderAdapterConfiguration,
+  ModelProviderConfiguration,
+} from '../adapters/model/adapter.js';
 import { agentProviderForModelProvider } from '../adapters/agent/registry.js';
 import {
   agentServiceOptions,
@@ -517,14 +521,19 @@ export function createProgram(): Command {
         const projectDir = options.projectDir ?? process.cwd();
         const provider = parseAgentProvider(options.provider ?? 'opencode');
         const modelProvider = resolveCliModelProvider(provider, options.modelProvider);
-        const adapter = createCliAgentAdapter(modelProvider, options.executable);
+        db = openInitializedDatabase(projectDir);
+        const modelOptions = modelServiceOptions(db, projectDir);
+        const adapter = createCliAgentAdapter(
+          modelProvider,
+          options.executable,
+          modelOptions.configuration
+        );
         const probe = await adapter.probe();
         if (!probe.available) {
           throw new Error(
             `Provider ${modelProvider} has no usable AGENT-001 execution surface: ${probe.reason}`
           );
         }
-        db = openInitializedDatabase(projectDir);
         const base = workspaceServiceOptions(db, projectDir, options.worktreeRoot);
         const report = await runAgentTask(
           agentServiceOptions(base, adapter),
@@ -687,9 +696,18 @@ function resolveCliModelProvider(
 
 function createCliAgentAdapter(
   modelProvider: ModelProviderId,
-  executable: string | undefined
+  executable: string | undefined,
+  configuration?: ModelProviderConfiguration
 ): AgentExecutionAdapter {
-  const options = executable === undefined ? {} : { executable };
+  const configured = configurationForModelProvider(configuration, modelProvider);
+  const options = {
+    ...(configured?.enabled === undefined ? {} : { enabled: configured.enabled }),
+    ...(executable === undefined
+      ? configured?.executable === undefined
+        ? {}
+        : { executable: configured.executable }
+      : { executable }),
+  };
   switch (modelProvider) {
     case 'opencode-go':
       return createOpenCodeAdapter(options);
@@ -699,6 +717,22 @@ function createCliAgentAdapter(
       return createGrokAdapter(options);
     case 'gemini':
       return createGeminiAdapter(options);
+  }
+}
+
+function configurationForModelProvider(
+  configuration: ModelProviderConfiguration | undefined,
+  modelProvider: ModelProviderId
+): ModelProviderAdapterConfiguration | undefined {
+  switch (modelProvider) {
+    case 'opencode-go':
+      return configuration?.opencodeGo;
+    case 'codex':
+      return configuration?.codex;
+    case 'grok':
+      return configuration?.grok;
+    case 'gemini':
+      return configuration?.gemini;
   }
 }
 

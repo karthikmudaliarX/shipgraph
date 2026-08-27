@@ -190,6 +190,11 @@ export class ProviderRegistry {
         `Provider ${selection.providerId} has no capability-probed AGENT-001 execution surface`
       );
     }
+    if (!provider.capabilities.includes(selection.task)) {
+      throw new Error(
+        `Provider ${selection.providerId} no longer advertises MODEL task ${selection.task}`
+      );
+    }
     const model = this.models(selection.providerId)
       .find((entry) => entry.modelId === selection.modelId);
     if (model === undefined || !model.capabilities.includes(selection.task)) {

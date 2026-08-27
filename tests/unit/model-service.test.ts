@@ -7,7 +7,7 @@ import type {
   ModelDiscoveryResult,
   ProviderProbeResult,
 } from '../../src/adapters/model/adapter.js';
-import type { AgentProvider } from '../../src/domain/agent-provider.js';
+import type { AgentCapability, AgentProvider } from '../../src/domain/agent-provider.js';
 import type { ModelExecutionAdapterBinding } from '../../src/adapters/agent/registry.js';
 import { ModelRoutingService } from '../../src/model/service.js';
 
@@ -136,7 +136,8 @@ function adapter(
 }
 
 function executionBinding(
-  modelProviderId: ModelExecutionAdapterBinding['modelProviderId']
+  modelProviderId: ModelExecutionAdapterBinding['modelProviderId'],
+  capabilities: readonly AgentCapability[] = ['execute']
 ): ModelExecutionAdapterBinding {
   const provider: AgentProvider = modelProviderId === 'opencode-go'
     ? 'opencode'
@@ -147,7 +148,7 @@ function executionBinding(
     modelProviderId,
     adapter: {
       provider,
-      capabilities: ['execute'],
+      capabilities,
       probe: async () => ({ available: true as const, version: 'test-agent' }),
       execute: async () => {
         throw new Error('test execution adapter is only used for capability selection');
@@ -349,6 +350,51 @@ describe('MODEL-001 service', () => {
         budgetRemaining: 'unknown',
       },
     })).resolves.toMatchObject({ providerId: 'codex' });
+  });
+
+  it('rejects a routed target when a refreshed provider loses its task capability', async () => {
+    let supportsReview = true;
+    const changingAdapter: ModelProviderAdapter = {
+      providerId: 'codex',
+      family: 'openai',
+      displayName: 'Codex',
+      probe: async () => ({
+        availability: 'available' as const,
+        auth: 'authenticated' as const,
+        version: 'test-provider',
+        capabilities: supportsReview
+          ? (['implementation', 'review'] as const)
+          : (['implementation'] as const),
+      }),
+      discoverModels: async () => ({
+        status: 'known' as const,
+        models: [{ modelId: 'codex/dynamic', capabilities: ['implementation', 'review'] as const }],
+      }),
+    };
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [changingAdapter],
+      executionAdapters: [executionBinding('codex', ['execute', 'review'])],
+      now: () => now,
+    });
+
+    const decision = await service.route({
+      task: 'review',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 4,
+        activeConcurrentTickets: 'unknown',
+        budgetRemaining: 'unknown',
+      },
+    });
+    supportsReview = false;
+    await service.refresh();
+
+    expect(() => service.resolveExecutionTarget(decision)).toThrow(
+      /no longer advertises MODEL task review/
+    );
   });
 
   it('claims known provider capacity atomically across concurrent routes', async () => {

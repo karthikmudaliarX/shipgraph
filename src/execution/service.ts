@@ -499,7 +499,11 @@ async function getVerifiedExecutionWorkspace(
   task: ModelTaskType,
   afterStart = false
 ): Promise<WorkspaceRecord> {
-  const workspace = await getVerifiedWorkspaceForExecution(options, ticketId);
+  const workspace = await getVerifiedWorkspaceForExecution(
+    options,
+    ticketId,
+    task === 'implementation' ? 'ready' : 'changed'
+  );
   const ticket = createTicketRepository(options.db).findById(ticketId);
   if (!ticket || ticket.projectId !== workspace.projectId) {
     throw new Error(`Ticket ${ticketId} does not belong to the verified workspace project`);

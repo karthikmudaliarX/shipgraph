@@ -329,6 +329,8 @@ export type WorktreeLiveState = {
   head?: string;
   branch?: string;
   clean?: boolean;
+  /** False when Git could not prove the working-tree/index status. */
+  statusKnown?: boolean;
   registered: boolean;
 };
 
@@ -399,6 +401,7 @@ export async function inspectWorktreeState(
     head: entry.head,
     branch:
       symbolicRef.exitCode === 0 ? `refs/heads/${symbolicRef.stdout.trim()}` : undefined,
+    statusKnown: status.exitCode === 0 && ambiguousFlags !== undefined,
     // Fail closed: unknown index-flag state (undefined) counts as not clean.
     clean:
       status.exitCode === 0 &&

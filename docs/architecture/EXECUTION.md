@@ -20,13 +20,18 @@ branch or merge code.
 ## Isolation
 
 Before persisting a run or starting a provider, ShipGraph verifies the current
-project repository binding and the complete WORK-001 workspace identity:
+project repository binding and the complete WORK-001 workspace identity. For an
+implementation run this includes the original exact base SHA and a strictly
+clean worktree. Review and repair runs use the same immutable repository,
+deterministic path, dedicated branch and creation-audit proof, while allowing
+the implementation's changed HEAD and contents so those agents can inspect and
+repair the actual change:
 
 - the workspace is the recorded plain directory under the deterministic root;
 - the Git worktree is registered with the bound source repository;
 - its branch is the deterministic recorded branch;
-- its HEAD is the recorded base SHA; and
-- tracked, untracked and ignored content is clean.
+- its HEAD is the recorded base SHA for a new implementation hand-off; and
+- tracked, untracked and ignored content is clean for that new hand-off.
 
 If any proof fails, execution stops. ShipGraph never substitutes the normal
 checkout, recreates a missing worktree, or adopts a caller-selected directory.
