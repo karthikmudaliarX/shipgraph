@@ -91,11 +91,11 @@ does not claim or mutate global ticket capacity.
 Review routing prefers a different provider family from the implementation when
 one is available. `UsageLedger` is append-only, accepts only durable run IDs
 from the current project, records per-run/provider/model telemetry without raw
-provider output or credentials, and releases an execution-bound provider
-reservation only when usage for that model attempt is finalized by its owning
-durable run and returned routing decision ID. A durable agent run may issue
-sequential model attempts, so its RUNNING state alone does not keep a completed
-model-attempt reservation active.
+provider output or credentials. Terminalizing or explicitly recovering the
+owning durable run releases its execution-bound provider reservation; usage
+finalization remains append-only and idempotent for capacity release. A durable
+agent run may issue sequential model attempts, so its RUNNING state alone does
+not keep a completed model-attempt reservation active.
 
 The AGENT-001 execution command accepts an explicit provider/model and can use
 the bounded Codex, Grok or Antigravity adapters as well as OpenCode. MODEL-001

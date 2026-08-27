@@ -47,6 +47,12 @@ export type ModelExecutionAdapterFactoryOptions = {
   environment?: Readonly<Record<string, string>>;
 };
 
+// Keep the MODEL-001 owner of each concrete adapter out-of-band. The
+// provider-neutral AGENT-001 interface intentionally has no model-provider
+// identity, so the execution bridge must not trust a caller-supplied target
+// that swaps one ACP adapter for another.
+const adapterModelProviderOwners = new WeakMap<AgentExecutionAdapter, ModelProviderId>();
+
 /**
  * Indexes execution adapters by MODEL-001 identity while preserving the
  * provider-neutral AGENT-001 adapter contract.
@@ -70,6 +76,13 @@ export class AgentExecutionAdapterRegistry {
       if (!binding.adapter.capabilities.includes('execute')) {
         throw new Error(`Execution adapter for ${modelProviderId} does not support execute`);
       }
+      const existingOwner = adapterModelProviderOwners.get(binding.adapter);
+      if (existingOwner !== undefined && existingOwner !== modelProviderId) {
+        throw new Error(
+          `Execution adapter is already bound to ${existingOwner}; cannot bind it to ${modelProviderId}`
+        );
+      }
+      adapterModelProviderOwners.set(binding.adapter, modelProviderId);
       indexed.set(modelProviderId, { modelProviderId, adapter: binding.adapter });
     }
     this.bindings = indexed;
@@ -101,6 +114,22 @@ export class AgentExecutionAdapterRegistry {
       executionBound: false,
     };
   }
+}
+
+/**
+ * Verify that a target carries the concrete adapter registered for its
+ * MODEL-001 provider identity. This is deliberately fail-closed for targets
+ * assembled outside an AgentExecutionAdapterRegistry.
+ */
+export function isModelExecutionAdapterBound(
+  target: Pick<ModelExecutionTarget, 'modelProviderId' | 'provider' | 'adapter'>
+): boolean {
+  return (
+    adapterModelProviderOwners.get(target.adapter) === target.modelProviderId &&
+    target.provider === MODEL_PROVIDER_TO_AGENT_PROVIDER[target.modelProviderId] &&
+    target.adapter.provider === target.provider &&
+    target.adapter.capabilities.includes('execute')
+  );
 }
 
 export function createModelExecutionAdapterBindings(

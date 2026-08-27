@@ -5,7 +5,10 @@ import type {
   AgentExecutionRequest,
   AgentExecutionResult,
 } from '../adapters/agent/adapter.js';
-import type { ModelExecutionTarget } from '../adapters/agent/registry.js';
+import {
+  isModelExecutionAdapterBound,
+  type ModelExecutionTarget,
+} from '../adapters/agent/registry.js';
 import {
   AGENT_PROVIDERS,
   type AgentProvider,
@@ -264,6 +267,12 @@ export async function executeSelectedAgentTask(
     );
   }
   verifyExecutionBinding(options, target);
+  const executionProbe = await target.adapter.probe();
+  if (!executionProbe.available) {
+    throw new Error(
+      `MODEL-001 execution surface became unavailable before provider launch: ${executionProbe.reason}`
+    );
+  }
   return executeAgentTask(
     { ...options, adapter: target.adapter },
     {
@@ -301,7 +310,8 @@ function verifyExecutionBinding(
     persisted.decision.modelId !== target.modelId ||
     persisted.decision.task !== target.task ||
     persisted.decision.requestFingerprint === undefined ||
-    target.provider !== expectedProvider
+    target.provider !== expectedProvider ||
+    !isModelExecutionAdapterBound(target)
   ) {
     throw new Error(
       `MODEL-001 route ${decisionId} is not a current execution binding`
@@ -609,6 +619,7 @@ function finalizeRun(
         ...(durableUpdated.evidence === undefined ? {} : { evidence: durableUpdated.evidence }),
       },
     });
+    releaseActiveModelReservation(options, durableUpdated, completedAt);
     return requireDurableRun(repository.findById(run.id));
   }).immediate;
   return finalize();
@@ -662,9 +673,45 @@ function markRunNeedsHuman(
         failureReason: durableUpdated.failureReason,
       },
     });
+    releaseActiveModelReservation(options, durableUpdated, timestamp);
     return requireDurableRun(repository.findById(runId));
   }).immediate;
   return apply();
+}
+
+/**
+ * A provider-capacity reservation belongs to the provider execution attempt.
+ * Release it in the same transaction that durably terminalizes or recovers the
+ * AGENT run, while retaining the append-only routing decision and telemetry.
+ */
+function releaseActiveModelReservation(
+  options: WorkspaceServiceOptions,
+  run: AgentRunRecord,
+  releasedAt: string
+): void {
+  const active = createModelRepository(options.db).findActiveRoutingDecisionByRun(
+    run.projectId,
+    run.id
+  );
+  if (active === undefined) return;
+  if (
+    !active.hasReservation ||
+    active.reservationStatus !== 'active' ||
+    active.runId !== run.id
+  ) {
+    throw new Error(`Active routing reservation for run ${run.id} is ambiguous; refusing release`);
+  }
+  const released = createModelRepository(options.db).releaseProviderCapacity(
+    run.projectId,
+    run.id,
+    active.decision.id,
+    active.decision.providerId,
+    active.decision.modelId,
+    releasedAt
+  );
+  if (!released) {
+    throw new Error(`Active routing reservation for run ${run.id} changed before release`);
+  }
 }
 
 function appendRunStateChange(

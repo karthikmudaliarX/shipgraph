@@ -248,6 +248,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
     const project = createProjectRepository(db).findAll()[0];
     if (project === undefined) throw new Error('missing model bridge project');
     const calls: AgentProcessSpec[] = [];
+    let executionSurfaceAvailable = true;
     const executionAdapter = new CodexAdapter({
       executable: '/opt/codex',
       processRunner: {
@@ -256,7 +257,9 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
           if (spec.args[0] === '--version') return result({ stdout: 'codex 1.0.0\n' });
           if (spec.args[0] === 'exec' && spec.args[1] === '--help') {
             return result({
-              stdout: 'exec --json --model --cd --sandbox --approve-for-me --ephemeral\n',
+              stdout: executionSurfaceAvailable
+                ? 'exec --json --model --cd --sandbox --approve-for-me --ephemeral\n'
+                : 'exec --model --cd\n',
             });
           }
           await spec.onStarted?.(4242);
@@ -326,6 +329,19 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
     expect(boundTarget.executionBound).toBe(true);
     expect(boundTarget.routingDecisionId).toBe(boundDecision.id);
     expect(boundTarget.runId).toBe(prepared.run.id);
+    executionSurfaceAvailable = false;
+    const providerExecutionCountBeforeDrift = calls.filter((call) => call.args[0] === 'exec' && call.args[1] !== '--help').length;
+    await expect(
+      executeSelectedAgentTask(
+        { db, projectDir, worktreeRoot, now: () => now },
+        boundTarget,
+        { ticketId: workspace.workspace.ticketId, instructions: 'must not launch after drift', timeoutMs: 1_000 }
+      )
+    ).rejects.toThrow(/became unavailable before provider launch/);
+    expect(calls.filter((call) => call.args[0] === 'exec' && call.args[1] !== '--help')).toHaveLength(
+      providerExecutionCountBeforeDrift
+    );
+    executionSurfaceAvailable = true;
     const execution = await executeSelectedAgentTask(
       { db, projectDir, worktreeRoot, now: () => now },
       boundTarget,
@@ -338,6 +354,7 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
     expect(execution.run.workspaceId).toBe(workspace.workspace.id);
     const executionCall = calls.find((call) => call.args.includes(boundTarget.modelId));
     expect(executionCall?.cwd).toBe(workspace.workspace.worktreePath);
+    expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
 
     await modelService.recordUsage({
       runId: prepared.run.id,

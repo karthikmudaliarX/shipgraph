@@ -20,8 +20,11 @@ import {
   createRunRepository,
   createTicketRepository,
 } from '../../src/persistence/repositories.js';
+import { createModelRepository } from '../../src/persistence/model-repositories.js';
+import { ModelRoutingService } from '../../src/model/service.js';
 import {
   executeAgentTask,
+  prepareAgentTaskRun,
   recoverAgentRun,
   type AgentExecutionServiceOptions,
 } from '../../src/execution/service.js';
@@ -31,6 +34,7 @@ import type {
   AgentExecutionResult,
 } from '../../src/adapters/agent/adapter.js';
 import { OpenCodeAdapter } from '../../src/adapters/agent/opencode.js';
+import type { ModelProviderAdapter } from '../../src/adapters/model/adapter.js';
 
 const BASE_CONFIG = {
   version: 1 as const,
@@ -389,6 +393,67 @@ describe('AGENT-001 durable execution', () => {
     expect(result.recovered).toBe(true);
     expect(result.run.status).toBe('NEEDS_HUMAN');
     expect(result.run.failureCategory).toBe('stale_run');
+  });
+
+  it('releases a routed provider reservation when explicit recovery terminalizes the run', async () => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    const prepared = await prepareAgentTaskRun(
+      {
+        ...harness.options,
+        createRunId: () => 'model-recovery-run',
+      },
+      {
+        ticketId: 'AG-001',
+        provider: 'opencode',
+        model: 'opencode/dynamic-model',
+        instructions: 'prepare a recoverable routed run',
+      }
+    );
+    const providerAdapter: ModelProviderAdapter = {
+      providerId: 'opencode-go',
+      family: 'opencode',
+      displayName: 'OpenCode Go',
+      probe: async () => ({
+        availability: 'available',
+        auth: 'authenticated',
+        version: 'test',
+        capabilities: ['implementation'],
+      }),
+      discoverModels: async () => ({
+        status: 'known',
+        models: [{ modelId: 'opencode/dynamic-model', capabilities: ['implementation'] }],
+      }),
+    };
+    const modelService = new ModelRoutingService({
+      db: harness.db,
+      projectId,
+      adapters: [providerAdapter],
+      executionAdapters: [{ modelProviderId: 'opencode-go', adapter: harness.options.adapter }],
+    });
+    await modelService.route({
+      runId: prepared.run.id,
+      task: 'implementation',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 1,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    });
+    expect(modelService.listHealth()[0]?.activeRuns).toBe(1);
+
+    const recovered = await recoverAgentRun({
+      db: harness.db,
+      projectDir: harness.projectDir,
+      worktreeRoot: harness.worktreeRoot,
+    }, prepared.run.id);
+
+    expect(recovered.run.status).toBe('NEEDS_HUMAN');
+    expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
+    expect(createModelRepository(harness.db).findActiveRoutingDecisionByRun(projectId, prepared.run.id))
+      .toBeUndefined();
   });
 });
 

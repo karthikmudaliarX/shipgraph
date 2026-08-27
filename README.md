@@ -103,7 +103,10 @@ AGENT adapter and discovered model. A route without one is a non-persistent
 decision preview. Only a target resolved from an active run-bound reservation
 may enter `executeSelectedAgentTask`; preview targets are rejected by that
 bridge. Usage finalization releases an execution-bound reservation only when
-the same durable run and routing decision ID are supplied.
+the same durable run and routing decision ID are supplied; terminalizing or
+explicitly recovering that AGENT run releases its active provider slot in the
+same durable transition. Usage finalization remains append-only and idempotent
+for capacity release.
 
 ## CLI examples
 
@@ -150,8 +153,8 @@ shipgraph providers refresh --json
 # Preview a route; --run-id <run-id> binds it to a durable execution reservation
 # Retries without --request-id use the durable run ID as their stable key
 shipgraph providers route implementation --risk medium --mode balanced --run-id <run-id> --json
-# After usage finalizes that reservation, use a new request ID for a new attempt.
-# Usage finalizes the model attempt; the parent durable agent run may still be running.
+# After a terminal run or explicit recovery releases that reservation, use a new request ID for a new attempt.
+# Usage records model telemetry and is idempotent for an already released slot.
 
 # Inspect persisted provider health and discovered models
 shipgraph providers list --json

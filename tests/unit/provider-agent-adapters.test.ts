@@ -4,6 +4,7 @@ import type { AgentProcessResult, AgentProcessSpec, AgentProcessRunner } from '.
 import { CodexAdapter, GeminiAdapter, GrokAdapter } from '../../src/adapters/agent/providers.js';
 import {
   AgentExecutionAdapterRegistry,
+  isModelExecutionAdapterBound,
   MODEL_PROVIDER_TO_AGENT_PROVIDER,
 } from '../../src/adapters/agent/registry.js';
 
@@ -195,5 +196,23 @@ describe('deferred MODEL-001 provider execution adapters', () => {
       modelProviderId: 'codex',
       adapter: new GrokAdapter({ executable: '/opt/grok' }),
     }])).toThrow(/uses acp; expected codex/);
+  });
+
+  it('keeps shared ACP adapters bound to their concrete MODEL provider identity', () => {
+    const grok = new GrokAdapter({ executable: '/opt/grok' });
+    const gemini = new GeminiAdapter({ executable: '/opt/agy' });
+    const registry = new AgentExecutionAdapterRegistry([
+      { modelProviderId: 'grok', adapter: grok },
+      { modelProviderId: 'gemini', adapter: gemini },
+    ]);
+    const target = registry.resolve({
+      providerId: 'gemini',
+      modelId: 'google/dynamic-model',
+      task: 'implementation',
+    });
+
+    expect(isModelExecutionAdapterBound(target)).toBe(true);
+    expect(isModelExecutionAdapterBound({ ...target, adapter: grok })).toBe(false);
+    expect(isModelExecutionAdapterBound({ ...target, adapter: new GeminiAdapter({ executable: '/opt/agy' }) })).toBe(false);
   });
 });
