@@ -18,7 +18,10 @@ import { ModelRoutingService } from '../../src/model/service.js';
 import { initProject } from '../../src/cli/init.js';
 import { syncBacklogProject } from '../../src/cli/backlog.js';
 import { createWorkspace } from '../../src/workspace/service.js';
-import { executeSelectedAgentTask } from '../../src/execution/service.js';
+import {
+  executeSelectedAgentTask,
+  prepareAgentTaskRun,
+} from '../../src/execution/service.js';
 
 const projectId = 'model-execution-project';
 const now = '2026-08-27T00:00:00.000Z';
@@ -171,8 +174,8 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
     expect(target.provider).toBe('codex');
     expect(target.adapter).toBe(executionAdapter);
     expect(execution.outcome).toBe('SUCCEEDED');
-    expect(calls[2]?.args).toContain(target.modelId);
-    expect(calls[2]?.cwd).toBe('/tmp/shipgraph-model-worktree');
+    const executionCall = calls.find((call) => call.args.includes(target.modelId));
+    expect(executionCall?.cwd).toBe('/tmp/shipgraph-model-worktree');
   });
 
   it('rejects a metadata-visible Gemini provider when Antigravity cannot be probed', async () => {
@@ -281,16 +284,72 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
       },
     });
     const target = modelService.resolveExecutionTarget(decision);
+    expect(target.executionBound).toBe(false);
+    await expect(
+      executeSelectedAgentTask(
+        { db, projectDir, worktreeRoot },
+        target,
+        { ticketId: workspace.workspace.ticketId, instructions: 'must be bound first' }
+      )
+    ).rejects.toThrow(/not execution-bound/);
+
+    const prepared = await prepareAgentTaskRun(
+      {
+        db,
+        projectDir,
+        worktreeRoot,
+        adapter: target.adapter,
+        now: () => now,
+        createRunId: () => 'run-model-bridge',
+      },
+      {
+        ticketId: workspace.workspace.ticketId,
+        provider: target.provider,
+        model: target.modelId,
+        instructions: 'Implement through the selected route',
+        timeoutMs: 1_000,
+      }
+    );
+    const boundDecision = await modelService.route({
+      requestId: decision.requestId,
+      runId: prepared.run.id,
+      task: 'implementation',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 1,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    });
+    const boundTarget = modelService.resolveExecutionTarget(boundDecision);
+    expect(boundTarget.executionBound).toBe(true);
+    expect(boundTarget.routingDecisionId).toBe(boundDecision.id);
+    expect(boundTarget.runId).toBe(prepared.run.id);
     const execution = await executeSelectedAgentTask(
-      { db, projectDir, worktreeRoot, createRunId: () => 'run-model-bridge' },
-      target,
+      { db, projectDir, worktreeRoot, now: () => now },
+      boundTarget,
       { ticketId: workspace.workspace.ticketId, instructions: 'Implement through the selected route', timeoutMs: 1_000 }
     );
 
     expect(execution.run.status).toBe('SUCCEEDED');
     expect(execution.run.provider).toBe('codex');
-    expect(execution.run.model).toBe(target.modelId);
+    expect(execution.run.model).toBe(boundTarget.modelId);
     expect(execution.run.workspaceId).toBe(workspace.workspace.id);
-    expect(calls[2]?.cwd).toBe(workspace.workspace.worktreePath);
+    const executionCall = calls.find((call) => call.args.includes(boundTarget.modelId));
+    expect(executionCall?.cwd).toBe(workspace.workspace.worktreePath);
+
+    await modelService.recordUsage({
+      runId: prepared.run.id,
+      routingDecisionId: boundDecision.id,
+      providerId: boundDecision.providerId,
+      modelId: boundDecision.modelId,
+      task: boundDecision.task,
+      retryCount: 0,
+      elapsedMs: 1,
+      outcome: 'succeeded',
+      outcomeQuality: 'good',
+    });
+    expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
   });
 });

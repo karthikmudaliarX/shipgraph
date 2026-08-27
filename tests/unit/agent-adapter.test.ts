@@ -162,6 +162,17 @@ describe('OpenCode adapter and process boundary', () => {
     expect(redactSensitiveText('ordinary project output')).toBe('ordinary project output');
   });
 
+  it('redacts authorization headers and provider token formats before persistence', () => {
+    const redacted = redactSensitiveText(
+      'Authorization: Bearer bearer-secret-value-123456 xai-xxxxxxxxxxxxxxxxxxxx '
+        + 'AIzaSyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+    );
+    expect(redacted).not.toContain('bearer-secret-value-123456');
+    expect(redacted).not.toContain('xai-xxxxxxxxxxxxxxxxxxxx');
+    expect(redacted).not.toContain('AIzaSyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
+    expect(redacted.match(/\[REDACTED_SECRET\]/gu)).toHaveLength(3);
+  });
+
   it('redacts credential-shaped provider evidence before it crosses the adapter boundary', async () => {
     const adapter = new OpenCodeAdapter({
       processRunner: {

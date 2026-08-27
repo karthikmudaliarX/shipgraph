@@ -1,6 +1,7 @@
 import { compareStableStrings } from '../utils/sorting.js';
 import {
   modelRoutingRequestSchema,
+  MODEL_PROVIDER_TO_AGENT_PROVIDER,
   providerHealthRecordSchema,
   providerRegistryRecordSchema,
   modelCatalogRecordSchema,
@@ -177,6 +178,7 @@ function isUsableProvider(
     provider.availability === 'available' &&
     provider.executionStatus === 'available' &&
     provider.executionProvider !== undefined &&
+    provider.executionProvider === MODEL_PROVIDER_TO_AGENT_PROVIDER[provider.providerId] &&
     provider.catalogStatus === 'known' &&
     provider.capabilities.includes(task) &&
     health !== undefined &&

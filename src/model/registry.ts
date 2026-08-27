@@ -13,6 +13,7 @@ import {
 import { createModelProviderAdapters } from '../adapters/model/adapter.js';
 import {
   MODEL_PROVIDER_DEFINITIONS,
+  MODEL_PROVIDER_TO_AGENT_PROVIDER,
   UNKNOWN,
   type ModelProviderId,
   type ProviderHealthRecord,
@@ -149,7 +150,12 @@ export class ProviderRegistry {
     if (provider === undefined) {
       throw new Error(`Provider ${selection.providerId} is not present in the routing snapshot`);
     }
-    if (provider.executionStatus !== 'available' || provider.executionProvider === undefined) {
+    if (
+      provider.executionStatus !== 'available' ||
+      provider.executionProvider === undefined ||
+      provider.executionProvider !== MODEL_PROVIDER_TO_AGENT_PROVIDER[provider.providerId] ||
+      provider.catalogStatus !== 'known'
+    ) {
       throw new Error(
         `Provider ${selection.providerId} has no capability-probed AGENT-001 execution surface`
       );

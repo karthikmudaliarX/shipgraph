@@ -1,7 +1,9 @@
 import {
+  MODEL_PROVIDER_TO_AGENT_PROVIDER,
   MODEL_PROVIDER_IDS,
   modelProviderIdSchema,
   type ModelProviderId,
+  type ModelTaskType,
   type ModelRoutingSelection,
 } from '../../domain/model-provider.js';
 import type { AgentProvider } from '../../domain/agent-provider.js';
@@ -24,18 +26,18 @@ export type { ModelExecutionAdapterBinding } from './providers.js';
  * exhaustive and explicit: two model providers may use the ACP boundary, but
  * their binding remains distinct and is selected by model provider ID.
  */
-export const MODEL_PROVIDER_TO_AGENT_PROVIDER = {
-  'opencode-go': 'opencode',
-  codex: 'codex',
-  grok: 'acp',
-  gemini: 'acp',
-} as const satisfies Record<ModelProviderId, AgentProvider>;
+export { MODEL_PROVIDER_TO_AGENT_PROVIDER } from '../../domain/model-provider.js';
 
 export type ModelExecutionTarget = {
   modelProviderId: ModelProviderId;
   provider: AgentProvider;
   modelId: string;
+  task: ModelTaskType;
   adapter: AgentExecutionAdapter;
+  /** True only when MODEL-001 durably reserved this exact target for a run. */
+  executionBound: boolean;
+  routingDecisionId?: string;
+  runId?: string;
 };
 
 export type ModelExecutionAdapterFactoryOptions = {
@@ -83,7 +85,9 @@ export class AgentExecutionAdapterRegistry {
     return this.bindings.get(modelProviderId);
   }
 
-  public resolve(selection: Pick<ModelRoutingSelection, 'providerId' | 'modelId'>): ModelExecutionTarget {
+  public resolve(
+    selection: Pick<ModelRoutingSelection, 'providerId' | 'modelId' | 'task'>
+  ): ModelExecutionTarget {
     const binding = this.bindings.get(selection.providerId);
     if (binding === undefined) {
       throw new Error(`No AGENT-001 execution adapter is bound to ${selection.providerId}`);
@@ -92,7 +96,9 @@ export class AgentExecutionAdapterRegistry {
       modelProviderId: selection.providerId,
       provider: binding.adapter.provider,
       modelId: selection.modelId,
+      task: selection.task,
       adapter: binding.adapter,
+      executionBound: false,
     };
   }
 }

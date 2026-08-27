@@ -144,14 +144,40 @@ describe('MODEL-001 persistence', () => {
     });
     db.prepare(
       `INSERT INTO runs (
-        id, ticket_id, base_sha, branch_name, status, started_at, project_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run('run-1', 'KAR-1', '0'.repeat(40), 'agent/model-telemetry', 'SUCCEEDED', now, projectId, now, now);
+        id, ticket_id, base_sha, branch_name, status, started_at, project_id,
+        provider, model, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'run-1',
+      'KAR-1',
+      '0'.repeat(40),
+      'agent/model-telemetry',
+      'SUCCEEDED',
+      now,
+      projectId,
+      'codex',
+      'provider/dynamic-model',
+      now,
+      now
+    );
     db.prepare(
       `INSERT INTO runs (
-        id, ticket_id, base_sha, branch_name, status, started_at, project_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run('run-2', 'KAR-1', '0'.repeat(40), 'agent/model-telemetry-2', 'SUCCEEDED', now, projectId, now, now);
+        id, ticket_id, base_sha, branch_name, status, started_at, project_id,
+        provider, model, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'run-2',
+      'KAR-1',
+      '0'.repeat(40),
+      'agent/model-telemetry-2',
+      'SUCCEEDED',
+      now,
+      projectId,
+      'codex',
+      'provider/dynamic-model',
+      now,
+      now
+    );
     repository = createModelRepository(db);
   });
 
@@ -168,6 +194,15 @@ describe('MODEL-001 persistence', () => {
     expect(repository.listProviders(projectId)).toHaveLength(1);
     expect(repository.listHealth(projectId)[0]?.quotaRemaining).toBe('unknown');
     expect(repository.listModels(projectId)).toEqual([model()]);
+  });
+
+  it('rejects a persisted MODEL-to-AGENT identity mismatch', () => {
+    expect(() => repository.replaceProviderSnapshot({
+      provider: provider({ executionProvider: 'acp' }),
+      health: health(),
+      models: [model()],
+      catalogStatus: 'known',
+    })).toThrow(/canonical MODEL-001 mapping/);
   });
 
   it('preserves the previous model catalog when discovery is unknown', () => {

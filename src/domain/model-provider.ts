@@ -16,6 +16,14 @@ export const MODEL_PROVIDER_DEFINITIONS = [
   displayName: string;
 }>;
 
+/** Canonical MODEL-001 account identity to provider-neutral AGENT-001 surface. */
+export const MODEL_PROVIDER_TO_AGENT_PROVIDER = {
+  'opencode-go': 'opencode',
+  codex: 'codex',
+  grok: 'acp',
+  gemini: 'acp',
+} as const satisfies Record<ModelProviderId, (typeof AGENT_PROVIDERS)[number]>;
+
 export const MODEL_TASK_TYPES = ['implementation', 'review', 'repair'] as const;
 export type ModelTaskType = (typeof MODEL_TASK_TYPES)[number];
 export const modelTaskTypeSchema = z.enum(MODEL_TASK_TYPES);
@@ -121,6 +129,17 @@ export const providerRegistryRecordSchema = z.object({
       message: 'a non-routable provider cannot identify an available execution adapter',
     });
   }
+  if (
+    record.executionStatus === 'available' &&
+    record.executionProvider !== undefined &&
+    record.executionProvider !== MODEL_PROVIDER_TO_AGENT_PROVIDER[record.providerId]
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['executionProvider'],
+      message: 'the execution provider does not match the canonical MODEL-001 mapping',
+    });
+  }
 });
 export type ProviderRegistryRecord = z.infer<typeof providerRegistryRecordSchema>;
 
@@ -220,6 +239,7 @@ export const modelRoutingDecisionSchema = z.object({
   modelId: modelIdentifierSchema,
   reason: z.string().min(1).max(4_096),
   candidatesConsidered: z.number().int().nonnegative().max(1_000_000),
+  requestFingerprint: z.string().regex(/^[0-9a-f]{64}$/u).optional(),
   createdAt: timestampSchema,
 }).strict();
 export type ModelRoutingDecision = z.infer<typeof modelRoutingDecisionSchema>;

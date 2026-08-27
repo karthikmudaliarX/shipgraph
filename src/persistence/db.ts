@@ -438,6 +438,16 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE provider_registry ADD COLUMN execution_reason TEXT;
     `,
   },
+  {
+    version: 12,
+    name: 'persist_model_routing_request_fingerprint',
+    up: `
+      -- Older persisted decisions have no safe record of their selection
+      -- constraints; new durable routes carry a canonical request fingerprint
+      -- and refuse replay when it is absent.
+      ALTER TABLE routing_decisions ADD COLUMN request_fingerprint TEXT;
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {

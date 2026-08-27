@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   UNKNOWN,
   modelRoutingRequestSchema,
@@ -95,6 +95,11 @@ export class ModelRoutingService {
 
   public async route(input: ModelRoutingRequest): Promise<ModelRoutingDecision> {
     const request = modelRoutingRequestSchema.parse(input);
+    // Routing is an execution admission decision. Re-probe the configured
+    // execution surfaces on every route so an executable removed or changed
+    // since the last metadata refresh cannot remain routable from a warm DB.
+    await this.registry.refresh();
+    const fingerprint = routingRequestFingerprint(request);
     const existing = request.requestId === undefined
       ? request.runId === undefined
         ? undefined
@@ -122,13 +127,26 @@ export class ModelRoutingService {
       ) {
         throw new Error(`Routing request ${requestKey} was reused for a different route`);
       }
+      if (
+        existing.decision.requestFingerprint === undefined ||
+        existing.decision.requestFingerprint !== fingerprint
+      ) {
+        throw new Error(
+          `Routing request ${requestKey} was reused with different routing constraints`
+        );
+      }
+      const target = this.resolveExecutionTarget(existing.decision);
+      if (existing.hasReservation && !target.executionBound) {
+        throw new Error(
+          `Routing request ${requestKey} has no trustworthy execution binding; refusing replay`
+        );
+      }
       return existing.decision;
     }
     // A durable run is the stable idempotency key when the caller does not
     // provide a separate request ID. This makes CLI retries recover a lost
     // response without stranding the provider reservation.
     const requestId = request.requestId ?? request.runId ?? this.createId();
-    await this.registry.ensureFresh();
     // Routing decisions that depend on quota reset timing must use the same
     // injected clock as persistence. Callers may still provide an explicit
     // timestamp for deterministic replay/tests.
@@ -143,6 +161,7 @@ export class ModelRoutingService {
         id: this.createId(),
         projectId: this.options.projectId,
         requestId,
+        requestFingerprint: fingerprint,
         createdAt: this.now(),
       };
       if (request.runId === undefined) {
@@ -173,9 +192,51 @@ export class ModelRoutingService {
    * AGENT-001 adapter that was capability-probed during refresh.
    */
   public resolveExecutionTarget(
-    selection: Pick<ModelRoutingSelection, 'providerId' | 'modelId' | 'task'>
+    selection: Pick<ModelRoutingSelection, 'providerId' | 'modelId' | 'task'> & {
+      id?: string;
+      projectId?: string;
+    }
   ): ModelExecutionTarget {
-    return this.registry.resolveExecutionTarget(selection);
+    if (selection.projectId !== undefined && selection.projectId !== this.options.projectId) {
+      throw new Error(
+        `Routing selection belongs to project ${selection.projectId}, not ${this.options.projectId}`
+      );
+    }
+    const target = this.registry.resolveExecutionTarget(selection);
+    if (selection.id === undefined) return target;
+
+    const persisted = this.repository.findRoutingDecisionById(
+      this.options.projectId,
+      selection.id
+    );
+    if (persisted === undefined) {
+      // A route preview carries a locally useful decision ID but is not a
+      // durable execution reservation. Keep the target explicitly unbound.
+      return target;
+    }
+    if (
+      persisted.decision.providerId !== selection.providerId ||
+      persisted.decision.modelId !== selection.modelId ||
+      persisted.decision.task !== selection.task
+    ) {
+      throw new Error(
+        `Routing decision ${selection.id} does not match the requested execution target`
+      );
+    }
+    if (
+      !persisted.hasReservation ||
+      persisted.reservationStatus !== 'active' ||
+      persisted.runId === undefined ||
+      persisted.decision.requestFingerprint === undefined
+    ) {
+      return target;
+    }
+    return {
+      ...target,
+      executionBound: true,
+      routingDecisionId: selection.id,
+      runId: persisted.runId,
+    };
   }
 
   public async recordUsage(input: UsageRecordInput): Promise<UsageRecordResult> {
@@ -254,6 +315,28 @@ export class ModelRoutingService {
       usage: this.repository.listUsage(this.options.projectId),
     };
   }
+}
+
+/**
+ * Stable idempotency material for a route. Runtime ownership identifiers and
+ * the injected clock are intentionally excluded; changing any caller-owned
+ * constraint that can affect selection must invalidate a replay.
+ */
+function routingRequestFingerprint(request: ModelRoutingRequest): string {
+  const canonical = JSON.stringify({
+    task: request.task,
+    risk: request.risk,
+    envelope: {
+      mode: request.envelope.mode,
+      maxConcurrentTickets: request.envelope.maxConcurrentTickets,
+      activeConcurrentTickets: request.envelope.activeConcurrentTickets,
+      budgetRemaining: request.envelope.budgetRemaining,
+    },
+    implementationProvider: request.implementationProvider ?? null,
+    fallbackFromProvider: request.fallbackFromProvider ?? null,
+    excludeProviders: [...(request.excludeProviders ?? [])].sort(),
+  });
+  return createHash('sha256').update(canonical).digest('hex');
 }
 
 function healthAfterUsage(

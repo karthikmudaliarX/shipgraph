@@ -10,6 +10,7 @@ import {
   AGENT_PROVIDERS,
   type AgentProvider,
 } from '../domain/agent-provider.js';
+import { MODEL_PROVIDER_TO_AGENT_PROVIDER } from '../domain/model-provider.js';
 import {
   ACTIVE_AGENT_RUN_STATES,
   AGENT_INSTRUCTIONS_LIMIT_BYTES,
@@ -25,6 +26,7 @@ import {
 } from '../domain/agent-run.js';
 import { TicketState } from '../core/state-machine/state.js';
 import { EventType } from '../events/event.js';
+import { createModelRepository } from '../persistence/model-repositories.js';
 import {
   createEventRepository,
   createRunRepository,
@@ -32,6 +34,7 @@ import {
   createWorkspaceRepository,
   type RunRecord,
   type RunUpdate,
+  type WorkspaceRecord,
 } from '../persistence/repositories.js';
 import { persistTicketTransition } from '../persistence/ticket-state-store.js';
 import {
@@ -56,6 +59,8 @@ export type AgentTaskInput = {
   model: string;
   instructions: string;
   provider?: AgentProvider;
+  /** Existing CREATED run to execute after MODEL-001 binds its route. */
+  runId?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
 };
@@ -70,7 +75,36 @@ export type AgentRunRecoveryResult = {
   run: AgentRunRecord;
 };
 
-export type SelectedAgentTaskInput = Omit<AgentTaskInput, 'model' | 'provider'>;
+export type AgentTaskPreparationInput = Omit<AgentTaskInput, 'runId'>;
+
+export type SelectedAgentTaskInput = Omit<AgentTaskInput, 'model' | 'provider' | 'runId'>;
+
+/**
+ * Persist a CREATED AGENT-001 run without launching a provider. MODEL-001 can
+ * then bind a route to this run before executeSelectedAgentTask starts it.
+ */
+export async function prepareAgentTaskRun(
+  options: AgentExecutionServiceOptions,
+  input: AgentTaskPreparationInput
+): Promise<AgentTaskResult> {
+  const normalized = validateTaskInput(options, input);
+  const workspace = await getVerifiedExecutionWorkspace(options, input.ticketId);
+  const now = options.now ?? (() => new Date().toISOString());
+  const createEventId = options.createEventId ?? randomUUID;
+  const createRunId = options.createRunId ?? randomUUID;
+  const createdAt = now();
+  const run = buildAgentRun(
+    workspace,
+    options.adapter.provider,
+    normalized,
+    createRunId(),
+    createdAt
+  );
+  return {
+    created: true,
+    run: persistCreatedRun(options, run, createEventId),
+  };
+}
 
 /**
  * Execute exactly one explicitly supplied ticket in its existing READY
@@ -82,48 +116,25 @@ export async function executeAgentTask(
   input: AgentTaskInput
 ): Promise<AgentTaskResult> {
   const normalized = validateTaskInput(options, input);
-  const workspace = await getVerifiedWorkspaceForExecution(options, input.ticketId);
-  const ticket = createTicketRepository(options.db).findById(input.ticketId);
-  if (!ticket || ticket.projectId !== workspace.projectId) {
-    throw new Error(`Ticket ${input.ticketId} does not belong to the verified workspace project`);
-  }
-  if (ticket.status !== TicketState.PLANNING) {
-    throw new Error(
-      `Ticket ${input.ticketId} has state ${ticket.status}; agent execution requires PLANNING`
-    );
-  }
+  const workspace = await getVerifiedExecutionWorkspace(options, input.ticketId);
 
   const now = options.now ?? (() => new Date().toISOString());
   const createEventId = options.createEventId ?? randomUUID;
   const createRunId = options.createRunId ?? randomUUID;
   const createdAt = now();
-  const run: AgentRunRecord = {
-    id: createRunId(),
-    projectId: workspace.projectId,
-    ticketId: workspace.ticketId,
-    workspaceId: workspace.id,
-    workspacePath: workspace.worktreePath,
-    baseSha: workspace.baseSha,
-    branchName: workspace.branchName,
-    status: 'CREATED',
-    provider: options.adapter.provider,
-    model: normalized.model,
-    createdAt,
-    // The legacy schema requires started_at to be non-null. It is replaced by
-    // the actual start timestamp when CREATED advances to RUNNING.
-    startedAt: createdAt,
-    updatedAt: createdAt,
-    timedOut: false,
-    cancelled: false,
-    stdout: '',
-    stderr: '',
-    stdoutTruncated: false,
-    stderrTruncated: false,
-    instructionsSha256: createHash('sha256').update(normalized.instructions).digest('hex'),
-    timeoutMs: normalized.timeoutMs,
-  };
-
-  const persisted = persistCreatedRun(options, run, createEventId);
+  const persisted = input.runId === undefined
+    ? persistCreatedRun(
+        options,
+        buildAgentRun(
+          workspace,
+          options.adapter.provider,
+          normalized,
+          createRunId(),
+          createdAt
+        ),
+        createEventId
+      )
+    : loadPreparedRun(options, input.runId, workspace, normalized);
   let started: AgentRunRecord;
   try {
     started = startRun(options, persisted, createEventId, now);
@@ -243,14 +254,59 @@ export async function executeSelectedAgentTask(
   target: ModelExecutionTarget,
   input: SelectedAgentTaskInput
 ): Promise<AgentTaskResult> {
+  if (
+    !target.executionBound ||
+    target.routingDecisionId === undefined ||
+    target.runId === undefined
+  ) {
+    throw new Error(
+      'MODEL-001 route is not execution-bound; durable agent execution requires an active run reservation'
+    );
+  }
+  verifyExecutionBinding(options, target);
   return executeAgentTask(
     { ...options, adapter: target.adapter },
     {
       ...input,
+      runId: target.runId,
       provider: target.provider,
       model: target.modelId,
     }
   );
+}
+
+function verifyExecutionBinding(
+  options: Omit<AgentExecutionServiceOptions, 'adapter'>,
+  target: ModelExecutionTarget
+): void {
+  const decisionId = target.routingDecisionId;
+  const runId = target.runId;
+  if (decisionId === undefined || runId === undefined) {
+    throw new Error(
+      'MODEL-001 route is not execution-bound; durable agent execution requires an active run reservation'
+    );
+  }
+  const projectId = getCurrentProjectId(options);
+  const persisted = createModelRepository(options.db).findRoutingDecisionById(
+    projectId,
+    decisionId
+  );
+  const expectedProvider = MODEL_PROVIDER_TO_AGENT_PROVIDER[target.modelProviderId];
+  if (
+    persisted === undefined ||
+    !persisted.hasReservation ||
+    persisted.reservationStatus !== 'active' ||
+    persisted.runId !== runId ||
+    persisted.decision.providerId !== target.modelProviderId ||
+    persisted.decision.modelId !== target.modelId ||
+    persisted.decision.task !== target.task ||
+    persisted.decision.requestFingerprint === undefined ||
+    target.provider !== expectedProvider
+  ) {
+    throw new Error(
+      `MODEL-001 route ${decisionId} is not a current execution binding`
+    );
+  }
 }
 
 /** Read one durable run after validating current-project ownership. */
@@ -324,6 +380,87 @@ function validateTaskInput(
     throw new Error(`Agent output limit must be an integer between 1 and ${AGENT_OUTPUT_LIMIT_BYTES} bytes`);
   }
   return { instructions: input.instructions, model: input.model, timeoutMs, maxOutputBytes };
+}
+
+async function getVerifiedExecutionWorkspace(
+  options: AgentExecutionServiceOptions,
+  ticketId: string
+): Promise<WorkspaceRecord> {
+  const workspace = await getVerifiedWorkspaceForExecution(options, ticketId);
+  const ticket = createTicketRepository(options.db).findById(ticketId);
+  if (!ticket || ticket.projectId !== workspace.projectId) {
+    throw new Error(`Ticket ${ticketId} does not belong to the verified workspace project`);
+  }
+  if (ticket.status !== TicketState.PLANNING) {
+    throw new Error(
+      `Ticket ${ticketId} has state ${ticket.status}; agent execution requires PLANNING`
+    );
+  }
+  return workspace;
+}
+
+function buildAgentRun(
+  workspace: WorkspaceRecord,
+  provider: AgentProvider,
+  normalized: { instructions: string; model: string; timeoutMs: number },
+  runId: string,
+  createdAt: string
+): AgentRunRecord {
+  return {
+    id: runId,
+    projectId: workspace.projectId,
+    ticketId: workspace.ticketId,
+    workspaceId: workspace.id,
+    workspacePath: workspace.worktreePath,
+    baseSha: workspace.baseSha,
+    branchName: workspace.branchName,
+    status: 'CREATED',
+    provider,
+    model: normalized.model,
+    createdAt,
+    // The legacy schema requires started_at to be non-null. It is replaced by
+    // the actual start timestamp when CREATED advances to RUNNING.
+    startedAt: createdAt,
+    updatedAt: createdAt,
+    timedOut: false,
+    cancelled: false,
+    stdout: '',
+    stderr: '',
+    stdoutTruncated: false,
+    stderrTruncated: false,
+    instructionsSha256: createHash('sha256').update(normalized.instructions).digest('hex'),
+    timeoutMs: normalized.timeoutMs,
+  };
+}
+
+function loadPreparedRun(
+  options: AgentExecutionServiceOptions,
+  runId: string,
+  workspace: WorkspaceRecord,
+  normalized: { instructions: string; model: string; timeoutMs: number }
+): AgentRunRecord {
+  const run = requireDurableRun(createRunRepository(options.db).findById(runId));
+  const instructionHash = createHash('sha256').update(normalized.instructions).digest('hex');
+  if (run.status !== 'CREATED') {
+    throw new Error(`Prepared agent run ${run.id} is ${run.status}; execution requires CREATED`);
+  }
+  if (
+    run.projectId !== workspace.projectId ||
+    run.ticketId !== workspace.ticketId ||
+    run.workspaceId !== workspace.id ||
+    run.workspacePath !== workspace.worktreePath ||
+    run.baseSha !== workspace.baseSha ||
+    run.branchName !== workspace.branchName
+  ) {
+    throw new Error(`Prepared agent run ${run.id} does not match the verified workspace`);
+  }
+  if (run.provider !== options.adapter.provider || run.model !== normalized.model) {
+    throw new Error(`Prepared agent run ${run.id} does not match the selected provider/model`);
+  }
+  if (run.instructionsSha256 !== instructionHash || run.timeoutMs !== normalized.timeoutMs) {
+    throw new Error(`Prepared agent run ${run.id} does not match the execution request`);
+  }
+  return run;
 }
 
 function persistCreatedRun(

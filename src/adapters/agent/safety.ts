@@ -6,8 +6,16 @@
 export function redactSensitiveText(value: string): string {
   return value
     .replace(
-      /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{16,})\b/gu,
+      /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|xai-[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{20,}|ya29\.[A-Za-z0-9._-]{16,}|AKIA[A-Z0-9]{16})\b/gu,
       '[REDACTED_SECRET]'
+    )
+    .replace(
+      /\bAuthorization\s*:\s*Bearer\s+[^\s"',;]+/giu,
+      'Authorization: Bearer [REDACTED_SECRET]'
+    )
+    .replace(
+      /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/giu,
+      'Bearer [REDACTED_SECRET]'
     )
     .replace(
       /((?:api[_-]?key|token|secret|password)\s*[:=]\s*)(["']?)[^\s"']+\2/giu,

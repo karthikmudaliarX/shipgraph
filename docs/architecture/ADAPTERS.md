@@ -77,11 +77,12 @@ receives only an explicit execution envelope (Eco, Balanced or Max plus the
 caller's budget/concurrency values), selects a discovered usable model for
 implementation, review or repair only when its AGENT-001 adapter is available,
 persists its reason, and atomically reserves the selected provider's known
-capacity when the caller supplies a durable execution run. A route without a
-run ID is a non-persistent decision preview and does not claim provider
-capacity. `ModelRoutingService.resolveExecutionTarget()` returns the exact
-capability-probed adapter for a route, and the execution service accepts that
-target without choosing a different provider.
+capacity when the caller supplies a durable execution run whose provider/model
+identity matches the selected target. A route without a run ID is a
+non-persistent decision preview and does not claim provider capacity.
+`ModelRoutingService.resolveExecutionTarget()` returns the exact
+capability-probed adapter for a route; only its active, run-bound target is
+accepted by `executeSelectedAgentTask`, so a preview cannot bypass capacity.
 When no separate request ID is supplied, the durable run ID is the stable
 replay key for that reservation until it is finalized; a new attempt after
 finalization must use a new request ID.

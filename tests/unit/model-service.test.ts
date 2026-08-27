@@ -48,16 +48,42 @@ function createProject(db: DbConnection): void {
     createdAt: now,
     updatedAt: now,
   });
-  db.prepare(
-    `INSERT INTO runs (
-      id, ticket_id, base_sha, branch_name, status, started_at, project_id, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run('run-1', 'KAR-1', '0'.repeat(40), 'agent/model-telemetry', 'SUCCEEDED', now, projectId, now, now);
-  db.prepare(
-    `INSERT INTO runs (
-      id, ticket_id, base_sha, branch_name, status, started_at, project_id, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run('run-2', 'KAR-1', '0'.repeat(40), 'agent/model-telemetry-2', 'SUCCEEDED', now, projectId, now, now);
+    db.prepare(
+      `INSERT INTO runs (
+        id, ticket_id, base_sha, branch_name, status, started_at, project_id,
+        provider, model, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'run-1',
+      'KAR-1',
+      '0'.repeat(40),
+      'agent/model-telemetry',
+      'SUCCEEDED',
+      now,
+      projectId,
+      'codex',
+      'codex/dynamic',
+      now,
+      now
+    );
+    db.prepare(
+      `INSERT INTO runs (
+        id, ticket_id, base_sha, branch_name, status, started_at, project_id,
+        provider, model, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      'run-2',
+      'KAR-1',
+      '0'.repeat(40),
+      'agent/model-telemetry-2',
+      'SUCCEEDED',
+      now,
+      projectId,
+      'codex',
+      'codex/dynamic',
+      now,
+      now
+    );
 }
 
 function adapter(
@@ -169,7 +195,7 @@ describe('MODEL-001 service', () => {
       outcomeQuality: 'unknown',
     });
 
-    expect(calls).toEqual({ probe: 4, discover: 4 });
+    expect(calls).toEqual({ probe: 8, discover: 8 });
     expect(decision.reason).toContain('candidates=');
     expect(service.listRoutingDecisions()).toHaveLength(0);
     expect(db.prepare('SELECT COUNT(*) AS count FROM provider_capacity_reservations').get()).toEqual({ count: 0 });
@@ -480,6 +506,55 @@ describe('MODEL-001 service', () => {
     await expect(service.route(request)).rejects.toThrow(/released capacity reservation/);
     expect(service.listRoutingDecisions()).toHaveLength(1);
     expect(service.listHealth()[0]?.activeRuns).toBe(0);
+  });
+
+  it('refuses a replay with changed constraints and rechecks execution capability', async () => {
+    let executionAvailable = true;
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [adapter('codex', 'openai', { probe: 0, discover: 0 })],
+      executionAdapters: [{
+        modelProviderId: 'codex',
+        adapter: {
+          provider: 'codex',
+          capabilities: ['execute'],
+          probe: () => executionAvailable
+            ? { available: true as const, version: 'test-agent' }
+            : { available: false as const, reason: 'test executable disappeared' },
+          execute: async () => {
+            throw new Error('test execution adapter is not invoked here');
+          },
+        },
+      }],
+      now: () => now,
+    });
+    const request = {
+      requestId: 'replay-capability-request',
+      runId: 'run-1',
+      task: 'implementation' as const,
+      risk: 'medium' as const,
+      envelope: {
+        mode: 'balanced' as const,
+        maxConcurrentTickets: 4,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown' as const,
+      },
+    };
+
+    const first = await service.route(request);
+    await expect(service.route({
+      ...request,
+      envelope: { ...request.envelope, budgetRemaining: 1 },
+    })).rejects.toThrow(/different routing constraints/);
+
+    executionAvailable = false;
+    await expect(service.route(request)).rejects.toThrow(
+      /no capability-probed AGENT-001 execution surface/
+    );
+    expect(service.listRoutingDecisions()).toHaveLength(1);
+    expect(service.listHealth()[0]?.activeRuns).toBe(1);
+    expect(first.requestFingerprint).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('keeps previews non-persistent so the same request can become execution-bound', async () => {

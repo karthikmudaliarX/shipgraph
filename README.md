@@ -98,8 +98,11 @@ or merges code.
 The execution envelope is a Scheduler-owned snapshot: MODEL-001 validates the
 supplied global mode, budget and ticket counts but does not claim global ticket
 capacity. A route supplied with a durable `--run-id` reserves a provider run
-slot when that limit is known; a route without one is a non-persistent decision
-preview. Usage finalization releases an execution-bound reservation only when
+slot when that limit is known; the durable run must already identify the exact
+AGENT adapter and discovered model. A route without one is a non-persistent
+decision preview. Only a target resolved from an active run-bound reservation
+may enter `executeSelectedAgentTask`; preview targets are rejected by that
+bridge. Usage finalization releases an execution-bound reservation only when
 the same durable run and routing decision ID are supplied.
 
 ## CLI examples

@@ -69,10 +69,13 @@ as filesystem isolation.
 
 MODEL-001 now owns provider metadata discovery, health, quota/usage ledger
 records and deterministic model routing in a separate control-plane subsystem.
-A route with a durable execution run persists its decision with an atomic,
-run-bound provider-capacity reservation; a route without a run ID is a
-non-persistent preview. Usage finalization releases that reservation only for
-the owning run. Unknown quota and usage values remain unknown.
+A route with a pre-persisted CREATED execution run persists its decision with an
+atomic, provider/model- and run-bound provider-capacity reservation; a route
+without a run ID is a non-persistent preview. MODEL-001 resolves only an
+active reservation to an execution-bound AGENT target, and AGENT-001 consumes
+that existing CREATED run rather than creating a second unreserved run. Usage
+finalization releases that reservation only for the owning run. Unknown quota
+and usage values remain unknown.
 The AGENT-001 command remains explicit-provider execution; MODEL-001 resolves a
 routed selection to the exact adapter but does not automatically dispatch a
 ticket, replace that execution contract, or add post-execution PR/review/release
@@ -85,8 +88,10 @@ automation.
   `shipgraph agent recover`, which records `NEEDS_HUMAN` without killing a
   process whose ownership cannot be proven.
 - The explicit AGENT-001 execution command still requires a caller to supply a
-  ticket, workspace, instructions and model. MODEL-001 does not automatically
-  dispatch routed choices or add scheduler/Linear orchestration.
+  ticket, workspace, instructions and model. A routed hand-off additionally
+  prepares a CREATED AGENT run before binding the MODEL-001 route; MODEL-001
+  does not automatically dispatch routed choices or add scheduler/Linear
+  orchestration.
 - A terminal run describes the bounded provider execution only. The ticket
   remains in the existing implementation lifecycle for later verification,
   review, repair, release and merge tickets to advance.
