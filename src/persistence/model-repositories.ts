@@ -747,7 +747,13 @@ export function createModelRepository(db: DbConnection): ModelRepository {
         `SELECT status, timed_out, cancelled, stdout_truncated, stderr_truncated
          FROM runs WHERE id = ? AND project_id = ?`
       )
-      .get(parsedRunId, projectId) as { status: string } | undefined;
+      .get(parsedRunId, projectId) as {
+        status: string;
+        timed_out: number;
+        cancelled: number;
+        stdout_truncated: number;
+        stderr_truncated: number;
+      } | undefined;
     if (run === undefined) {
       throw new Error(`Routing decision ${routingDecisionId} has no owning run`);
     }
