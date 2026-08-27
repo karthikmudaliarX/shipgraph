@@ -14,11 +14,11 @@ describe('MODEL-001 CLI', () => {
 
   beforeEach(() => {
     projectDir = mkdtempSync(join(tmpdir(), 'shipgraph-model-cli-'));
-    providerScript = join(projectDir, 'provider');
+    providerScript = join(projectDir, 'opencode');
     writeFileSync(
       providerScript,
       '#!/bin/sh\n' +
-        'if [ "$1" = "--version" ]; then printf "fake-provider 1.0\\n"; ' +
+        'if [ "$1" = "--version" ]; then printf "1.0.0\\n"; ' +
         'elif [ "$1" = "run" ] && [ "$2" = "--help" ]; then ' +
         'printf "run --format --dir --model --auto\\n"; ' +
         'else printf "[{\\"id\\":\\"future/provider-model\\"}]\\n"; fi\n'
@@ -57,27 +57,6 @@ describe('MODEL-001 CLI', () => {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
-    const now = new Date().toISOString();
-    db.prepare(
-      `INSERT INTO runs (
-        id, ticket_id, base_sha, branch_name, status, started_at, project_id,
-        provider, model, model_provider_id, task, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      'run-cli-1',
-      'KAR-6001',
-      '0'.repeat(40),
-      'agent/cli-model',
-      'CREATED',
-      now,
-      project.id,
-      'opencode',
-      'future/provider-model',
-      'opencode-go',
-      'implementation',
-      now,
-      now
-    );
     db.close();
     process.exitCode = undefined;
   });
@@ -109,14 +88,15 @@ describe('MODEL-001 CLI', () => {
       ['providers', 'route', 'implementation', '--risk', 'medium', '--project-dir', projectDir, '--json'],
       { from: 'user' }
     );
-    const route = JSON.parse(String(consoleSpy.mock.calls.at(-1)?.[0])) as {
-      decision: Record<string, unknown>;
+    expect(process.exitCode).toBe(1);
+    const routeError = JSON.parse(String(consoleSpy.mock.calls.at(-1)?.[0])) as {
+      error: string;
     };
-    expect(route.decision).toMatchObject({
-      providerId: 'opencode-go',
-      modelId: 'future/provider-model',
-      mode: 'balanced',
-    });
+    expect(routeError.error).toMatch(/No usable provider\/model/);
+    // The fake command only proves its installed surface; it intentionally
+    // provides no positive authentication evidence, so CLI routing must fail
+    // closed rather than reserve a provider it cannot prove it can execute.
+    process.exitCode = undefined;
 
     await createProgram().parseAsync(
       ['providers', 'list', '--project-dir', projectDir, '--json'],
@@ -127,47 +107,9 @@ describe('MODEL-001 CLI', () => {
     };
     expect(listed.providers).toHaveLength(4);
 
-    consoleSpy.mockClear();
-    await createProgram().parseAsync(
-      [
-        'providers',
-        'route',
-        'implementation',
-        '--risk',
-        'medium',
-        '--run-id',
-        'run-cli-1',
-        '--project-dir',
-        projectDir,
-        '--json',
-      ],
-      { from: 'user' }
-    );
-    const boundFirst = JSON.parse(String(consoleSpy.mock.calls.at(-1)?.[0])) as {
-      decision: Record<string, unknown>;
-    };
-    await createProgram().parseAsync(
-      [
-        'providers',
-        'route',
-        'implementation',
-        '--risk',
-        'medium',
-        '--run-id',
-        'run-cli-1',
-        '--project-dir',
-        projectDir,
-        '--json',
-      ],
-      { from: 'user' }
-    );
-    const boundReplay = JSON.parse(String(consoleSpy.mock.calls.at(-1)?.[0])) as {
-      decision: Record<string, unknown>;
-    };
-    expect(boundReplay.decision).toEqual(boundFirst.decision);
     const persisted = openAndMigrate(join(projectDir, '.shipgraph', 'shipgraph.db'));
-    expect(persisted.prepare('SELECT COUNT(*) AS count FROM routing_decisions').get()).toEqual({ count: 1 });
-    expect(persisted.prepare('SELECT COUNT(*) AS count FROM provider_capacity_reservations').get()).toEqual({ count: 1 });
+    expect(persisted.prepare('SELECT COUNT(*) AS count FROM routing_decisions').get()).toEqual({ count: 0 });
+    expect(persisted.prepare('SELECT COUNT(*) AS count FROM provider_capacity_reservations').get()).toEqual({ count: 0 });
     persisted.close();
     consoleSpy.mockRestore();
   });

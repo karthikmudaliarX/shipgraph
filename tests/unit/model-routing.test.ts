@@ -129,6 +129,18 @@ describe('MODEL-001 deterministic routing', () => {
     expect(decision.providerId).toBe('grok');
   });
 
+  it('does not route when authentication remains unknown', () => {
+    const router = new ModelRouter();
+    expect(() => router.route(
+      { task: 'implementation', risk: 'low', envelope },
+      snapshot(
+        [provider('codex', 'openai')],
+        [model('codex', 'codex-dynamic')],
+        [health('codex', { auth: 'unknown' })]
+      )
+    )).toThrow(/No usable provider\/model/);
+  });
+
   it('keeps unknown quota literal and prefers a known low-pressure provider', () => {
     const router = new ModelRouter();
     const decision = router.route(

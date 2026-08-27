@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -107,6 +107,36 @@ describe('OpenCode adapter and process boundary', () => {
     await expect(
       adapter.execute({ ...request, provider: 'codex' })
     ).rejects.toThrow(/cannot execute provider codex/);
+  });
+
+  it('pins the OpenCode executable identity between capability probe and launch', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'shipgraph-opencode-probe-'));
+    temporaryDirectories.push(directory);
+    const executable = join(directory, 'opencode');
+    const replacement = join(directory, 'replacement');
+    const script = `#!/bin/sh
+case "$1 $2" in
+  "--version ") printf '1.0.0\\n' ;;
+  "run --help") printf '%s\\n' '--format --dir --model --auto' ;;
+  *) printf '%s\\n' '${successfulOutput}' ;;
+esac
+`;
+    writeFileSync(executable, script, { mode: 0o700 });
+    writeFileSync(replacement, script, { mode: 0o700 });
+    chmodSync(executable, 0o700);
+    chmodSync(replacement, 0o700);
+
+    const adapter = new OpenCodeAdapter({
+      executable,
+      cwd: process.cwd(),
+      environment: { PATH: directory },
+    });
+    await expect(adapter.probe()).resolves.toMatchObject({ available: true, version: '1.0.0' });
+    renameSync(replacement, executable);
+
+    await expect(adapter.execute({ ...request, workspacePath: process.cwd() })).rejects.toThrow(
+      /executable provenance changed/
+    );
   });
 
   it.each([

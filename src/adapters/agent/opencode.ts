@@ -10,7 +10,10 @@ import {
   type NormalizedAgentEvidence,
 } from '../../domain/agent-run.js';
 import {
+  resolveExecutable,
+  sameExecutable,
   probeCommandSurface,
+  type ResolvedExecutable,
 } from './command.js';
 import {
   createAgentProcessRunner,
@@ -23,6 +26,7 @@ import { registerModelProviderAdapter } from './model-provider-owner.js';
 export { redactSensitiveText } from './safety.js';
 
 const OPENCODE_PROVIDER = 'opencode' as const;
+const OPENCODE_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
 const MAX_EVENT_TYPES = 64;
 const MAX_SUMMARY_LENGTH = 4_096;
 
@@ -73,26 +77,43 @@ export class OpenCodeAdapter implements AgentExecutionAdapter {
   private readonly executable: string;
   private readonly processRunner: AgentProcessRunner;
   private readonly environment: Readonly<Record<string, string>>;
+  private readonly enforceExecutableProvenance: boolean;
+  private resolvedExecutable: ResolvedExecutable | undefined;
 
   public constructor(options: OpenCodeAdapterOptions = {}) {
     this.enabled = options.enabled ?? true;
     this.executable = options.executable ?? 'opencode';
     this.processRunner = options.processRunner ?? createAgentProcessRunner();
     this.environment = buildEnvironment(options.environment);
+    this.enforceExecutableProvenance = options.processRunner === undefined;
     registerModelProviderAdapter(this, 'opencode-go');
   }
 
   public async probe(): Promise<AgentProbeResult> {
-    return probeCommandSurface({
+    const resolved = this.enforceExecutableProvenance && this.enabled
+      ? resolveExecutable(this.executable, process.cwd(), this.environment.PATH)
+      : undefined;
+    if (this.enforceExecutableProvenance && this.enabled && resolved === undefined) {
+      return {
+        available: false,
+        reason: 'OpenCode executable was not found or is not executable',
+      };
+    }
+    const result = await probeCommandSurface({
       displayName: 'OpenCode',
       enabled: this.enabled,
-      executable: this.executable,
+      executable: resolved?.path ?? this.executable,
+      configuredExecutable: this.executable,
       probeArgs: ['run', '--help'],
       requiredProbeTokens: ['--format', '--dir', '--model', '--auto'],
+      versionPattern: OPENCODE_VERSION_PATTERN,
+      expectedExecutableName: 'opencode',
       processRunner: this.processRunner,
       cwd: process.cwd(),
       environment: this.environment,
     });
+    this.resolvedExecutable = result.available ? resolved : undefined;
+    return result;
   }
 
   public async execute(request: AgentExecutionRequest): Promise<AgentExecutionResult> {
@@ -106,7 +127,7 @@ export class OpenCodeAdapter implements AgentExecutionAdapter {
     }
 
     const processResult = await this.processRunner.run({
-      command: this.executable,
+      command: this.executableForExecution(),
       // `--dir` and `cwd` are both pinned to the exact verified worktree. The
       // command is spawned without a shell, so instructions remain one argv
       // value and cannot become shell syntax.
@@ -130,6 +151,20 @@ export class OpenCodeAdapter implements AgentExecutionAdapter {
     });
 
     return normalizeOpenCodeResult(processResult);
+  }
+
+  private executableForExecution(): string {
+    if (!this.enforceExecutableProvenance) return this.executable;
+    if (this.resolvedExecutable === undefined) {
+      throw new Error('OpenCode execution requires a successful capability probe');
+    }
+    const current = resolveExecutable(this.executable, process.cwd(), this.environment.PATH);
+    if (current === undefined || !sameExecutable(current, this.resolvedExecutable)) {
+      throw new Error(
+        `OpenCode executable provenance changed after capability probing; refusing launch`
+      );
+    }
+    return current.path;
   }
 }
 

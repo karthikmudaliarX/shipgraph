@@ -148,7 +148,7 @@ function cleanup(harness: Harness | undefined): void {
 function providerScript(contents: string): string {
   const directory = mkdtempSync(join(tmpdir(), 'shipgraph-provider-'));
   providerScriptDirectories.push(directory);
-  const script = join(directory, 'provider.sh');
+  const script = join(directory, 'opencode');
   writeFileSync(script, `#!/bin/sh\n${contents}\n`);
   chmodSync(script, 0o700);
   return script;
@@ -278,21 +278,21 @@ describe('AGENT-001 durable execution', () => {
     ['missing executable', '/definitely/not/opencode', undefined, 'executable_unavailable', 'NEEDS_HUMAN'],
     [
       'malformed output',
-      providerScript('if [ "$1" = "--version" ]; then printf -- "provider 1.0\\n"; exit 0; fi; if [ "$1" = "run" ] && [ "$2" = "--help" ]; then printf -- "--format --dir --model --auto\\n"; exit 0; fi; printf "not-json\\n"'),
+      providerScript('if [ "$1" = "--version" ]; then printf -- "1.0.0\\n"; exit 0; fi; if [ "$1" = "run" ] && [ "$2" = "--help" ]; then printf -- "--format --dir --model --auto\\n"; exit 0; fi; printf "not-json\\n"'),
       undefined,
       'malformed_output',
       'FAILED',
     ],
     [
       'non-zero exit',
-      providerScript('if [ "$1" = "--version" ]; then printf -- "provider 1.0\\n"; exit 0; fi; if [ "$1" = "run" ] && [ "$2" = "--help" ]; then printf -- "--format --dir --model --auto\\n"; exit 0; fi; printf \'{"type":"text"}\\n\'; exit 7'),
+      providerScript('if [ "$1" = "--version" ]; then printf -- "1.0.0\\n"; exit 0; fi; if [ "$1" = "run" ] && [ "$2" = "--help" ]; then printf -- "--format --dir --model --auto\\n"; exit 0; fi; printf \'{"type":"text"}\\n\'; exit 7'),
       undefined,
       'non_zero_exit',
       'FAILED',
     ],
     [
       'timeout',
-      providerScript('if [ "$1" = "--version" ]; then printf -- "provider 1.0\\n"; exit 0; fi; if [ "$1" = "run" ] && [ "$2" = "--help" ]; then printf -- "--format --dir --model --auto\\n"; exit 0; fi; while true; do sleep 1; done'),
+      providerScript('if [ "$1" = "--version" ]; then printf -- "1.0.0\\n"; exit 0; fi; if [ "$1" = "run" ] && [ "$2" = "--help" ]; then printf -- "--format --dir --model --auto\\n"; exit 0; fi; while true; do sleep 1; done'),
       100,
       'timeout',
       'TIMED_OUT',
@@ -332,7 +332,7 @@ describe('AGENT-001 durable execution', () => {
 
   it('records cancellation and never persists the instructions or environment', async () => {
     harness = await createHarness();
-    const script = providerScript('if [ "$1" = "--version" ]; then printf -- "provider 1.0\\n"; exit 0; fi; if [ "$1" = "run" ] && [ "$2" = "--help" ]; then printf -- "--format --dir --model --auto\\n"; exit 0; fi; sleep 30');
+    const script = providerScript('if [ "$1" = "--version" ]; then printf -- "1.0.0\\n"; exit 0; fi; if [ "$1" = "run" ] && [ "$2" = "--help" ]; then printf -- "--format --dir --model --auto\\n"; exit 0; fi; sleep 30');
     const options: AgentExecutionServiceOptions = {
       ...harness.options,
       adapter: new OpenCodeAdapter({ executable: script, environment: { TEST_SECRET: 'do-not-persist' } }),

@@ -84,7 +84,8 @@ it. Model identifiers never imply capabilities.
 capability-probed execution status and `ProviderHealth` state. `ModelRouter`
 receives only an explicit execution envelope (Eco, Balanced or Max plus the
 caller's budget/concurrency values), selects a discovered usable model for
-implementation, review or repair only when its AGENT-001 adapter is available,
+implementation, review or repair only when its AGENT-001 adapter is available
+and the provider has positively authenticated,
 persists its reason, and atomically reserves the selected provider's capacity
 when the caller supplies a durable execution run whose provider/model
 identity matches the selected target. Known limits are enforced directly; an

@@ -195,7 +195,10 @@ function isUsableProvider(
     provider.capabilities.includes(task) &&
     health !== undefined &&
     (health.status === 'healthy' || health.status === 'degraded') &&
-    health.auth !== 'unauthenticated' &&
+    // A command surface and model catalog are not proof that the provider can
+    // execute the selected model. Unknown authentication is fail-closed for
+    // routing; only positive authentication evidence may reserve capacity.
+    health.auth === 'authenticated' &&
     !(isKnownNumber(health.quotaRemaining) && health.quotaRemaining <= 0)
   );
 }

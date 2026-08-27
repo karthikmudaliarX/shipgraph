@@ -54,6 +54,8 @@ export type CommandSurfaceProbeOptions = {
   probeArgs: readonly string[];
   requiredProbeTokens: readonly string[];
   requiredVersionTokens?: readonly string[];
+  /** Optional provider-specific format check for the first version line. */
+  versionPattern?: RegExp;
   expectedExecutableName?: string;
   /** Original configured name, kept separate from the canonical pinned path. */
   configuredExecutable?: string;
@@ -133,6 +135,13 @@ export async function probeCommandSurface(
     };
   }
   const firstLine = firstOutputLine(version.stdout || version.stderr);
+  if (options.versionPattern !== undefined &&
+      (firstLine === undefined || !options.versionPattern.test(firstLine))) {
+    return {
+      available: false,
+      reason: `${options.displayName} version probe did not match the expected identity format`,
+    };
+  }
   return firstLine === undefined
     ? { available: true }
     : { available: true, version: firstLine };
@@ -618,13 +627,13 @@ function validateText(value: string, label: string, maxLength: number): string {
   return value;
 }
 
-type ResolvedExecutable = {
+export type ResolvedExecutable = {
   path: string;
   device: string;
   inode: string;
 };
 
-function resolveExecutable(
+export function resolveExecutable(
   executable: string,
   cwd: string,
   pathValue: string | undefined
@@ -648,7 +657,7 @@ function resolveExecutable(
   return undefined;
 }
 
-function sameExecutable(left: ResolvedExecutable, right: ResolvedExecutable): boolean {
+export function sameExecutable(left: ResolvedExecutable, right: ResolvedExecutable): boolean {
   return left.path === right.path && left.device === right.device && left.inode === right.inode;
 }
 

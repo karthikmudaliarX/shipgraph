@@ -333,7 +333,7 @@ describe('MODEL-001 service', () => {
     expect(service.listHealth()[0]?.quotaRemaining).toBe('unknown');
   });
 
-  it('allows a fresh unknown auth probe to recover from a prior auth failure', async () => {
+  it('keeps a fresh unknown auth probe non-routable after a prior auth failure', async () => {
     const authUnknownAdapter: ModelProviderAdapter = {
       providerId: 'codex',
       family: 'openai',
@@ -380,7 +380,7 @@ describe('MODEL-001 service', () => {
         activeConcurrentTickets: 'unknown',
         budgetRemaining: 'unknown',
       },
-    })).resolves.toMatchObject({ providerId: 'codex' });
+    })).rejects.toThrow(/No usable provider\/model/);
   });
 
   it('rejects a routed target when a refreshed provider loses its task capability', async () => {

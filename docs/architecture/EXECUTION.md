@@ -80,6 +80,8 @@ as filesystem isolation.
 
 MODEL-001 now owns provider metadata discovery, health, quota/usage ledger
 records and deterministic model routing in a separate control-plane subsystem.
+A provider with unknown authentication is not routable: a successful command
+surface probe alone cannot prove that the selected provider/model can execute.
 A route with a pre-persisted CREATED execution run persists its decision with an
 atomic, provider/model- and run-bound provider-capacity reservation; a route
 without a run ID is a non-persistent preview. MODEL-001 resolves only an
