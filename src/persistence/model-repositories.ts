@@ -263,11 +263,27 @@ export function createModelRepository(db: DbConnection): ModelRepository {
     appendUsage(entry): UsageLedgerRecord {
       const parsed = usageLedgerRecordSchema.parse(entry);
       const run = db
-        .prepare('SELECT project_id FROM runs WHERE id = ?')
-        .get(parsed.runId) as { project_id: string | null } | undefined;
+        .prepare('SELECT project_id, model_provider_id, model, task FROM runs WHERE id = ?')
+        .get(parsed.runId) as {
+          project_id: string | null;
+          model_provider_id: string | null;
+          model: string | null;
+          task: string | null;
+        } | undefined;
       if (run === undefined || run.project_id !== parsed.projectId) {
         throw new Error(
           `Usage ledger run ${parsed.runId} is not a durable run in project ${parsed.projectId}`
+        );
+      }
+      if (
+        run.model_provider_id === null ||
+        run.model_provider_id === undefined ||
+        run.model !== parsed.modelId ||
+        run.task !== parsed.task ||
+        run.model_provider_id !== parsed.providerId
+      ) {
+        throw new Error(
+          `Usage ledger entry for run ${parsed.runId} does not match its durable provider/model/task`
         );
       }
       if (parsed.routingDecisionId !== undefined) {
@@ -397,12 +413,13 @@ export function createModelRepository(db: DbConnection): ModelRepository {
         const parsed = modelRoutingDecisionSchema.parse(decision);
         const parsedRunId = validateRunId(runId);
         const durableRun = db
-          .prepare('SELECT project_id, provider, model, model_provider_id, status FROM runs WHERE id = ?')
+          .prepare('SELECT project_id, provider, model, model_provider_id, task, status FROM runs WHERE id = ?')
           .get(parsedRunId) as {
             project_id: string | null;
             provider: string | null;
             model: string | null;
             model_provider_id: string | null;
+            task: string | null;
             status: string;
           } | undefined;
         if (durableRun === undefined || durableRun.project_id !== parsed.projectId) {
@@ -419,7 +436,8 @@ export function createModelRepository(db: DbConnection): ModelRepository {
         if (
           durableRun.provider !== expectedAgentProvider ||
           durableRun.model !== parsed.modelId ||
-          durableRun.model_provider_id !== parsed.providerId
+          durableRun.model_provider_id !== parsed.providerId ||
+          durableRun.task !== parsed.task
         ) {
           throw new Error(
             `Routing run ${parsedRunId} does not identify ${parsed.providerId}/${parsed.modelId}`

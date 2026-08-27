@@ -458,6 +458,17 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE runs ADD COLUMN model_provider_id TEXT;
     `,
   },
+  {
+    version: 14,
+    name: 'persist_model_task_on_runs',
+    up: `
+      -- A prepared AGENT-001 run is an execution contract for one MODEL-001
+      -- task. Legacy rows may remain NULL, but new route reservations must
+      -- match this value exactly before they can start.
+      ALTER TABLE runs ADD COLUMN task TEXT
+        CHECK (task IS NULL OR task IN ('implementation', 'review', 'repair'));
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {

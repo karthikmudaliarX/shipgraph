@@ -375,6 +375,7 @@ function verifyExecutionBinding(
     persisted.decision.requestFingerprint === undefined ||
     run === undefined ||
     run.projectId !== projectId ||
+    run.task !== target.task ||
     run.modelProviderId !== target.modelProviderId ||
     run.provider !== target.provider ||
     run.model !== target.modelId ||
@@ -541,6 +542,7 @@ function buildAgentRun(
   normalized: {
     instructions: string;
     model: string;
+    task: ModelTaskType;
     timeoutMs: number;
     modelProviderId?: ModelProviderId;
   },
@@ -560,6 +562,7 @@ function buildAgentRun(
     ...(normalized.modelProviderId === undefined
       ? {}
       : { modelProviderId: normalized.modelProviderId }),
+    task: normalized.task,
     model: normalized.model,
     createdAt,
     // The legacy schema requires started_at to be non-null. It is replaced by
@@ -584,6 +587,7 @@ function loadPreparedRun(
   normalized: {
     instructions: string;
     model: string;
+    task: ModelTaskType;
     timeoutMs: number;
     modelProviderId?: ModelProviderId;
   }
@@ -609,6 +613,9 @@ function loadPreparedRun(
   if (run.modelProviderId !== normalized.modelProviderId) {
     throw new Error(`Prepared agent run ${run.id} does not match the selected MODEL provider`);
   }
+  if (run.task !== normalized.task) {
+    throw new Error(`Prepared agent run ${run.id} does not match the selected MODEL task`);
+  }
   if (run.instructionsSha256 !== instructionHash || run.timeoutMs !== normalized.timeoutMs) {
     throw new Error(`Prepared agent run ${run.id} does not match the execution request`);
   }
@@ -631,6 +638,9 @@ function persistCreatedRun(
       throw new Error(
         `Ticket ${run.ticketId} changed before the ${task} agent run was persisted`
       );
+    }
+    if (run.task !== task) {
+      throw new Error(`Agent run ${run.id} does not record the selected MODEL task`);
     }
     const existing = createRunRepository(options.db).findByTicketId(run.ticketId);
     if (existing.length > 0) {
@@ -656,6 +666,7 @@ function persistCreatedRun(
         branchName: run.branchName,
         provider: run.provider,
         ...(run.modelProviderId === undefined ? {} : { modelProviderId: run.modelProviderId }),
+        task: run.task,
         model: run.model,
         createdAt: run.createdAt,
         timeoutMs: run.timeoutMs,

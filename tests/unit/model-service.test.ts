@@ -68,8 +68,8 @@ function createProject(db: DbConnection): void {
     db.prepare(
       `INSERT INTO runs (
         id, ticket_id, base_sha, branch_name, status, started_at, project_id,
-        provider, model, model_provider_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        provider, model, model_provider_id, task, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'run-1',
       'KAR-1',
@@ -81,14 +81,15 @@ function createProject(db: DbConnection): void {
       'codex',
       'codex/dynamic',
       'codex',
+      'implementation',
       now,
       now
     );
     db.prepare(
       `INSERT INTO runs (
         id, ticket_id, base_sha, branch_name, status, started_at, project_id,
-        provider, model, model_provider_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        provider, model, model_provider_id, task, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'run-2',
       'KAR-2',
@@ -100,6 +101,7 @@ function createProject(db: DbConnection): void {
       'codex',
       'codex/dynamic',
       'codex',
+      'implementation',
       now,
       now
     );
@@ -263,6 +265,30 @@ describe('MODEL-001 service', () => {
     expect(calls.discover).toBe(5);
     expect(service.listUsage()).toHaveLength(1);
     expect(service.listHealth().find((health) => health.providerId === 'codex')?.recentFailureCount).toBe(1);
+  });
+
+  it('rejects unbound usage that does not match the durable run task', async () => {
+    const calls = { probe: 0, discover: 0 };
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [adapter('codex', 'openai', calls)],
+      executionAdapters: [executionBinding('codex')],
+      now: () => now,
+    });
+    await service.refresh();
+
+    await expect(service.recordUsage({
+      runId: 'run-1',
+      providerId: 'codex',
+      modelId: 'codex/dynamic',
+      task: 'review',
+      retryCount: 0,
+      elapsedMs: 1,
+      outcome: 'succeeded',
+      outcomeQuality: 'good',
+    })).rejects.toThrow(/does not match its durable provider\/model\/task/);
+    expect(service.listUsage()).toHaveLength(0);
   });
 
   it('does not carry stale numeric quota through a refresh without quota evidence', async () => {
@@ -541,6 +567,32 @@ describe('MODEL-001 service', () => {
       },
     })).rejects.toThrow(/No usable provider\/model/);
     expect(service.listRoutingDecisions()).toHaveLength(0);
+  });
+
+  it('does not bind a route for a different task than the prepared run', async () => {
+    const calls = { probe: 0, discover: 0 };
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [adapter('codex', 'openai', calls)],
+      executionAdapters: [executionBinding('codex', ['execute', 'review'])],
+      now: () => now,
+    });
+    await service.refresh();
+
+    await expect(service.route({
+      runId: 'run-1',
+      task: 'review',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 4,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    })).rejects.toThrow(/does not identify codex\/codex\/dynamic/);
+    expect(service.listRoutingDecisions()).toHaveLength(0);
+    expect(service.listHealth()[0]?.activeRuns).toBe(0);
   });
 
   it('replays a request idempotently without creating another reservation', async () => {

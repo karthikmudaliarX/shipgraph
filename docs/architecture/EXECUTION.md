@@ -46,8 +46,11 @@ CREATED → STARTING → RUNNING →
 ```
 
 The row records project/ticket/workspace identity, exact path and base SHA,
-provider/model, timestamps, process/session identifiers when available, exit
-information, bounded redacted output, normalized evidence and a failure reason.
+MODEL task and provider/model, timestamps, process/session identifiers when
+available, exit information, bounded redacted output, normalized evidence and a
+failure reason. A routed reservation must match the prepared run's task as
+well as its project, provider and model; legacy runs without this provenance
+are not eligible for a new MODEL-001 reservation.
 The original instructions are not stored; only a SHA-256 digest is retained.
 
 SQLite owns the single-active-run invariant for a ticket. A concurrent or

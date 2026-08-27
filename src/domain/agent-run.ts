@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { modelProviderIdSchema } from './model-provider.js';
+import { modelProviderIdSchema, modelTaskTypeSchema } from './model-provider.js';
 
 /** Durable lifecycle states for one provider execution attempt. */
 export const AGENT_RUN_STATES = [
@@ -103,6 +103,8 @@ export const agentRunRecordSchema = z.object({
   provider: z.string().min(1).max(64),
   /** MODEL-001 identity when this run came from a routed model selection. */
   modelProviderId: modelProviderIdSchema.optional(),
+  /** The MODEL-001 task this durable run was prepared to perform. */
+  task: modelTaskTypeSchema.optional(),
   model: z.string().min(1).max(256),
   createdAt: timestampSchema,
   startedAt: timestampSchema,

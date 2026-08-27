@@ -7,7 +7,7 @@ import {
   agentRunStateSchema,
   normalizedAgentEvidenceSchema,
 } from '../domain/agent-run.js';
-import { modelProviderIdSchema } from '../domain/model-provider.js';
+import { modelProviderIdSchema, modelTaskTypeSchema } from '../domain/model-provider.js';
 
 /** Core event types for the append-only audit log. */
 export const EVENT_TYPES = [
@@ -83,6 +83,7 @@ export const runCreatedPayloadSchema = z.object({
   branchName: z.string().min(1).optional(),
   provider: z.string().min(1).optional(),
   modelProviderId: modelProviderIdSchema.optional(),
+  task: modelTaskTypeSchema.optional(),
   model: z.string().min(1).optional(),
   createdAt: timestampSchema.optional(),
   timeoutMs: z.number().int().positive().optional(),

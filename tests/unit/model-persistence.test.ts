@@ -146,8 +146,8 @@ describe('MODEL-001 persistence', () => {
     db.prepare(
       `INSERT INTO runs (
         id, ticket_id, base_sha, branch_name, status, started_at, project_id,
-        provider, model, model_provider_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        provider, model, model_provider_id, task, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'run-1',
       'KAR-1',
@@ -159,14 +159,15 @@ describe('MODEL-001 persistence', () => {
       'codex',
       'provider/dynamic-model',
       'codex',
+      'implementation',
       now,
       now
     );
     db.prepare(
       `INSERT INTO runs (
         id, ticket_id, base_sha, branch_name, status, started_at, project_id,
-        provider, model, model_provider_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        provider, model, model_provider_id, task, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       'run-2',
       'KAR-1',
@@ -178,6 +179,7 @@ describe('MODEL-001 persistence', () => {
       'codex',
       'provider/dynamic-model',
       'codex',
+      'implementation',
       now,
       now
     );
