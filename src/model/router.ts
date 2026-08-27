@@ -3,6 +3,7 @@ import {
   modelRoutingRequestSchema,
   MODEL_PROVIDER_TO_AGENT_PROVIDER,
   UNKNOWN_PROVIDER_CONCURRENCY_LIMIT,
+  modelExecutionCapabilitySnapshotSchema,
   providerHealthRecordSchema,
   providerRegistryRecordSchema,
   modelCatalogRecordSchema,
@@ -46,11 +47,17 @@ export class ModelRouter {
     const models = snapshot.models.map((model) => modelCatalogRecordSchema.parse(model));
     const health = snapshot.health.map((record) => providerHealthRecordSchema.parse(record));
     const usage = snapshot.usage.map((entry) => usageLedgerRecordSchema.parse(entry));
-    assertSnapshotIntegrity(providers, models, health, usage);
+    const executionCapabilities = snapshot.executionCapabilities.map((entry) =>
+      modelExecutionCapabilitySnapshotSchema.parse(entry)
+    );
+    assertSnapshotIntegrity(providers, models, health, usage, executionCapabilities);
 
     assertEnvelopeAvailable(request);
     const healthByProvider = new Map(health.map((record) => [record.providerId, record]));
     const modelsByProvider = groupModels(models);
+    const executionCapabilitiesByProvider = new Map(
+      executionCapabilities.map((entry) => [entry.providerId, entry.capabilities])
+    );
     const implementationFamily = request.implementationProvider === undefined
       ? undefined
       : providers.find((provider) => provider.providerId === request.implementationProvider)?.family;
@@ -69,6 +76,7 @@ export class ModelRouter {
           const providerHealth = healthByProvider.get(provider.providerId);
           const providerModels = modelsByProvider.get(provider.providerId) ?? [];
           return (
+            supportsExecutionTask(executionCapabilitiesByProvider, provider.providerId, request.task) &&
             isUsableProvider(provider, providerHealth, request.task) &&
             providerHealth !== undefined &&
             !isProviderAtCapacity(providerHealth) &&
@@ -85,6 +93,9 @@ export class ModelRouter {
       const providerHealth = healthByProvider.get(provider.providerId);
       if (!isUsableProvider(provider, providerHealth, request.task)) continue;
       if (providerHealth === undefined || isProviderAtCapacity(providerHealth)) continue;
+      if (!supportsExecutionTask(executionCapabilitiesByProvider, provider.providerId, request.task)) {
+        continue;
+      }
       const providerModels = modelsByProvider.get(provider.providerId) ?? [];
       for (const model of providerModels) {
         if (!model.capabilities.includes(request.task)) continue;
@@ -194,6 +205,14 @@ function isProviderAtCapacity(health: ProviderHealthRecord): boolean {
     ? health.maxConcurrentRuns
     : UNKNOWN_PROVIDER_CONCURRENCY_LIMIT;
   return health.activeRuns >= limit;
+}
+
+function supportsExecutionTask(
+  capabilitiesByProvider: ReadonlyMap<ModelProviderId, readonly string[]>,
+  providerId: ModelProviderId,
+  task: ModelRoutingRequest['task']
+): boolean {
+  return capabilitiesByProvider.get(providerId)?.includes(task) === true;
 }
 
 function groupModels(
@@ -380,7 +399,8 @@ function assertSnapshotIntegrity(
   providers: readonly ProviderRegistryRecord[],
   models: readonly ModelCatalogRecord[],
   health: readonly ProviderHealthRecord[],
-  usage: readonly UsageLedgerRecord[]
+  usage: readonly UsageLedgerRecord[],
+  executionCapabilities: readonly { providerId: ModelProviderId }[]
 ): void {
   const projectIds = new Set([
     ...providers.map((record) => record.projectId),
@@ -397,6 +417,14 @@ function assertSnapshotIntegrity(
     'model catalog entry'
   );
   assertUnique(usage.map((record) => record.id), 'usage ledger entry');
+  const providerIds = new Set(providers.map((record) => record.providerId));
+  if (executionCapabilities.some((entry) => !providerIds.has(entry.providerId))) {
+    throw new Error('Model routing snapshot contains execution capabilities for an unknown provider');
+  }
+  assertUnique(
+    executionCapabilities.map((entry) => entry.providerId),
+    'provider execution capability'
+  );
 }
 
 function assertUnique(values: readonly string[], label: string): void {

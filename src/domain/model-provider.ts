@@ -254,11 +254,21 @@ export type ModelRoutingSelection = Omit<
   'id' | 'projectId' | 'requestId' | 'createdAt'
 >;
 
+export const modelExecutionCapabilitySnapshotSchema = z.object({
+  providerId: modelProviderIdSchema,
+  capabilities: z.array(modelTaskTypeSchema).max(MODEL_TASK_TYPES.length),
+}).strict();
+export type ModelExecutionCapabilitySnapshot = z.infer<
+  typeof modelExecutionCapabilitySnapshotSchema
+>;
+
 export type ModelRoutingSnapshot = {
   providers: readonly ProviderRegistryRecord[];
   models: readonly ModelCatalogRecord[];
   health: readonly ProviderHealthRecord[];
   usage: readonly UsageLedgerRecord[];
+  /** MODEL-task capabilities derived from capability-probed AGENT adapters. */
+  executionCapabilities: readonly ModelExecutionCapabilitySnapshot[];
 };
 
 export type ProviderSnapshot = {

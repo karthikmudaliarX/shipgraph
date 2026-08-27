@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stringify } from 'yaml';
 import type { AgentProcessResult, AgentProcessRunner, AgentProcessSpec } from '../../src/adapters/agent/process.js';
+import type { AgentExecutionAdapter } from '../../src/adapters/agent/adapter.js';
 import { CodexAdapter, GeminiAdapter } from '../../src/adapters/agent/providers.js';
 import type {
   ModelDiscoveryResult,
@@ -46,7 +47,8 @@ function result(overrides: Partial<AgentProcessResult> = {}): AgentProcessResult
 
 function providerAdapter(
   providerId: 'codex' | 'gemini',
-  family: string
+  family: string,
+  modelCapabilities: ModelDiscoveryResult['models'][number]['capabilities'] = ['implementation']
 ): ModelProviderAdapter {
   const probe: ProviderProbeResult = {
     availability: 'available',
@@ -56,7 +58,7 @@ function providerAdapter(
   };
   const discovery: ModelDiscoveryResult = {
     status: 'known',
-    models: [{ modelId: `${providerId}/dynamic-model`, capabilities: ['implementation'] }],
+    models: [{ modelId: `${providerId}/dynamic-model`, capabilities: modelCapabilities }],
   };
   return {
     providerId,
@@ -64,6 +66,26 @@ function providerAdapter(
     displayName: providerId,
     probe: async () => probe,
     discoverModels: async () => discovery,
+  };
+}
+
+function executionTestAdapter(
+  provider: 'codex' | 'acp',
+  capabilities: AgentExecutionAdapter['capabilities']
+): AgentExecutionAdapter {
+  return {
+    provider,
+    capabilities,
+    probe: async () => ({ available: true as const, version: 'test-agent 1.0.0' }),
+    execute: async () => ({
+      outcome: 'SUCCEEDED' as const,
+      timedOut: false,
+      cancelled: false,
+      stdout: '',
+      stderr: '',
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    }),
   };
 }
 
@@ -177,6 +199,44 @@ describe('MODEL-001 route-to-AGENT-001 execution integration', () => {
     expect(execution.outcome).toBe('SUCCEEDED');
     const executionCall = calls.find((call) => call.args.includes(target.modelId));
     expect(executionCall?.cwd).toBe('/tmp/shipgraph-model-worktree');
+  });
+
+  it('routes review around an available adapter without the requested AGENT capability', async () => {
+    db = createDatabase(':memory:');
+    migrate(db);
+    createProject(db);
+    const codexAdapter = executionTestAdapter('codex', ['execute']);
+    const geminiAdapter = executionTestAdapter('acp', ['execute', 'review']);
+    const service = new ModelRoutingService({
+      db,
+      projectId,
+      adapters: [
+        providerAdapter('codex', 'openai', ['review']),
+        providerAdapter('gemini', 'google', ['review']),
+      ],
+      executionAdapters: [
+        { modelProviderId: 'codex', adapter: codexAdapter },
+        { modelProviderId: 'gemini', adapter: geminiAdapter },
+      ],
+      now: () => now,
+    });
+
+    await service.refresh();
+    const decision = await service.route({
+      task: 'review',
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 1,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    });
+    const target = service.resolveExecutionTarget(decision);
+
+    expect(decision.providerId).toBe('gemini');
+    expect(target.adapter).toBe(geminiAdapter);
+    expect(target.provider).toBe('acp');
   });
 
   it('rejects a metadata-visible Gemini provider when Antigravity cannot be probed', async () => {

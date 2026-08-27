@@ -1,7 +1,9 @@
 import {
   MODEL_PROVIDER_TO_AGENT_PROVIDER,
   MODEL_PROVIDER_IDS,
+  MODEL_TASK_TYPES,
   modelProviderIdSchema,
+  type ModelExecutionCapabilitySnapshot,
   type ModelProviderId,
   type ModelTaskType,
   type ModelRoutingSelection,
@@ -103,6 +105,24 @@ export class AgentExecutionAdapterRegistry {
 
   public get(modelProviderId: ModelProviderId): ModelExecutionAdapterBinding | undefined {
     return this.bindings.get(modelProviderId);
+  }
+
+  /**
+   * Expose only MODEL task capabilities supported by the bound AGENT adapter.
+   * The routing snapshot uses this view to avoid scoring a provider that
+   * cannot execute the requested task and then failing before fallback.
+   */
+  public executionCapabilities(): readonly ModelExecutionCapabilitySnapshot[] {
+    return MODEL_PROVIDER_IDS.flatMap((providerId) => {
+      const binding = this.bindings.get(providerId);
+      if (binding === undefined) return [];
+      const capabilities = MODEL_TASK_TYPES.filter((task) =>
+        binding.adapter.capabilities.includes(MODEL_TASK_TO_AGENT_CAPABILITY[task])
+      );
+      return capabilities.length === 0
+        ? []
+        : [{ providerId, capabilities }];
+    });
   }
 
   public resolve(

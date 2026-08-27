@@ -493,7 +493,7 @@ describe('MODEL-001 service', () => {
         activeConcurrentTickets: 0,
         budgetRemaining: 'unknown',
       },
-    })).rejects.toThrow(/does not support MODEL task review/);
+    })).rejects.toThrow(/No usable provider\/model/);
     expect(service.listRoutingDecisions()).toHaveLength(0);
   });
 

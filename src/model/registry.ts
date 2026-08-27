@@ -15,6 +15,7 @@ import {
   MODEL_PROVIDER_DEFINITIONS,
   MODEL_PROVIDER_TO_AGENT_PROVIDER,
   UNKNOWN,
+  type ModelExecutionCapabilitySnapshot,
   type ModelProviderId,
   type ProviderHealthRecord,
   type ProviderRegistryRecord,
@@ -137,6 +138,35 @@ export class ProviderRegistry {
     return this.repository
       .listHealth(this.options.projectId)
       .filter((health) => providerIds.has(health.providerId));
+  }
+
+  /**
+   * Return the task capabilities of bindings whose execution probe is
+   * currently trusted by the persisted provider snapshot.
+   */
+  public executionCapabilities(): readonly ModelExecutionCapabilitySnapshot[] {
+    const capabilitiesByProvider = new Map(
+      this.executionAdapters.executionCapabilities().map((entry) => [
+        entry.providerId,
+        entry.capabilities,
+      ])
+    );
+    return this.list().flatMap((provider) => {
+      if (
+        provider.executionStatus !== 'available' ||
+        provider.executionProvider !== MODEL_PROVIDER_TO_AGENT_PROVIDER[provider.providerId]
+      ) {
+        return [];
+      }
+      const binding = this.executionAdapters.get(provider.providerId);
+      if (binding === undefined || binding.adapter.provider !== provider.executionProvider) {
+        return [];
+      }
+      const capabilities = capabilitiesByProvider.get(provider.providerId) ?? [];
+      return capabilities.length === 0
+        ? []
+        : [{ providerId: provider.providerId, capabilities }];
+    });
   }
 
   public getRepository(): ModelRepository {

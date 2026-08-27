@@ -318,6 +318,7 @@ export class ModelRoutingService {
       models: this.registry.models(),
       health: this.registry.health(),
       usage: this.repository.listUsage(this.options.projectId),
+      executionCapabilities: this.registry.executionCapabilities(),
     };
   }
 }

@@ -4,6 +4,7 @@ import type {
   ExecutionEnvelope,
   ModelRoutingSnapshot,
   ModelRoutingRequest,
+  ModelTaskType,
   ProviderHealthRecord,
   ProviderRegistryRecord,
   ModelCatalogRecord,
@@ -82,9 +83,13 @@ function snapshot(
   providers: readonly ProviderRegistryRecord[],
   models: readonly ModelCatalogRecord[],
   providerHealth: readonly ProviderHealthRecord[],
-  usage: readonly UsageLedgerRecord[] = []
+  usage: readonly UsageLedgerRecord[] = [],
+  executionCapabilities: ModelRoutingSnapshot['executionCapabilities'] = providers.map((entry) => ({
+    providerId: entry.providerId,
+    capabilities: ['implementation', 'review', 'repair'] as readonly ModelTaskType[],
+  }))
 ): ModelRoutingSnapshot {
-  return { providers, models, health: providerHealth, usage };
+  return { providers, models, health: providerHealth, usage, executionCapabilities };
 }
 
 describe('MODEL-001 deterministic routing', () => {
@@ -277,5 +282,25 @@ describe('MODEL-001 deterministic routing', () => {
 
     expect(implementation.reason).toContain('observed quality=excellent');
     expect(review.reason).toContain('observed quality=poor');
+  });
+
+  it('skips a metadata candidate whose AGENT adapter lacks the requested task', () => {
+    const router = new ModelRouter();
+    const decision = router.route(
+      { task: 'review', risk: 'medium', envelope },
+      snapshot(
+        [provider('codex', 'openai'), provider('grok', 'xai')],
+        [model('codex', 'codex-review'), model('grok', 'grok-review')],
+        [health('codex'), health('grok', { status: 'degraded' })],
+        [],
+        [
+          { providerId: 'codex', capabilities: ['implementation'] },
+          { providerId: 'grok', capabilities: ['implementation', 'review'] },
+        ]
+      )
+    );
+
+    expect(decision.providerId).toBe('grok');
+    expect(decision.candidatesConsidered).toBe(1);
   });
 });
