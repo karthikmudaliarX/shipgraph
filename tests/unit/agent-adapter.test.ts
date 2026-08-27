@@ -159,6 +159,14 @@ describe('OpenCode adapter and process boundary', () => {
     expect(redactSensitiveText('token=super-secret api_key="secret-value" ghp_12345678901234567890')).toContain(
       '[REDACTED_SECRET]'
     );
+    const redactedJson = redactSensitiveText(
+      '{"client_secret":"json-secret-value","apiKey":"another-json-secret"}'
+    );
+    expect(redactedJson).toBe(
+      '{"client_secret":"[REDACTED_SECRET]","apiKey":"[REDACTED_SECRET]"}'
+    );
+    expect(redactedJson).not.toContain('json-secret-value');
+    expect(redactedJson).not.toContain('another-json-secret');
     expect(redactSensitiveText('ordinary project output')).toBe('ordinary project output');
   });
 

@@ -18,7 +18,7 @@ export function redactSensitiveText(value: string): string {
       'Bearer [REDACTED_SECRET]'
     )
     .replace(
-      /((?:api[_-]?key|token|secret|password)\s*[:=]\s*)(["']?)[^\s"']+\2/giu,
-      '$1[REDACTED_SECRET]'
+      /((?:["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key|token|secret|password)["']?)\s*[:=]\s*)(["']?)[^\s"'`,;}\]]+\2/giu,
+      '$1$2[REDACTED_SECRET]$2'
     );
 }
