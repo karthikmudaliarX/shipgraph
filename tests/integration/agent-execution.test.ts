@@ -299,6 +299,116 @@ describe('AGENT-001 durable execution', () => {
   });
 
   it.each([
+    {
+      name: 'an exhausted attempt budget',
+      safety: { maxAttempts: 1, attempt: 2 },
+      category: 'safety_limit',
+      reason: /attempt budget exhausted/,
+    },
+    {
+      name: 'a timeout above its per-run ceiling',
+      timeoutMs: 2_000,
+      safety: { maxTimeoutMs: 1_000 },
+      category: 'safety_limit',
+      reason: /timeout exceeds the per-run ceiling/,
+    },
+    {
+      name: 'an exhausted token budget',
+      safety: { maxTokens: 10, tokensUsed: 10 },
+      category: 'safety_limit',
+      reason: /token budget exhausted/,
+    },
+    {
+      name: 'an unapproved destructive operation',
+      safety: { destructive: true },
+      category: 'approval_required',
+      reason: /explicit human approval/,
+    },
+    {
+      name: 'material scope growth',
+      safety: { scopeGrowth: true },
+      category: 'scope_growth',
+      reason: /authorized scope boundary/,
+    },
+  ])('fails closed before launch for $name', async ({ timeoutMs, safety, category, reason }) => {
+    harness = await createHarness();
+    const result = await executeAgentTask(harness.options, {
+      ticketId: 'AG-001',
+      model: 'openai/gpt-5',
+      instructions: 'must not launch when the safety policy blocks the run',
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      safety,
+    });
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe(category);
+    expect(result.run.failureReason).toMatch(reason);
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(0);
+  });
+
+  it('fails closed after a successful provider result exceeds a configured token budget', async () => {
+    harness = await createHarness();
+    const options: AgentExecutionServiceOptions = {
+      ...harness.options,
+      adapter: fakeAdapter({ usage: { inputTokens: 2, outputTokens: 3, cost: 0 } }),
+    };
+
+    const result = await executeAgentTask(options, {
+      ticketId: 'AG-001',
+      model: 'openai/gpt-5',
+      instructions: 'enforce the token budget after normalized provider usage',
+      safety: { maxTokens: 4 },
+    });
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe('safety_limit');
+    expect(result.run.failureReason).toMatch(/token budget exceeded/);
+    expect((options.adapter as FakeAdapter).requests).toHaveLength(1);
+  });
+
+  it('requires measurable usage when a cost budget is configured', async () => {
+    harness = await createHarness();
+    const result = await executeAgentTask(harness.options, {
+      ticketId: 'AG-001',
+      model: 'openai/gpt-5',
+      instructions: 'do not treat missing cost telemetry as safe',
+      safety: { maxCost: 1 },
+    });
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe('safety_limit');
+    expect(result.run.failureReason).toMatch(/did not report cost/);
+  });
+
+  it('allows a high-risk run only when explicit approval is present', async () => {
+    harness = await createHarness();
+    const result = await executeAgentTask(harness.options, {
+      ticketId: 'AG-001',
+      model: 'openai/gpt-5',
+      instructions: 'execute the explicitly approved high-risk step',
+      safety: { risk: 'high', approvalGranted: true },
+    });
+
+    expect(result.run.status).toBe('SUCCEEDED');
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(1);
+  });
+
+  it('derives the approval gate from the durable ticket risk', async () => {
+    harness = await createHarness();
+    harness.db.prepare('UPDATE tickets SET risk = ? WHERE id = ?').run('critical', 'AG-001');
+
+    const result = await executeAgentTask(harness.options, {
+      ticketId: 'AG-001',
+      model: 'openai/gpt-5',
+      instructions: 'must not bypass the durable ticket risk gate',
+    });
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe('approval_required');
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(0);
+  });
+
+  it.each([
     ['missing executable', '/definitely/not/opencode', undefined, 'executable_unavailable', 'NEEDS_HUMAN'],
     [
       'malformed output',

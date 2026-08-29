@@ -7,6 +7,7 @@
  */
 import type {
   AgentFailureCategory,
+  AgentExecutionUsage,
   AgentRunState,
   NormalizedAgentEvidence,
 } from '../../domain/agent-run.js';
@@ -70,6 +71,8 @@ export type AgentExecutionResult = {
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
   evidence?: NormalizedAgentEvidence;
+  /** Provider-reported usage, when the execution surface exposes it. */
+  usage?: AgentExecutionUsage;
   failureCategory?: AgentFailureCategory;
   failureReason?: string;
 };

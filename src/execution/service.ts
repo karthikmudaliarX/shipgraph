@@ -54,6 +54,26 @@ import { redactSensitiveText } from '../adapters/agent/safety.js';
 const agentProviderSchema = z.enum(AGENT_PROVIDERS);
 const modelSchema = z.string().min(1).max(256);
 
+/** Per-run safety input supplied by the caller that owns the execution step. */
+export const agentSafetyPolicySchema = z.object({
+  maxAttempts: z.number().int().nonnegative().max(1_000_000).optional(),
+  attempt: z.number().int().positive().max(1_000_000).optional(),
+  maxTokens: z.number().int().nonnegative().max(1_000_000_000).optional(),
+  tokensUsed: z.number().int().nonnegative().max(1_000_000_000).optional(),
+  maxCost: z.number().finite().nonnegative().max(1_000_000_000).optional(),
+  costUsed: z.number().finite().nonnegative().max(1_000_000_000).optional(),
+  maxTimeoutMs: z.number().int().positive().max(MAX_AGENT_TIMEOUT_MS).optional(),
+  risk: z.enum(['low', 'medium', 'high', 'critical']).optional(),
+  approvalRequired: z.boolean().optional(),
+  approvalGranted: z.boolean().optional(),
+  destructive: z.boolean().optional(),
+  materiallyAmbiguous: z.boolean().optional(),
+  policySensitive: z.boolean().optional(),
+  scopeGrowth: z.boolean().optional(),
+}).strict();
+
+export type AgentSafetyPolicy = z.infer<typeof agentSafetyPolicySchema>;
+
 export type AgentExecutionServiceOptions = WorkspaceServiceOptions & {
   adapter: AgentExecutionAdapter;
   createRunId?: () => string;
@@ -73,6 +93,8 @@ export type AgentTaskInput = {
   runId?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Optional per-run limits and explicit safety signals; no ticket schema is implied. */
+  safety?: AgentSafetyPolicy;
 };
 
 export type AgentTaskResult = {
@@ -189,6 +211,8 @@ export async function executeAgentTask(
     throw error;
   }
 
+  const safetyPolicy = safetyPolicyWithTicketRisk(options, input.ticketId, normalized.safety);
+
   const createRunId = options.createRunId ?? randomUUID;
   const createdAt = now();
   const persisted = input.runId === undefined
@@ -205,6 +229,22 @@ export async function executeAgentTask(
         normalized.task
       )
     : loadPreparedRun(options, input.runId, workspace, normalized);
+
+  const safetyGate = findSafetyGate(safetyPolicy, normalized.timeoutMs);
+  if (safetyGate !== undefined) {
+    const gated = markRunNeedsHuman(
+      options,
+      persisted.id,
+      safetyGate.reason,
+      createEventId,
+      now,
+      safetyGate.category,
+      true
+    );
+    if (gated) return { created: true, run: gated };
+    throw new Error(`Run ${persisted.id} could not be marked NEEDS_HUMAN for a safety gate`);
+  }
+
   let started: AgentRunRecord;
   try {
     started = startRun(options, persisted, normalized.task, createEventId, now);
@@ -336,7 +376,10 @@ export async function executeAgentTask(
     };
   }
 
-  const normalizedResult = normalizeAdapterResult(adapterResult, normalized.maxOutputBytes);
+  const normalizedResult = applySafetyResult(
+    normalizeAdapterResult(adapterResult, normalized.maxOutputBytes),
+    safetyPolicy
+  );
   // Capacity ownership depends only on the normalized process-group proof.
   // Outcome quality, timeout and bounded-output evidence affect the run result,
   // but cannot keep a slot once the owned process group is proven stopped.
@@ -441,6 +484,7 @@ function validateTaskInput(
   timeoutMs: number;
   maxOutputBytes: number;
   modelProviderId?: ModelProviderId;
+  safety: AgentSafetyPolicy;
 } {
   if (!agentProviderSchema.safeParse(options.adapter.provider).success) {
     throw new Error(`Unsupported agent adapter provider: ${options.adapter.provider}`);
@@ -494,6 +538,121 @@ function validateTaskInput(
     timeoutMs,
     maxOutputBytes,
     ...(modelProviderId === undefined ? {} : { modelProviderId }),
+    safety: agentSafetyPolicySchema.parse(input.safety ?? {}),
+  };
+}
+
+type SafetyGate = {
+  category: Extract<AgentFailureCategory, 'safety_limit' | 'approval_required' | 'scope_growth'>;
+  reason: string;
+};
+
+function findSafetyGate(policy: AgentSafetyPolicy, timeoutMs: number): SafetyGate | undefined {
+  if (policy.scopeGrowth === true) {
+    return {
+      category: 'scope_growth',
+      reason: 'Execution stopped because the requested work crossed the authorized scope boundary',
+    };
+  }
+  if (
+    policy.approvalRequired === true ||
+    policy.destructive === true ||
+    policy.materiallyAmbiguous === true ||
+    policy.policySensitive === true ||
+    policy.risk === 'high' ||
+    policy.risk === 'critical'
+  ) {
+    if (policy.approvalGranted !== true) {
+      return {
+        category: 'approval_required',
+        reason: 'Execution requires explicit human approval before provider launch',
+      };
+    }
+  }
+  const attempt = policy.attempt ?? 1;
+  if (policy.maxAttempts !== undefined && attempt > policy.maxAttempts) {
+    return {
+      category: 'safety_limit',
+      reason: `Execution attempt budget exhausted (${attempt} > ${policy.maxAttempts})`,
+    };
+  }
+  const tokensUsed = policy.tokensUsed ?? 0;
+  if (policy.maxTokens !== undefined && tokensUsed >= policy.maxTokens) {
+    return {
+      category: 'safety_limit',
+      reason: `Execution token budget exhausted (${tokensUsed} >= ${policy.maxTokens})`,
+    };
+  }
+  const costUsed = policy.costUsed ?? 0;
+  if (policy.maxCost !== undefined && costUsed >= policy.maxCost) {
+    return {
+      category: 'safety_limit',
+      reason: `Execution cost budget exhausted (${costUsed} >= ${policy.maxCost})`,
+    };
+  }
+  if (policy.maxTimeoutMs !== undefined && timeoutMs > policy.maxTimeoutMs) {
+    return {
+      category: 'safety_limit',
+      reason: `Execution timeout exceeds the per-run ceiling (${timeoutMs} > ${policy.maxTimeoutMs} ms)`,
+    };
+  }
+  return undefined;
+}
+
+function safetyPolicyWithTicketRisk(
+  options: AgentExecutionServiceOptions,
+  ticketId: string,
+  policy: AgentSafetyPolicy
+): AgentSafetyPolicy {
+  if (policy.risk === 'high' || policy.risk === 'critical') return policy;
+  const ticket = createTicketRepository(options.db).findById(ticketId);
+  return ticket?.risk === 'high' || ticket?.risk === 'critical'
+    ? { ...policy, risk: ticket.risk }
+    : policy;
+}
+
+function applySafetyResult(
+  result: AgentExecutionResult,
+  policy: AgentSafetyPolicy
+): AgentExecutionResult {
+  if (result.outcome !== 'SUCCEEDED') return result;
+  if (policy.maxTokens !== undefined) {
+    if (
+      result.usage === undefined ||
+      result.usage.inputTokens === undefined ||
+      result.usage.outputTokens === undefined
+    ) {
+      return safetyLimitedResult(result, 'Provider did not report token usage for the configured token budget');
+    }
+    const totalTokens = (policy.tokensUsed ?? 0) + result.usage.inputTokens + result.usage.outputTokens;
+    if (totalTokens > policy.maxTokens) {
+      return safetyLimitedResult(
+        result,
+        `Execution token budget exceeded (${totalTokens} > ${policy.maxTokens})`
+      );
+    }
+  }
+  if (policy.maxCost !== undefined) {
+    if (result.usage === undefined || result.usage.cost === undefined) {
+      return safetyLimitedResult(result, 'Provider did not report cost for the configured cost budget');
+    }
+    const totalCost = (policy.costUsed ?? 0) + result.usage.cost;
+    if (totalCost > policy.maxCost) {
+      return safetyLimitedResult(
+        result,
+        `Execution cost budget exceeded (${totalCost} > ${policy.maxCost})`
+      );
+    }
+  }
+  return result;
+}
+
+function safetyLimitedResult(result: AgentExecutionResult, reason: string): AgentExecutionResult {
+  return {
+    ...result,
+    outcome: 'NEEDS_HUMAN',
+    failureCategory: 'safety_limit',
+    failureReason: reason,
   };
 }
 

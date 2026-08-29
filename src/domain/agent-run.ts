@@ -45,6 +45,9 @@ export const AGENT_FAILURE_CATEGORIES = [
   'stale_run',
   'workspace_invalid',
   'persistence_error',
+  'safety_limit',
+  'approval_required',
+  'scope_growth',
 ] as const;
 
 export type AgentFailureCategory = (typeof AGENT_FAILURE_CATEGORIES)[number];
@@ -63,6 +66,14 @@ export const normalizedAgentEvidenceSchema = z.object({
 }).strict();
 
 export type NormalizedAgentEvidence = z.infer<typeof normalizedAgentEvidenceSchema>;
+
+export const agentExecutionUsageSchema = z.object({
+  inputTokens: z.number().int().nonnegative().optional(),
+  outputTokens: z.number().int().nonnegative().optional(),
+  cost: z.number().finite().nonnegative().optional(),
+}).strict();
+
+export type AgentExecutionUsage = z.infer<typeof agentExecutionUsageSchema>;
 
 export const AGENT_OUTPUT_LIMIT_BYTES = 128 * 1024;
 export const AGENT_INSTRUCTIONS_LIMIT_BYTES = 64 * 1024;
@@ -84,6 +95,7 @@ export const agentExecutionResultSchema = z.object({
   stdoutTruncated: z.boolean(),
   stderrTruncated: z.boolean(),
   evidence: normalizedAgentEvidenceSchema.optional(),
+  usage: agentExecutionUsageSchema.optional(),
   failureCategory: agentFailureCategorySchema.optional(),
   failureReason: z.string().min(1).max(2_048).optional(),
 }).strict();

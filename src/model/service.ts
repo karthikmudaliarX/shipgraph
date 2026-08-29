@@ -284,6 +284,14 @@ export class ModelRoutingService {
       );
     }
     this.verifyExecutionBinding(options, target);
+    const persistedDecision = this.repository.findRoutingDecisionById(
+      this.options.projectId,
+      target.routingDecisionId
+    );
+    const safety = persistedDecision !== undefined &&
+      (persistedDecision.decision.risk === 'high' || persistedDecision.decision.risk === 'critical')
+      ? { ...(input.safety ?? {}), risk: persistedDecision.decision.risk }
+      : input.safety;
     return executeAgentTask(
       { ...options, adapter: this.createExecutionAdapter(target) },
       {
@@ -293,6 +301,7 @@ export class ModelRoutingService {
         provider: target.provider,
         modelProviderId: target.modelProviderId,
         model: target.modelId,
+        ...(safety === undefined ? {} : { safety }),
       }
     );
   }
@@ -309,12 +318,21 @@ export class ModelRoutingService {
     let lastError: unknown;
 
     for (let attempt = 0; attempt < providerCount; attempt += 1) {
+      if (input.safety?.maxAttempts !== undefined && attempt >= input.safety.maxAttempts) {
+        throw new Error('Execution attempt budget exhausted; NEEDS_HUMAN approval is required');
+      }
       const preview = await this.route({ ...request, excludeProviders: [...excluded] });
       const target = this.resolveExecutionTarget(preview);
+      const executionSafety = input.safety === undefined
+        ? undefined
+        : { ...input.safety, attempt: (input.safety.attempt ?? 1) + attempt };
+      const executionInput = executionSafety === undefined
+        ? input
+        : { ...input, safety: executionSafety };
       const prepared = await prepareAgentTaskRun(
         { ...options, adapter: this.createExecutionAdapter(target) },
         {
-          ...input,
+          ...executionInput,
           task: target.task,
           provider: target.provider,
           modelProviderId: target.modelProviderId,
@@ -342,7 +360,7 @@ export class ModelRoutingService {
         continue;
       }
       const executionTarget = this.resolveExecutionTarget(decision);
-      const result = await this.executeSelectedAgentTask(options, executionTarget, input);
+      const result = await this.executeSelectedAgentTask(options, executionTarget, executionInput);
       return { ...result, decision };
     }
     throw new Error(
