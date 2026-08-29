@@ -615,7 +615,6 @@ function applySafetyResult(
   result: AgentExecutionResult,
   policy: AgentSafetyPolicy
 ): AgentExecutionResult {
-  if (result.outcome !== 'SUCCEEDED') return result;
   if (policy.maxTokens !== undefined) {
     if (
       result.usage === undefined ||

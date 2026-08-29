@@ -366,6 +366,30 @@ describe('AGENT-001 durable execution', () => {
     expect((options.adapter as FakeAdapter).requests).toHaveLength(1);
   });
 
+  it('fails closed when a failed provider result reports usage over the token budget', async () => {
+    harness = await createHarness();
+    const options: AgentExecutionServiceOptions = {
+      ...harness.options,
+      adapter: fakeAdapter({
+        outcome: 'FAILED',
+        failureCategory: 'non_zero_exit',
+        failureReason: 'provider failed after consuming the request',
+        usage: { inputTokens: 3, outputTokens: 2, cost: 0 },
+      }),
+    };
+
+    const result = await executeAgentTask(options, {
+      ticketId: 'AG-001',
+      model: 'openai/gpt-5',
+      instructions: 'enforce the token budget for failed provider results too',
+      safety: { maxTokens: 4 },
+    });
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe('safety_limit');
+    expect(result.run.failureReason).toMatch(/token budget exceeded/);
+  });
+
   it('requires measurable usage when a cost budget is configured', async () => {
     harness = await createHarness();
     const result = await executeAgentTask(harness.options, {
