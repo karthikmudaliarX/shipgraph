@@ -43,6 +43,7 @@ import {
   type WorkspaceRecord,
 } from '../persistence/repositories.js';
 import { persistTicketTransition } from '../persistence/ticket-state-store.js';
+import { UsageLedger } from '../model/ledger.js';
 import {
   getCurrentProjectId,
   getVerifiedWorkspaceForExecution,
@@ -53,6 +54,24 @@ import { redactSensitiveText } from '../adapters/agent/safety.js';
 
 const agentProviderSchema = z.enum(AGENT_PROVIDERS);
 const modelSchema = z.string().min(1).max(256);
+
+/** Per-run safety input supplied by the caller that owns the execution step. */
+export const agentSafetyPolicySchema = z.object({
+  maxAttempts: z.number().int().nonnegative().max(1_000_000).optional(),
+  attempt: z.number().int().positive().max(1_000_000).optional(),
+  maxTokens: z.number().int().nonnegative().max(1_000_000_000).optional(),
+  maxCost: z.number().finite().nonnegative().max(1_000_000_000).optional(),
+  maxTimeoutMs: z.number().int().positive().max(MAX_AGENT_TIMEOUT_MS).optional(),
+  risk: z.enum(['low', 'medium', 'high', 'critical']).optional(),
+  approvalRequired: z.boolean().optional(),
+  approvalGranted: z.boolean().optional(),
+  destructive: z.boolean().optional(),
+  materiallyAmbiguous: z.boolean().optional(),
+  policySensitive: z.boolean().optional(),
+  scopeGrowth: z.boolean().optional(),
+}).strict();
+
+export type AgentSafetyPolicy = z.infer<typeof agentSafetyPolicySchema>;
 
 export type AgentExecutionServiceOptions = WorkspaceServiceOptions & {
   adapter: AgentExecutionAdapter;
@@ -73,6 +92,8 @@ export type AgentTaskInput = {
   runId?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Optional per-run limits and explicit safety signals; no ticket schema is implied. */
+  safety?: AgentSafetyPolicy;
 };
 
 export type AgentTaskResult = {
@@ -126,7 +147,8 @@ export async function prepareAgentTaskRun(
 export async function abandonPreparedAgentTaskRun(
   options: WorkspaceServiceOptions,
   runId: string,
-  reason: string
+  reason: string,
+  category: AgentFailureCategory = 'persistence_error'
 ): Promise<AgentRunRecord> {
   const { run } = await loadCurrentDurableRun(options, runId);
   if (run.status !== 'CREATED') {
@@ -146,7 +168,7 @@ export async function abandonPreparedAgentTaskRun(
       reason,
       options.createEventId ?? randomUUID,
       options.now ?? (() => new Date().toISOString()),
-      'persistence_error',
+      category,
       false
     );
   }).immediate;
@@ -205,6 +227,29 @@ export async function executeAgentTask(
         normalized.task
       )
     : loadPreparedRun(options, input.runId, workspace, normalized);
+
+  const durableUsage = usageTotalsForRun(options, persisted.projectId, persisted.id);
+  const safetyGate = findSafetyGate(
+    normalized.safety,
+    normalized.timeoutMs,
+    persisted,
+    durableUsage,
+    options.adapter
+  );
+  if (safetyGate !== undefined) {
+    const gated = markRunNeedsHuman(
+      options,
+      persisted.id,
+      safetyGate.reason,
+      createEventId,
+      now,
+      safetyGate.category,
+      true
+    );
+    if (gated) return { created: true, run: gated };
+    throw new Error(`Run ${persisted.id} could not be marked NEEDS_HUMAN for a safety gate`);
+  }
+
   let started: AgentRunRecord;
   try {
     started = startRun(options, persisted, normalized.task, createEventId, now);
@@ -306,6 +351,12 @@ export async function executeAgentTask(
       instructions: normalized.instructions,
       timeoutMs: started.timeoutMs,
       maxOutputBytes: normalized.maxOutputBytes,
+      ...(remainingTokenBudget(normalized.safety, durableUsage) === undefined
+        ? {}
+        : { remainingTokens: remainingTokenBudget(normalized.safety, durableUsage) }),
+      ...(remainingCostBudget(normalized.safety, durableUsage) === undefined
+        ? {}
+        : { remainingCost: remainingCostBudget(normalized.safety, durableUsage) }),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
       onProcessStarted: (processId) => {
         const updated = createRunRepository(options.db).updateStatus(
@@ -336,7 +387,11 @@ export async function executeAgentTask(
     };
   }
 
-  const normalizedResult = normalizeAdapterResult(adapterResult, normalized.maxOutputBytes);
+  const normalizedResult = applySafetyResult(
+    normalizeAdapterResult(adapterResult, normalized.maxOutputBytes),
+    normalized.safety,
+    durableUsage
+  );
   // Capacity ownership depends only on the normalized process-group proof.
   // Outcome quality, timeout and bounded-output evidence affect the run result,
   // but cannot keep a slot once the owned process group is proven stopped.
@@ -348,7 +403,8 @@ export async function executeAgentTask(
       normalizedResult,
       createEventId,
       now,
-      executionStopped
+      executionStopped,
+      normalized.safety
     );
     return { created: true, run: finalRun };
   } catch (error) {
@@ -441,6 +497,7 @@ function validateTaskInput(
   timeoutMs: number;
   maxOutputBytes: number;
   modelProviderId?: ModelProviderId;
+  safety: AgentSafetyPolicy;
 } {
   if (!agentProviderSchema.safeParse(options.adapter.provider).success) {
     throw new Error(`Unsupported agent adapter provider: ${options.adapter.provider}`);
@@ -494,6 +551,239 @@ function validateTaskInput(
     timeoutMs,
     maxOutputBytes,
     ...(modelProviderId === undefined ? {} : { modelProviderId }),
+    safety: safetyPolicyWithTicketRisk(
+      options,
+      input.ticketId,
+      agentSafetyPolicySchema.parse(input.safety ?? {})
+    ),
+  };
+}
+
+type SafetyGate = {
+  category: Extract<AgentFailureCategory, 'safety_limit' | 'approval_required' | 'scope_growth'>;
+  reason: string;
+};
+
+type DurableUsageTotals = {
+  inputTokens: number | undefined;
+  outputTokens: number | undefined;
+  cost: number | undefined;
+};
+
+function findSafetyGate(
+  policy: AgentSafetyPolicy,
+  timeoutMs: number,
+  run: AgentRunRecord,
+  usage: DurableUsageTotals,
+  adapter: AgentExecutionAdapter
+): SafetyGate | undefined {
+  if (policy.scopeGrowth === true) {
+    return {
+      category: 'scope_growth',
+      reason: 'Execution stopped because the requested work crossed the authorized scope boundary',
+    };
+  }
+  if (
+    policy.approvalRequired === true ||
+    policy.destructive === true ||
+    policy.materiallyAmbiguous === true ||
+    policy.policySensitive === true ||
+    policy.risk === 'high' ||
+    policy.risk === 'critical'
+  ) {
+    if (policy.approvalGranted !== true) {
+      return {
+        category: 'approval_required',
+        reason: 'Execution requires explicit human approval before provider launch',
+      };
+    }
+  }
+  const attempt = policy.attempt ?? 1;
+  if (policy.maxAttempts !== undefined && attempt > policy.maxAttempts) {
+    return {
+      category: 'safety_limit',
+      reason: `Execution attempt budget exhausted (${attempt} > ${policy.maxAttempts})`,
+    };
+  }
+  if (policy.maxTokens !== undefined) {
+    if (
+      run.modelProviderId === undefined ||
+      run.task === undefined ||
+      adapter.supportsTokenLimit !== true ||
+      adapter.reportsUsage !== true
+    ) {
+      return {
+        category: 'safety_limit',
+        reason: 'Execution token budget cannot be enforced and measured by the selected provider',
+      };
+    }
+    if (usage.inputTokens === undefined || usage.outputTokens === undefined) {
+      return {
+        category: 'safety_limit',
+        reason: 'Execution token budget has unknown durable usage and cannot be safely resumed',
+      };
+    }
+    const tokensUsed = usage.inputTokens + usage.outputTokens;
+    if (tokensUsed >= policy.maxTokens) {
+      return {
+        category: 'safety_limit',
+        reason: `Execution token budget exhausted (${tokensUsed} >= ${policy.maxTokens})`,
+      };
+    }
+  }
+  if (policy.maxCost !== undefined) {
+    if (
+      run.modelProviderId === undefined ||
+      run.task === undefined ||
+      adapter.supportsCostLimit !== true ||
+      adapter.reportsUsage !== true
+    ) {
+      return {
+        category: 'safety_limit',
+        reason: 'Execution cost budget cannot be enforced and measured by the selected provider',
+      };
+    }
+    if (usage.cost === undefined) {
+      return {
+        category: 'safety_limit',
+        reason: 'Execution cost budget has unknown durable usage and cannot be safely resumed',
+      };
+    }
+    if (usage.cost >= policy.maxCost) {
+      return {
+        category: 'safety_limit',
+        reason: `Execution cost budget exhausted (${usage.cost} >= ${policy.maxCost})`,
+      };
+    }
+  }
+  if (policy.maxTimeoutMs !== undefined && timeoutMs > policy.maxTimeoutMs) {
+    return {
+      category: 'safety_limit',
+      reason: `Execution timeout exceeds the per-run ceiling (${timeoutMs} > ${policy.maxTimeoutMs} ms)`,
+    };
+  }
+  return undefined;
+}
+
+function remainingTokenBudget(
+  policy: AgentSafetyPolicy,
+  usage: DurableUsageTotals
+): number | undefined {
+  if (policy.maxTokens === undefined || usage.inputTokens === undefined || usage.outputTokens === undefined) {
+    return undefined;
+  }
+  return policy.maxTokens - usage.inputTokens - usage.outputTokens;
+}
+
+function remainingCostBudget(
+  policy: AgentSafetyPolicy,
+  usage: DurableUsageTotals
+): number | undefined {
+  if (policy.maxCost === undefined || usage.cost === undefined) return undefined;
+  return policy.maxCost - usage.cost;
+}
+
+function usageTotalsForRun(
+  options: AgentExecutionServiceOptions,
+  projectId: string,
+  runId: string
+): DurableUsageTotals {
+  const entries = createModelRepository(options.db)
+    .listUsage(projectId)
+    .filter((entry) => entry.runId === runId);
+  return {
+    inputTokens: sumKnownUsage(entries.map((entry) => entry.inputTokens)),
+    outputTokens: sumKnownUsage(entries.map((entry) => entry.outputTokens)),
+    cost: sumKnownUsage(entries.map((entry) => entry.cost)),
+  };
+}
+
+function sumKnownUsage(values: readonly (number | 'unknown')[]): number | undefined {
+  let total = 0;
+  for (const value of values) {
+    if (value === 'unknown') return undefined;
+    total += value;
+  }
+  return total;
+}
+
+function safetyPolicyWithTicketRisk(
+  options: AgentExecutionServiceOptions,
+  ticketId: string,
+  policy: AgentSafetyPolicy
+): AgentSafetyPolicy {
+  if (policy.risk === 'high' || policy.risk === 'critical') return policy;
+  const ticket = createTicketRepository(options.db).findById(ticketId);
+  return ticket?.risk === 'high' || ticket?.risk === 'critical'
+    ? { ...policy, risk: ticket.risk }
+    : policy;
+}
+
+function safetyPolicyDigest(policy: AgentSafetyPolicy): string {
+  const canonical = JSON.stringify({
+    maxAttempts: policy.maxAttempts ?? null,
+    attempt: policy.attempt ?? 1,
+    maxTokens: policy.maxTokens ?? null,
+    maxCost: policy.maxCost ?? null,
+    maxTimeoutMs: policy.maxTimeoutMs ?? null,
+    risk: policy.risk ?? null,
+    approvalRequired: policy.approvalRequired ?? false,
+    approvalGranted: policy.approvalGranted ?? false,
+    destructive: policy.destructive ?? false,
+    materiallyAmbiguous: policy.materiallyAmbiguous ?? false,
+    policySensitive: policy.policySensitive ?? false,
+    scopeGrowth: policy.scopeGrowth ?? false,
+  });
+  return createHash('sha256').update(canonical).digest('hex');
+}
+
+function applySafetyResult(
+  result: AgentExecutionResult,
+  policy: AgentSafetyPolicy,
+  durableUsage: DurableUsageTotals
+): AgentExecutionResult {
+  if (policy.maxTokens !== undefined) {
+    if (
+      result.usage === undefined ||
+      result.usage.inputTokens === undefined ||
+      result.usage.outputTokens === undefined
+    ) {
+      return safetyLimitedResult(result, 'Provider did not report token usage for the configured token budget');
+    }
+    const totalTokens = (durableUsage.inputTokens ?? 0) +
+      (durableUsage.outputTokens ?? 0) +
+      result.usage.inputTokens +
+      result.usage.outputTokens;
+    if (totalTokens > policy.maxTokens) {
+      return safetyLimitedResult(
+        result,
+        `Execution token budget exceeded (${totalTokens} > ${policy.maxTokens})`
+      );
+    }
+  }
+  if (policy.maxCost !== undefined) {
+    if (result.usage === undefined || result.usage.cost === undefined) {
+      return safetyLimitedResult(result, 'Provider did not report cost for the configured cost budget');
+    }
+    const totalCost = (durableUsage.cost ?? 0) + result.usage.cost;
+    if (totalCost > policy.maxCost) {
+      return safetyLimitedResult(
+        result,
+        `Execution cost budget exceeded (${totalCost} > ${policy.maxCost})`
+      );
+    }
+  }
+  return result;
+}
+
+function safetyLimitedResult(result: AgentExecutionResult, reason: string): AgentExecutionResult {
+  return {
+    ...result,
+    outcome: 'NEEDS_HUMAN',
+    timedOut: false,
+    cancelled: false,
+    failureCategory: 'safety_limit',
+    failureReason: reason,
   };
 }
 
@@ -548,6 +838,7 @@ function buildAgentRun(
     task: ModelTaskType;
     timeoutMs: number;
     modelProviderId?: ModelProviderId;
+    safety: AgentSafetyPolicy;
   },
   runId: string,
   createdAt: string
@@ -579,6 +870,7 @@ function buildAgentRun(
     stdoutTruncated: false,
     stderrTruncated: false,
     instructionsSha256: createHash('sha256').update(normalized.instructions).digest('hex'),
+    safetyPolicySha256: safetyPolicyDigest(normalized.safety),
     timeoutMs: normalized.timeoutMs,
   };
 }
@@ -593,6 +885,7 @@ function loadPreparedRun(
     task: ModelTaskType;
     timeoutMs: number;
     modelProviderId?: ModelProviderId;
+    safety: AgentSafetyPolicy;
   }
 ): AgentRunRecord {
   const run = requireDurableRun(createRunRepository(options.db).findById(runId));
@@ -619,6 +912,7 @@ function assertPreparedRunMatchesRequest(
     task: ModelTaskType;
     timeoutMs: number;
     modelProviderId?: ModelProviderId;
+    safety: AgentSafetyPolicy;
   }
 ): void {
   const instructionHash = createHash('sha256').update(normalized.instructions).digest('hex');
@@ -642,6 +936,12 @@ function assertPreparedRunMatchesRequest(
   }
   if (run.instructionsSha256 !== instructionHash || run.timeoutMs !== normalized.timeoutMs) {
     throw new Error(`Prepared agent run ${run.id} does not match the execution request`);
+  }
+  if (
+    run.safetyPolicySha256 === undefined ||
+    run.safetyPolicySha256 !== safetyPolicyDigest(normalized.safety)
+  ) {
+    throw new Error(`Prepared agent run ${run.id} does not match the durable safety policy`);
   }
 }
 
@@ -719,6 +1019,7 @@ function persistCreatedRun(
         task: run.task,
         model: run.model,
         createdAt: run.createdAt,
+        safetyPolicySha256: run.safetyPolicySha256,
         timeoutMs: run.timeoutMs,
         instructionsSha256: run.instructionsSha256,
       },
@@ -779,11 +1080,13 @@ function finalizeRun(
   result: AgentExecutionResult,
   createEventId: () => string,
   now: () => string,
-  executionStopped: boolean
+  executionStopped: boolean,
+  safety: AgentSafetyPolicy
 ): AgentRunRecord {
   const completedAt = now();
   const finalize = options.db.transaction((): AgentRunRecord => {
     const repository = createRunRepository(options.db);
+    appendExecutionUsage(options, run, result, completedAt, safety);
     const update: RunUpdate = {
       completedAt,
       updatedAt: completedAt,
@@ -844,6 +1147,60 @@ function finalizeRun(
     return requireDurableRun(repository.findById(run.id));
   }).immediate;
   return finalize();
+}
+
+function appendExecutionUsage(
+  options: AgentExecutionServiceOptions,
+  run: AgentRunRecord,
+  result: AgentExecutionResult,
+  recordedAt: string,
+  safety: AgentSafetyPolicy
+): void {
+  if (
+    (result.usage === undefined && safety.maxTokens === undefined && safety.maxCost === undefined) ||
+    run.modelProviderId === undefined ||
+    run.task === undefined
+  ) {
+    return;
+  }
+  const modelRepository = createModelRepository(options.db);
+  const activeReservation = modelRepository.findActiveRoutingDecisionByRun(run.projectId, run.id);
+  const completedMs = Date.parse(recordedAt);
+  const startedMs = Date.parse(run.startedAt);
+  const elapsedMs = Number.isFinite(completedMs) && Number.isFinite(startedMs)
+    ? Math.max(0, completedMs - startedMs)
+    : 0;
+  const ledger = new UsageLedger(modelRepository, run.projectId, () => recordedAt);
+  ledger.append({
+    runId: run.id,
+    ...(activeReservation === undefined ? {} : { routingDecisionId: activeReservation.decision.id }),
+    providerId: run.modelProviderId,
+    modelId: run.model,
+    task: run.task,
+    retryCount: 0,
+    elapsedMs,
+    outcome: usageOutcome(result.outcome),
+    outcomeQuality: result.outcome === 'SUCCEEDED' ? 'good' : 'unknown',
+    inputTokens: result.usage?.inputTokens,
+    outputTokens: result.usage?.outputTokens,
+    cost: result.usage?.cost,
+  });
+}
+
+function usageOutcome(outcome: AgentExecutionResult['outcome']):
+  'succeeded' | 'failed' | 'timed_out' | 'cancelled' | 'unknown' {
+  switch (outcome) {
+    case 'SUCCEEDED':
+      return 'succeeded';
+    case 'FAILED':
+      return 'failed';
+    case 'TIMED_OUT':
+      return 'timed_out';
+    case 'CANCELLED':
+      return 'cancelled';
+    case 'NEEDS_HUMAN':
+      return 'unknown';
+  }
 }
 
 function markRunNeedsHuman(

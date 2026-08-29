@@ -284,6 +284,14 @@ export class ModelRoutingService {
       );
     }
     this.verifyExecutionBinding(options, target);
+    const persistedDecision = this.repository.findRoutingDecisionById(
+      this.options.projectId,
+      target.routingDecisionId
+    );
+    const safety = persistedDecision !== undefined &&
+      (persistedDecision.decision.risk === 'high' || persistedDecision.decision.risk === 'critical')
+      ? { ...(input.safety ?? {}), risk: persistedDecision.decision.risk }
+      : input.safety;
     return executeAgentTask(
       { ...options, adapter: this.createExecutionAdapter(target) },
       {
@@ -293,6 +301,7 @@ export class ModelRoutingService {
         provider: target.provider,
         modelProviderId: target.modelProviderId,
         model: target.modelId,
+        ...(safety === undefined ? {} : { safety }),
       }
     );
   }
@@ -305,22 +314,71 @@ export class ModelRoutingService {
   ): Promise<RoutedAgentTaskResult> {
     const request = modelRoutingRequestSchema.parse(routingInput);
     const excluded = new Set(request.excludeProviders ?? []);
-    const providerCount = Math.max(this.registry.list().length, 1);
+    let providerCount: number | undefined;
     let lastError: unknown;
+    let pendingPrepared: { run: AgentTaskResult['run']; decision: ModelRoutingDecision } | undefined;
 
-    for (let attempt = 0; attempt < providerCount; attempt += 1) {
-      const preview = await this.route({ ...request, excludeProviders: [...excluded] });
+    for (let attempt = 0; providerCount === undefined || attempt < providerCount; attempt += 1) {
+      let preview: ModelRoutingDecision;
+      try {
+        preview = await this.route({ ...request, excludeProviders: [...excluded] });
+      } catch (error) {
+        if (pendingPrepared !== undefined) {
+          const exhausted = await abandonPreparedAgentTaskRun(
+            options,
+            pendingPrepared.run.id,
+            `No fallback provider could be reserved after the selected provider failed: ${error instanceof Error ? error.message : String(error)}`,
+            'safety_limit'
+          );
+          return { created: true, run: exhausted, decision: pendingPrepared.decision };
+        }
+        throw error;
+      }
+      providerCount ??= Math.max(this.registry.list().length, 1);
+      if (pendingPrepared !== undefined) {
+        await abandonPreparedAgentTaskRun(
+          options,
+          pendingPrepared.run.id,
+          'Selected provider could not be reserved before the next fallback was prepared'
+        );
+        pendingPrepared = undefined;
+      }
       const target = this.resolveExecutionTarget(preview);
+      const routeRequiresApproval = preview.risk === 'high' || preview.risk === 'critical';
+      const executionSafety = input.safety === undefined && !routeRequiresApproval
+        ? undefined
+        : {
+            ...(input.safety ?? {}),
+            ...(routeRequiresApproval ? { risk: preview.risk } : {}),
+            attempt: (input.safety?.attempt ?? 1) + attempt,
+          };
+      const executionInput = executionSafety === undefined
+        ? input
+        : { ...input, safety: executionSafety };
       const prepared = await prepareAgentTaskRun(
         { ...options, adapter: this.createExecutionAdapter(target) },
         {
-          ...input,
+          ...executionInput,
           task: target.task,
           provider: target.provider,
           modelProviderId: target.modelProviderId,
           model: target.modelId,
         }
       );
+      if (input.safety?.maxAttempts === 0) {
+        const result = await executeAgentTask(
+          { ...options, adapter: this.createExecutionAdapter(target) },
+          {
+            ...executionInput,
+            runId: prepared.run.id,
+            task: target.task,
+            provider: target.provider,
+            modelProviderId: target.modelProviderId,
+            model: target.modelId,
+          }
+        );
+        return { ...result, decision: preview };
+      }
       const otherProviders = this.registry.list()
         .map((provider) => provider.providerId)
         .filter((providerId) => providerId !== target.modelProviderId);
@@ -333,16 +391,25 @@ export class ModelRoutingService {
         });
       } catch (error) {
         lastError = error;
-        await abandonPreparedAgentTaskRun(
-          options,
-          prepared.run.id,
-          `Selected provider could not be reserved before launch: ${error instanceof Error ? error.message : String(error)}`
-        );
+        const finalAllowedAttempt = input.safety?.maxAttempts !== undefined &&
+          attempt + 1 >= input.safety.maxAttempts;
+        const finalProviderAttempt = attempt === providerCount - 1;
+        const reason = `Selected provider could not be reserved before launch: ${error instanceof Error ? error.message : String(error)}`;
+        if (finalAllowedAttempt || finalProviderAttempt) {
+          const exhausted = await abandonPreparedAgentTaskRun(
+            options,
+            prepared.run.id,
+            `${reason}; execution safety limit is exhausted`,
+            'safety_limit'
+          );
+          return { created: true, run: exhausted, decision: preview };
+        }
+        pendingPrepared = { run: prepared.run, decision: preview };
         excluded.add(target.modelProviderId);
         continue;
       }
       const executionTarget = this.resolveExecutionTarget(decision);
-      const result = await this.executeSelectedAgentTask(options, executionTarget, input);
+      const result = await this.executeSelectedAgentTask(options, executionTarget, executionInput);
       return { ...result, decision };
     }
     throw new Error(
@@ -412,6 +479,7 @@ export class ModelRoutingService {
     return {
       provider: target.provider,
       capabilities: this.registry.executionCapabilitiesFor(target),
+      ...this.registry.executionLimitsFor(target),
       probe: () => this.registry.probeExecution(target),
       execute: (request) => this.registry.executeExecution(target, request),
     };

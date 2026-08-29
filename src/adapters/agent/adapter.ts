@@ -7,6 +7,7 @@
  */
 import type {
   AgentFailureCategory,
+  AgentExecutionUsage,
   AgentRunState,
   NormalizedAgentEvidence,
 } from '../../domain/agent-run.js';
@@ -44,6 +45,9 @@ export type AgentExecutionRequest = {
   instructions: string;
   timeoutMs: number;
   maxOutputBytes: number;
+  /** Remaining ShipGraph-owned budgets for adapters that enforce them. */
+  remainingTokens?: number;
+  remainingCost?: number;
   signal?: AbortSignal;
   /** Persist a provider process identifier as soon as the child is spawned. */
   onProcessStarted?: (processId: number) => void | Promise<void>;
@@ -70,10 +74,18 @@ export type AgentExecutionResult = {
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
   evidence?: NormalizedAgentEvidence;
+  /** Provider-reported usage, when the execution surface exposes it. */
+  usage?: AgentExecutionUsage;
   failureCategory?: AgentFailureCategory;
   failureReason?: string;
 };
 
 export interface AgentExecutionAdapter extends AgentAdapter {
+  /** The adapter can enforce a remaining token ceiling at its provider boundary. */
+  readonly supportsTokenLimit?: boolean;
+  /** The adapter can enforce a remaining cost ceiling at its provider boundary. */
+  readonly supportsCostLimit?: boolean;
+  /** The adapter reports measurable token/cost usage in its normalized result. */
+  readonly reportsUsage?: boolean;
   execute(request: AgentExecutionRequest): Promise<AgentExecutionResult>;
 }

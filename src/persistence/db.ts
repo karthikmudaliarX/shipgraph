@@ -469,6 +469,15 @@ export const MIGRATIONS: readonly Migration[] = [
         CHECK (task IS NULL OR task IN ('implementation', 'review', 'repair'));
     `,
   },
+  {
+    version: 15,
+    name: 'bind_agent_safety_policy_to_runs',
+    up: `
+      -- New prepared AGENT-001 runs must retain the exact effective KAR-7
+      -- policy that was validated before routing and provider launch.
+      ALTER TABLE runs ADD COLUMN safety_policy_sha256 TEXT;
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {

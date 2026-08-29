@@ -24,6 +24,7 @@ import {
 } from '../../src/persistence/repositories.js';
 import { createModelRepository } from '../../src/persistence/model-repositories.js';
 import { ModelRoutingService } from '../../src/model/service.js';
+import { UsageLedger } from '../../src/model/ledger.js';
 import {
   executeAgentTask,
   prepareAgentTaskRun,
@@ -87,6 +88,9 @@ function fakeAdapter(
   const adapter: FakeAdapter = {
     provider: 'opencode',
     capabilities,
+    supportsTokenLimit: true,
+    supportsCostLimit: true,
+    reportsUsage: true,
     requests,
     probe: () => ({ available: true, version: 'test' }),
     execute: async (request) => {
@@ -296,6 +300,269 @@ describe('AGENT-001 durable execution', () => {
 
     expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(2);
     expect(createRunRepository(harness.db).findByTicketId('AG-001')).toHaveLength(2);
+  });
+
+  it.each([
+    {
+      name: 'an exhausted attempt budget',
+      safety: { maxAttempts: 1, attempt: 2 },
+      category: 'safety_limit',
+      reason: /attempt budget exhausted/,
+    },
+    {
+      name: 'a timeout above its per-run ceiling',
+      timeoutMs: 2_000,
+      safety: { maxTimeoutMs: 1_000 },
+      category: 'safety_limit',
+      reason: /timeout exceeds the per-run ceiling/,
+    },
+    {
+      name: 'an exhausted token budget',
+      safety: { maxTokens: 0 },
+      modelProviderId: 'opencode-go' as const,
+      category: 'safety_limit',
+      reason: /token budget exhausted/,
+    },
+    {
+      name: 'an unapproved destructive operation',
+      safety: { destructive: true },
+      category: 'approval_required',
+      reason: /explicit human approval/,
+    },
+    {
+      name: 'material scope growth',
+      safety: { scopeGrowth: true },
+      category: 'scope_growth',
+      reason: /authorized scope boundary/,
+    },
+  ])('fails closed before launch for $name', async ({ timeoutMs, modelProviderId, safety, category, reason }) => {
+    harness = await createHarness();
+    const result = await executeAgentTask(harness.options, {
+      ticketId: 'AG-001',
+      ...(modelProviderId === undefined ? {} : { modelProviderId }),
+      model: 'openai/gpt-5',
+      instructions: 'must not launch when the safety policy blocks the run',
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      safety,
+    });
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe(category);
+    expect(result.run.failureReason).toMatch(reason);
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(0);
+  });
+
+  it('binds the effective safety policy to the durable prepared run', async () => {
+    harness = await createHarness();
+    const prepared = await prepareAgentTaskRun(
+      { ...harness.options, createRunId: () => 'policy-bound-run' },
+      {
+        ticketId: 'AG-001',
+        provider: 'opencode',
+        modelProviderId: 'opencode-go',
+        model: 'openai/gpt-5',
+        instructions: 'prepare this run with its safety policy',
+        timeoutMs: 1_000,
+        safety: {
+          maxAttempts: 2,
+          maxTokens: 10,
+          maxCost: 1,
+          maxTimeoutMs: 1_000,
+          approvalRequired: true,
+          approvalGranted: true,
+          scopeGrowth: false,
+        },
+      }
+    );
+
+    expect(prepared.run.safetyPolicySha256).toMatch(/^[0-9a-f]{64}$/);
+    const handoffAdapter = fakeAdapter();
+    await expect(executeAgentTask(
+      { ...harness.options, adapter: handoffAdapter },
+      {
+        ticketId: 'AG-001',
+        provider: 'opencode',
+        modelProviderId: 'opencode-go',
+        model: 'openai/gpt-5',
+        instructions: 'prepare this run with its safety policy',
+        runId: prepared.run.id,
+        timeoutMs: 1_000,
+      }
+    )).rejects.toThrow(/does not match the durable safety policy/);
+    expect(handoffAdapter.requests).toHaveLength(0);
+    expect(createRunRepository(harness.db).findById(prepared.run.id)?.status).toBe('CREATED');
+  });
+
+  it('uses durable usage-ledger totals and passes remaining limits to the adapter', async () => {
+    harness = await createHarness();
+    const prepared = await prepareAgentTaskRun(
+      { ...harness.options, createRunId: () => 'usage-bound-run' },
+      {
+        ticketId: 'AG-001',
+        provider: 'opencode',
+        modelProviderId: 'opencode-go',
+        model: 'openai/gpt-5',
+        instructions: 'continue within the durable usage budget',
+        safety: { maxTokens: 10, maxCost: 1 },
+      }
+    );
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    new UsageLedger(createModelRepository(harness.db), projectId).append({
+      runId: prepared.run.id,
+      providerId: 'opencode-go',
+      modelId: 'openai/gpt-5',
+      task: 'implementation',
+      retryCount: 0,
+      elapsedMs: 1,
+      outcome: 'succeeded',
+      outcomeQuality: 'good',
+      inputTokens: 6,
+      outputTokens: 3,
+      cost: 0.8,
+    });
+    const adapter = fakeAdapter({ usage: { inputTokens: 0, outputTokens: 1, cost: 0.2 } });
+    const result = await executeAgentTask(
+      { ...harness.options, adapter },
+      {
+        ticketId: 'AG-001',
+        provider: 'opencode',
+        modelProviderId: 'opencode-go',
+        model: 'openai/gpt-5',
+        instructions: 'continue within the durable usage budget',
+        runId: prepared.run.id,
+        safety: { maxTokens: 10, maxCost: 1 },
+      }
+    );
+
+    expect(adapter.requests[0]?.remainingTokens).toBe(1);
+    expect(adapter.requests[0]?.remainingCost).toBeCloseTo(0.2);
+    expect(result.run.status).toBe('SUCCEEDED');
+    expect(createModelRepository(harness.db).listUsage(projectId)
+      .filter((entry) => entry.runId === prepared.run.id)).toHaveLength(2);
+  });
+
+  it.each([
+    {
+      name: 'timed out',
+      result: { outcome: 'TIMED_OUT' as const, timedOut: true, cancelled: false, failureCategory: 'timeout' as const },
+    },
+    {
+      name: 'cancelled',
+      result: { outcome: 'CANCELLED' as const, timedOut: false, cancelled: true, failureCategory: 'cancelled' as const },
+    },
+  ])('clears terminal flags when a $name result is safety-escalated', async ({ result }) => {
+    harness = await createHarness();
+    const options: AgentExecutionServiceOptions = {
+      ...harness.options,
+      adapter: fakeAdapter({ ...result, usage: { inputTokens: 1, outputTokens: 1, cost: 0 } }),
+    };
+    const execution = await executeAgentTask(options, {
+      ticketId: 'AG-001',
+      provider: 'opencode',
+      modelProviderId: 'opencode-go',
+      model: 'openai/gpt-5',
+      instructions: 'preserve normalized terminal outcome invariants',
+      safety: { maxTokens: 1 },
+    });
+
+    expect(execution.run.status).toBe('NEEDS_HUMAN');
+    expect(execution.run.failureCategory).toBe('safety_limit');
+    expect(execution.run.timedOut).toBe(false);
+    expect(execution.run.cancelled).toBe(false);
+  });
+
+  it('fails closed after a successful provider result exceeds a configured token budget', async () => {
+    harness = await createHarness();
+    const options: AgentExecutionServiceOptions = {
+      ...harness.options,
+      adapter: fakeAdapter({ usage: { inputTokens: 2, outputTokens: 3, cost: 0 } }),
+    };
+
+    const result = await executeAgentTask(options, {
+      ticketId: 'AG-001',
+      modelProviderId: 'opencode-go',
+      model: 'openai/gpt-5',
+      instructions: 'enforce the token budget after normalized provider usage',
+      safety: { maxTokens: 4 },
+    });
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe('safety_limit');
+    expect(result.run.failureReason).toMatch(/token budget exceeded/);
+    expect((options.adapter as FakeAdapter).requests).toHaveLength(1);
+  });
+
+  it('fails closed when a failed provider result reports usage over the token budget', async () => {
+    harness = await createHarness();
+    const options: AgentExecutionServiceOptions = {
+      ...harness.options,
+      adapter: fakeAdapter({
+        outcome: 'FAILED',
+        failureCategory: 'non_zero_exit',
+        failureReason: 'provider failed after consuming the request',
+        usage: { inputTokens: 3, outputTokens: 2, cost: 0 },
+      }),
+    };
+
+    const result = await executeAgentTask(options, {
+      ticketId: 'AG-001',
+      modelProviderId: 'opencode-go',
+      model: 'openai/gpt-5',
+      instructions: 'enforce the token budget for failed provider results too',
+      safety: { maxTokens: 4 },
+    });
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe('safety_limit');
+    expect(result.run.failureReason).toMatch(/token budget exceeded/);
+  });
+
+  it('requires measurable usage when a cost budget is configured', async () => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    const result = await executeAgentTask(harness.options, {
+      ticketId: 'AG-001',
+      modelProviderId: 'opencode-go',
+      model: 'openai/gpt-5',
+      instructions: 'do not treat missing cost telemetry as safe',
+      safety: { maxCost: 1 },
+    });
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe('safety_limit');
+    expect(result.run.failureReason).toMatch(/did not report cost/);
+    expect(createModelRepository(harness.db).listUsage(projectId)
+      .filter((entry) => entry.runId === result.run.id)).toMatchObject([
+        { inputTokens: 'unknown', outputTokens: 'unknown', cost: 'unknown' },
+      ]);
+  });
+
+  it('allows a high-risk run only when explicit approval is present', async () => {
+    harness = await createHarness();
+    const result = await executeAgentTask(harness.options, {
+      ticketId: 'AG-001',
+      model: 'openai/gpt-5',
+      instructions: 'execute the explicitly approved high-risk step',
+      safety: { risk: 'high', approvalGranted: true },
+    });
+
+    expect(result.run.status).toBe('SUCCEEDED');
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(1);
+  });
+
+  it('derives the approval gate from the durable ticket risk', async () => {
+    harness = await createHarness();
+    harness.db.prepare('UPDATE tickets SET risk = ? WHERE id = ?').run('critical', 'AG-001');
+
+    const result = await executeAgentTask(harness.options, {
+      ticketId: 'AG-001',
+      model: 'openai/gpt-5',
+      instructions: 'must not bypass the durable ticket risk gate',
+    });
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe('approval_required');
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(0);
   });
 
   it.each([
@@ -670,6 +937,158 @@ describe('AGENT-001 durable execution', () => {
     expect(result.run.model).toBe('opencode/routed');
     expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(1);
     expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
+  });
+
+  it('persists a durable safety outcome when maxAttempts is zero', async () => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    const providerAdapter: ModelProviderAdapter = {
+      providerId: 'opencode-go',
+      family: 'opencode',
+      displayName: 'OpenCode Go',
+      probe: async () => ({
+        availability: 'available', auth: 'authenticated', version: 'test',
+        capabilities: ['implementation'],
+      }),
+      discoverModels: async () => ({
+        status: 'known',
+        models: [{ modelId: 'opencode/attempt-zero', capabilities: ['implementation'] }],
+      }),
+    };
+    const modelService = new ModelRoutingService({
+      db: harness.db,
+      projectId,
+      adapters: [providerAdapter],
+      executionAdapters: [{ modelProviderId: 'opencode-go', adapter: harness.options.adapter }],
+    });
+
+    const result = await modelService.executeRoutedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      {
+        task: 'implementation',
+        risk: 'medium',
+        envelope: {
+          mode: 'balanced', maxConcurrentTickets: 1,
+          activeConcurrentTickets: 0, budgetRemaining: 'unknown',
+        },
+      },
+      { ticketId: 'AG-001', instructions: 'do not launch with an exhausted attempt budget', safety: { maxAttempts: 0 } }
+    );
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe('safety_limit');
+    expect(result.run.failureReason).toMatch(/attempt budget exhausted/);
+    expect(createRunRepository(harness.db).findById(result.run.id)?.status).toBe('NEEDS_HUMAN');
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(0);
+  });
+
+  it('persists a durable safety outcome when the final route reservation fails', async () => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    const providerAdapter: ModelProviderAdapter = {
+      providerId: 'opencode-go',
+      family: 'opencode',
+      displayName: 'OpenCode Go',
+      probe: async () => ({
+        availability: 'available', auth: 'authenticated', version: 'test',
+        capabilities: ['implementation'],
+      }),
+      discoverModels: async () => ({
+        status: 'known',
+        models: [{ modelId: 'opencode/reservation-failure', capabilities: ['implementation'] }],
+      }),
+    };
+    const modelService = new ModelRoutingService({
+      db: harness.db,
+      projectId,
+      adapters: [providerAdapter],
+      executionAdapters: [{ modelProviderId: 'opencode-go', adapter: harness.options.adapter }],
+    });
+    let runId: string | undefined;
+    const createRunId = () => {
+      runId = 'final-reservation-failure-run';
+      harness?.db.prepare(
+        'UPDATE provider_health SET active_runs = ? WHERE project_id = ? AND provider_id = ?'
+      ).run(1_000_000, projectId, 'opencode-go');
+      return runId;
+    };
+
+    const result = await modelService.executeRoutedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, createRunId },
+      {
+        task: 'implementation',
+        risk: 'medium',
+        envelope: {
+          mode: 'balanced', maxConcurrentTickets: 1,
+          activeConcurrentTickets: 0, budgetRemaining: 'unknown',
+        },
+      },
+      { ticketId: 'AG-001', instructions: 'audit the final reservation failure' }
+    );
+
+    expect(result.run.id).toBe(runId);
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe('safety_limit');
+    expect(result.run.failureReason).toMatch(/safety limit is exhausted/);
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(0);
+  });
+
+  it('persists a safety-limit outcome when no registered fallback is usable', async () => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    const providerAdapter: ModelProviderAdapter = {
+      providerId: 'opencode-go',
+      family: 'opencode',
+      displayName: 'OpenCode Go',
+      probe: async () => ({
+        availability: 'available', auth: 'authenticated', version: 'test',
+        capabilities: ['implementation'],
+      }),
+      discoverModels: async () => ({
+        status: 'known',
+        models: [{ modelId: 'opencode/no-fallback', capabilities: ['implementation'] }],
+      }),
+    };
+    const unavailableFallback: ModelProviderAdapter = {
+      providerId: 'codex',
+      family: 'openai',
+      displayName: 'Codex',
+      probe: async () => ({
+        availability: 'unavailable', auth: 'unknown', version: 'test',
+        capabilities: [], reason: 'test fallback unavailable',
+      }),
+      discoverModels: async () => ({ status: 'unknown', reason: 'provider unavailable' }),
+    };
+    const modelService = new ModelRoutingService({
+      db: harness.db,
+      projectId,
+      adapters: [providerAdapter, unavailableFallback],
+      executionAdapters: [{ modelProviderId: 'opencode-go', adapter: harness.options.adapter }],
+    });
+    const createRunId = () => {
+      harness?.db.prepare(
+        'UPDATE provider_health SET active_runs = ? WHERE project_id = ? AND provider_id = ?'
+      ).run(1_000_000, projectId, 'opencode-go');
+      return 'no-usable-fallback-run';
+    };
+
+    const result = await modelService.executeRoutedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, createRunId },
+      {
+        task: 'implementation',
+        risk: 'medium',
+        envelope: {
+          mode: 'balanced', maxConcurrentTickets: 1,
+          activeConcurrentTickets: 0, budgetRemaining: 'unknown',
+        },
+      },
+      { ticketId: 'AG-001', instructions: 'record no-fallback reservation exhaustion' }
+    );
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe('safety_limit');
+    expect(result.run.failureReason).toMatch(/No fallback provider could be reserved/);
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(0);
   });
 
   it('releases a bound route when the prepared workspace becomes invalid before launch', async () => {
