@@ -222,7 +222,7 @@ describe('MODEL-001 service', () => {
       outcomeQuality: 'unknown',
     });
 
-    expect(calls).toEqual({ probe: 8, discover: 8 });
+    expect(calls).toEqual({ probe: 4, discover: 4 });
     expect(decision.reason).toContain('candidates=');
     expect(service.listRoutingDecisions()).toHaveLength(0);
     expect(db.prepare('SELECT COUNT(*) AS count FROM provider_capacity_reservations').get()).toEqual({ count: 0 });
@@ -660,7 +660,7 @@ describe('MODEL-001 service', () => {
     expect(service.listHealth()[0]?.activeRuns).toBe(0);
   });
 
-  it('refuses a replay with changed constraints and rechecks execution capability', async () => {
+  it('reuses a fresh snapshot until execution capability is explicitly refreshed', async () => {
     let executionAvailable = true;
     const service = new ModelRoutingService({
       db,
@@ -705,6 +705,8 @@ describe('MODEL-001 service', () => {
     })).rejects.toThrow(/different routing constraints/);
 
     executionAvailable = false;
+    await expect(service.route(request)).resolves.toEqual(first);
+    await service.refresh();
     await expect(service.route(request)).rejects.toThrow(
       /no capability-probed AGENT-001 execution surface/
     );

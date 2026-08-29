@@ -61,6 +61,136 @@ describe('MODEL-001 provider adapters', () => {
     });
   });
 
+  it('parses the current catalog surface for every supported provider', async () => {
+    const catalogOutput = new Map<string, string>([
+      ['opencode-go', 'opencode-go/provider-future-model\n'],
+      ['codex', JSON.stringify({ models: [{ slug: 'gpt-future-model' }] })],
+      ['grok', [
+        'You are logged in with grok.com.',
+        '',
+        'Default model: grok-future-default',
+        '',
+        'Available models:',
+        '  - grok-future-model',
+        '  * grok-future-default (default)',
+      ].join('\n')],
+      ['gemini', [
+        'Fetching available models...',
+        'gemini-future-model\tGemini Future Model',
+        'gemini-future-fast\tGemini Future Fast',
+      ].join('\n')],
+    ]);
+    const versionOutput: Record<string, string> = {
+      '/tmp/opencode': '1.18.21\n',
+      '/tmp/codex': 'codex-cli 0.147.0\n',
+      '/tmp/grok': 'grok 1.0.13 (current)\n',
+      '/tmp/agy': '1.1.22\n',
+    };
+    const calls: Array<{ command: string; args: readonly string[] }> = [];
+    const runner: ModelProviderProcessRunner = {
+      run: async (spec) => {
+        calls.push({ command: spec.command, args: spec.args });
+        if (spec.args[0] === '--version') {
+          return result({ stdout: versionOutput[spec.command] ?? '' });
+        }
+        if (spec.command === '/tmp/opencode' && spec.args[0] === 'auth') {
+          return result({ stdout: 'OpenCode Go api\n' });
+        }
+        if (spec.command === '/tmp/codex' && spec.args[0] === 'login') {
+          return result({ stdout: 'Logged in using ChatGPT\n' });
+        }
+        if (spec.command === '/tmp/grok' && spec.args[0] === 'models') {
+          return result({ stdout: catalogOutput.get('grok') ?? '' });
+        }
+        const providerId = spec.command === '/tmp/opencode'
+          ? 'opencode-go'
+          : spec.command === '/tmp/codex'
+            ? 'codex'
+            : 'gemini';
+        return result({ stdout: catalogOutput.get(providerId) ?? '' });
+      },
+    };
+    const adapters = createModelProviderAdapters({
+      configuration: {
+        opencodeGo: { executable: '/tmp/opencode' },
+        codex: { executable: '/tmp/codex' },
+        grok: { executable: '/tmp/grok' },
+        gemini: { executable: '/tmp/agy' },
+      },
+      processRunner: runner,
+      cwd: '/tmp/project',
+    });
+
+    const probes = [];
+    for (const adapter of adapters) probes.push(await adapter.probe());
+    const discoveries = [];
+    for (const adapter of adapters) discoveries.push(await adapter.discoverModels());
+
+    expect(probes.map((probe) => probe.auth)).toEqual([
+      'authenticated',
+      'authenticated',
+      'authenticated',
+      'unknown',
+    ]);
+    expect(discoveries.map((discovery) => discovery.status)).toEqual([
+      'known',
+      'known',
+      'known',
+      'known',
+    ]);
+    expect(discoveries.map((discovery) =>
+      discovery.status === 'known' ? discovery.models.map((model) => model.modelId) : []
+    )).toEqual([
+      ['opencode-go/provider-future-model'],
+      ['gpt-future-model'],
+      ['grok-future-default', 'grok-future-model'],
+      ['gemini-future-fast', 'gemini-future-model'],
+    ]);
+    expect(calls.map((call) => call.args)).toEqual([
+      ['--version'],
+      ['auth', 'list', '--pure'],
+      ['--version'],
+      ['login', 'status'],
+      ['--version'],
+      ['models'],
+      ['--version'],
+      ['models', 'opencode-go', '--pure'],
+      ['debug', 'models'],
+      ['models'],
+      ['models'],
+    ]);
+  });
+
+  it('keeps malformed provider-native catalog surfaces unknown and non-routable', async () => {
+    const malformed = [
+      createCommandModelProviderAdapter({
+        providerId: 'grok',
+        family: 'xai',
+        displayName: 'Grok',
+        executable: '/tmp/grok',
+        catalogArgs: ['models'],
+        processRunner: { run: async () => result({ stdout: 'Default model: grok-future\n' }) },
+        cwd: '/tmp/project',
+      }),
+      createCommandModelProviderAdapter({
+        providerId: 'gemini',
+        family: 'google',
+        displayName: 'Gemini',
+        executable: '/tmp/agy',
+        catalogArgs: ['models'],
+        processRunner: { run: async () => result({ stdout: 'Fetching available models...\n' }) },
+        cwd: '/tmp/project',
+      }),
+    ];
+
+    for (const adapter of malformed) {
+      await expect(adapter.discoverModels()).resolves.toEqual({
+        status: 'unknown',
+        reason: 'provider catalog output was not a supported machine-readable model list',
+      });
+    }
+  });
+
   it('keeps an unrecognized catalog surface unknown instead of inventing models', () => {
     expect(parseModelCatalog('Models are available after login', ['implementation'])).toEqual({
       status: 'unknown',
@@ -135,9 +265,9 @@ describe('MODEL-001 provider adapters', () => {
       },
     };
     const adapter = createCommandModelProviderAdapter({
-      providerId: 'grok',
-      family: 'xai',
-      displayName: 'Grok',
+      providerId: 'codex',
+      family: 'openai',
+      displayName: 'Codex',
       executable: '/tmp/provider cli',
       catalogArgs: ['models', '--json'],
       processRunner: runner,
@@ -176,7 +306,7 @@ describe('MODEL-001 provider adapters', () => {
       displayName: 'Codex',
       executable: '/tmp/codex',
       authArgs: ['login', 'status'],
-      authenticatedOutputTokens: ['Logged in'],
+      authenticatedOutputTokens: ['Logged in using ChatGPT'],
       unauthenticatedOutputTokens: ['Not logged in'],
       catalogArgs: ['models'],
       processRunner: runner,

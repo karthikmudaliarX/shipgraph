@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chmodSync, existsSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentExecutionRequest } from '../../src/adapters/agent/adapter.js';
@@ -72,7 +72,7 @@ describe('deferred MODEL-001 provider execution adapters', () => {
       executable: '/opt/codex',
       cwd: '/tmp/shipgraph-project',
       processRunner: scriptedRunner(
-        'exec --json --model --cd --sandbox --approve-for-me --ephemeral\n',
+        'exec --json --model --cd --approve-for-me --ephemeral\n',
         '{"type":"result","session_id":"codex-session","text":"done"}\n',
         calls,
         'codex-cli 1.0.0\n'
@@ -97,8 +97,6 @@ describe('deferred MODEL-001 provider execution adapters', () => {
         request.workspacePath,
         '--model',
         request.model,
-        '--sandbox',
-        'workspace-write',
         '--approve-for-me',
         request.instructions,
       ],
@@ -146,9 +144,9 @@ describe('deferred MODEL-001 provider execution adapters', () => {
       '--allow',
       'Bash',
       '--tools',
-      'Read,Grep,Edit,Bash',
+      'run_terminal_cmd,grep,read_file,search_replace',
       '--disallowed-tools',
-      'MCPTool,WebFetch,WebSearch',
+      'web_search,web_fetch,search_tool,use_tool,Agent',
       '--no-subagents',
       '--no-plan',
       '--no-memory',
@@ -208,11 +206,15 @@ describe('deferred MODEL-001 provider execution adapters', () => {
     });
   });
 
-  it('does not pass another provider credential into the Grok process', async () => {
+  it('preserves the logged-in Grok home while filtering unrelated credentials', async () => {
     const calls: AgentProcessSpec[] = [];
     const adapter = new GrokAdapter({
       executable: '/opt/grok',
-      environment: { XAI_API_KEY: 'grok-secret', OPENAI_API_KEY: 'openai-secret' },
+      environment: {
+        XAI_API_KEY: 'grok-secret',
+        GROK_HOME: '/tmp/grok-user-home',
+        OPENAI_API_KEY: 'openai-secret',
+      },
       processRunner: scriptedRunner(
         '--single --output-format --model --cwd --permission-mode --allow --tools --disallowed-tools --no-subagents --no-plan --no-memory --disable-web-search --sandbox\n',
         '',
@@ -224,10 +226,10 @@ describe('deferred MODEL-001 provider execution adapters', () => {
     await expect(adapter.probe()).resolves.toMatchObject({ available: true });
     expect(calls[0]?.env.XAI_API_KEY).toBe('grok-secret');
     expect(calls[0]?.env.OPENAI_API_KEY).toBeUndefined();
-    expect(calls[0]?.env.GROK_HOME).toBe(calls[0]?.env.HOME);
-    expect(calls[0]?.env.HOME).not.toBe(process.env.HOME);
-    expect(calls[0]?.env.GROK_WORKFLOWS).toBe('0');
-    expect(calls[0]?.env.HOME === undefined || existsSync(calls[0].env.HOME)).toBe(false);
+    expect(calls[0]?.env.GROK_HOME).toBe('/tmp/grok-user-home');
+    expect(calls[0]?.env.HOME).toBe(process.env.HOME);
+    expect(calls[0]?.env.HOME).not.toMatch(/shipgraph-grok-home-/u);
+    expect(calls[0]?.env.GROK_WORKFLOWS).toBeUndefined();
   });
 
   it('pins the probed executable and refuses a replacement before launch', async () => {

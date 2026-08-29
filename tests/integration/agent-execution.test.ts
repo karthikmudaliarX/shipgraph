@@ -741,17 +741,20 @@ describe('AGENT-001 durable execution', () => {
       .toMatchObject({ reservationStatus: 'released', runId: prepared.run.id });
   });
 
-  it('falls back when the first selected provider becomes unavailable before binding', async () => {
+  it('refreshes providers once before routing and proves the selected adapter before launch', async () => {
     harness = await createHarness();
     const projectId = (await inspectAgentProjectId(harness)).projectId;
     let codexProbeCount = 0;
     const codexProvider: ModelProviderAdapter = {
       providerId: 'codex', family: 'openai', displayName: 'Codex',
-      probe: async () => ({
-        availability: 'available',
-        auth: ++codexProbeCount < 3 ? 'authenticated' : 'unknown',
-        version: 'test', capabilities: ['implementation'],
-      }),
+      probe: async () => {
+        codexProbeCount += 1;
+        return {
+          availability: 'available' as const,
+          auth: 'authenticated' as const,
+          version: 'test', capabilities: ['implementation'] as const,
+        };
+      },
       discoverModels: async () => ({
         status: 'known', models: [{ modelId: 'codex/routed', capabilities: ['implementation'] }],
       }),
@@ -772,7 +775,26 @@ describe('AGENT-001 durable execution', () => {
       probe: () => ({ available: true, version: 'test' }),
       execute: async (request) => {
         codexRequests.push(request);
-        throw new Error('codex should lose routing before execution');
+        if (request.onProcessStarted !== undefined) await request.onProcessStarted(4243);
+        return {
+          outcome: 'SUCCEEDED',
+          providerSessionId: 'codex-session',
+          providerProcessId: 4243,
+          exitCode: 0,
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: '{"type":"result","text":"done"}',
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          evidence: {
+            outputFormat: 'jsonl' as const,
+            eventCount: 1,
+            eventTypes: ['result'],
+            summary: 'done',
+          },
+        };
       },
     };
     registerModelProviderAdapter(codexExecution, 'codex');
@@ -794,13 +816,14 @@ describe('AGENT-001 durable execution', () => {
           activeConcurrentTickets: 0, budgetRemaining: 'unknown',
         },
       },
-      { ticketId: 'AG-001', instructions: 'use the healthy fallback' }
+      { ticketId: 'AG-001', instructions: 'use the selected provider' }
     );
 
-    expect(result.decision.providerId).toBe('opencode-go');
+    expect(codexProbeCount).toBe(1);
+    expect(result.decision.providerId).toBe('codex');
     expect(result.run.status).toBe('SUCCEEDED');
-    expect(codexRequests).toHaveLength(0);
-    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(1);
+    expect(codexRequests).toHaveLength(1);
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(0);
   });
 
   it('durably recovers and releases a route when capability probing fails before launch', async () => {

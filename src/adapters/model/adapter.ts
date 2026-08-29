@@ -347,7 +347,7 @@ export class CommandModelProviderAdapter implements ModelProviderAdapter {
     if (result.exitCode !== 0) {
       return { status: 'unknown', reason: 'provider catalog surface failed' };
     }
-    return parseModelCatalog(result.stdout, this.capabilities);
+    return parseProviderModelCatalog(this.providerId, result.stdout, this.capabilities);
   }
 
   private run(
@@ -486,8 +486,8 @@ export function createModelProviderAdapters(options: {
   }> = {
     'opencode-go': {
       executable: 'opencode',
-      catalogArgs: ['models'],
-      authArgs: ['auth', 'list'],
+      catalogArgs: ['models', 'opencode-go', '--pure'],
+      authArgs: ['auth', 'list', '--pure'],
       authenticatedOutputTokens: ['OpenCode Go'],
       unauthenticatedOutputTokens: ['0 credentials'],
       expectedExecutableName: 'opencode',
@@ -495,17 +495,23 @@ export function createModelProviderAdapters(options: {
     },
     codex: {
       executable: 'codex',
+      catalogArgs: ['debug', 'models'],
       authArgs: ['login', 'status'],
-      authenticatedOutputTokens: ['Logged in'],
+      authenticatedOutputTokens: ['Logged in using ChatGPT'],
       unauthenticatedOutputTokens: ['Not logged in'],
       expectedExecutableName: 'codex',
       requiredVersionTokens: ['codex-cli'],
     },
     grok: {
+      catalogArgs: ['models'],
+      authArgs: ['models'],
+      authenticatedOutputTokens: ['You are logged in with grok.com.'],
+      unauthenticatedOutputTokens: ['You are not authenticated.'],
       expectedExecutableName: 'grok',
       requiredVersionTokens: ['grok'],
     },
     gemini: {
+      catalogArgs: ['models'],
       expectedExecutableName: 'agy',
       versionPattern: SEMVER_VERSION_PATTERN,
     },
@@ -580,6 +586,71 @@ export function parseModelCatalog(
   }
 }
 
+function parseProviderModelCatalog(
+  providerId: ModelProviderId,
+  raw: string,
+  fallbackCapabilities: readonly ModelCapability[]
+): ModelDiscoveryResult {
+  if (providerId === 'grok') return parseGrokModelCatalog(raw, fallbackCapabilities);
+  if (providerId === 'gemini') return parseAntigravityModelCatalog(raw, fallbackCapabilities);
+  return parseModelCatalog(raw, fallbackCapabilities);
+}
+
+function parseGrokModelCatalog(
+  raw: string,
+  fallbackCapabilities: readonly ModelCapability[]
+): ModelDiscoveryResult {
+  const output = redactSensitiveText(raw).trim();
+  const lines = output.split(/\r?\n/u);
+  const heading = lines.findIndex((line) => line.trim() === 'Available models:');
+  if (heading < 0) {
+    return {
+      status: 'unknown',
+      reason: 'provider catalog output was not a supported machine-readable model list',
+    };
+  }
+  const modelLines = lines.slice(heading + 1).map((line) => line.trim()).filter(Boolean);
+  const models = modelLines.map((line) => {
+    const match = /^(?:[-*])\s+([^\s]+)(?:\s+\(default\))?$/u.exec(line);
+    if (match === null || !isValidModelId(match[1])) return undefined;
+    return {
+      modelId: match[1],
+      capabilities: normalizeCapabilities(fallbackCapabilities),
+    };
+  });
+  if (models.length === 0 || models.some((model) => model === undefined)) {
+    return {
+      status: 'unknown',
+      reason: 'provider catalog output was not a supported machine-readable model list',
+    };
+  }
+  return { status: 'known', models: uniqueSortedModels(models as DiscoveredModel[]) };
+}
+
+function parseAntigravityModelCatalog(
+  raw: string,
+  fallbackCapabilities: readonly ModelCapability[]
+): ModelDiscoveryResult {
+  const output = redactSensitiveText(raw).trim();
+  const lines = output.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+  const models = lines.flatMap((line) => {
+    if (line === 'Fetching available models...') return [];
+    const match = /^([^\t]+)\t.+$/u.exec(line);
+    if (match === null || !isValidModelId(match[1])) return [undefined];
+    return [{
+      modelId: match[1],
+      capabilities: normalizeCapabilities(fallbackCapabilities),
+    }];
+  });
+  if (models.length === 0 || models.some((model) => model === undefined)) {
+    return {
+      status: 'unknown',
+      reason: 'provider catalog output was not a supported machine-readable model list',
+    };
+  }
+  return { status: 'known', models: uniqueSortedModels(models as DiscoveredModel[]) };
+}
+
 function parseCapabilities(raw: string): CapabilityProbeResult {
   if (Buffer.byteLength(raw, 'utf8') > CAPABILITY_OUTPUT_BYTES) {
     return { status: 'unknown', reason: 'provider capability output exceeded the safety limit' };
@@ -642,7 +713,7 @@ function parseModelEntry(
   }
   if (typeof value !== 'object' || value === null) return undefined;
   const record = value as Record<string, unknown>;
-  const rawId = record.id ?? record.modelId ?? record.name ?? record.model;
+  const rawId = record.id ?? record.modelId ?? record.name ?? record.model ?? record.slug;
   if (typeof rawId !== 'string' || !isValidModelId(rawId)) return undefined;
 
   const hasCapabilities = Object.prototype.hasOwnProperty.call(record, 'capabilities');

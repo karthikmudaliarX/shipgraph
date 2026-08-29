@@ -114,10 +114,9 @@ export class ModelRoutingService {
 
   public async route(input: ModelRoutingRequest): Promise<ModelRoutingDecision> {
     const request = modelRoutingRequestSchema.parse(input);
-    // Routing is an execution admission decision. Re-probe the configured
-    // execution surfaces on every route so an executable removed or changed
-    // since the last metadata refresh cannot remain routable from a warm DB.
-    await this.registry.refresh();
+    // Refresh only when the persisted provider snapshot is absent or stale.
+    // The selected AGENT-001 surface is proved again immediately before launch.
+    await this.registry.ensureFresh();
     const fingerprint = routingRequestFingerprint(request);
     const existing = request.requestId === undefined
       ? request.runId === undefined
@@ -306,7 +305,6 @@ export class ModelRoutingService {
   ): Promise<RoutedAgentTaskResult> {
     const request = modelRoutingRequestSchema.parse(routingInput);
     const excluded = new Set(request.excludeProviders ?? []);
-    await this.registry.refresh();
     const providerCount = Math.max(this.registry.list().length, 1);
     let lastError: unknown;
 

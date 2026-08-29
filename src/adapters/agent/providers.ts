@@ -1,6 +1,3 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { AgentExecutionAdapter } from './adapter.js';
 import {
   CommandAgentExecutionAdapter,
@@ -37,7 +34,6 @@ export class CodexAdapter extends CommandAgentExecutionAdapter {
         '--json',
         '--model',
         '--cd',
-        '--sandbox',
         '--approve-for-me',
         '--ephemeral',
       ],
@@ -46,6 +42,8 @@ export class CodexAdapter extends CommandAgentExecutionAdapter {
       credentialEnvironmentKeys: ['OPENAI_API_KEY', 'CODEX_HOME'],
       outputFormat: 'jsonl',
       buildArgs: (request) => [
+        // --approve-for-me supplies Codex's workspace-write sandbox; combining
+        // it with --sandbox is rejected by the current CLI.
         'exec',
         '--json',
         '--ephemeral',
@@ -53,8 +51,6 @@ export class CodexAdapter extends CommandAgentExecutionAdapter {
         request.workspacePath,
         '--model',
         request.model,
-        '--sandbox',
-        'workspace-write',
         '--approve-for-me',
         request.instructions,
       ],
@@ -94,10 +90,8 @@ export class GrokAdapter extends CommandAgentExecutionAdapter {
       ],
       requiredVersionTokens: ['grok'],
       expectedExecutableName: 'grok',
-      credentialEnvironmentKeys: ['XAI_API_KEY'],
-      processRunner: createIsolatedGrokProcessRunner(
-        options.processRunner ?? createAgentProcessRunner()
-      ),
+      credentialEnvironmentKeys: ['XAI_API_KEY', 'GROK_HOME'],
+      processRunner: options.processRunner ?? createAgentProcessRunner(),
       enforceExecutableProvenance: options.processRunner === undefined,
       outputFormat: 'json',
       buildArgs: (request) => [
@@ -120,9 +114,9 @@ export class GrokAdapter extends CommandAgentExecutionAdapter {
         '--allow',
         'Bash',
         '--tools',
-        'Read,Grep,Edit,Bash',
+        'run_terminal_cmd,grep,read_file,search_replace',
         '--disallowed-tools',
-        'MCPTool,WebFetch,WebSearch',
+        'web_search,web_fetch,search_tool,use_tool,Agent',
         '--no-subagents',
         '--no-plan',
         '--no-memory',
@@ -190,33 +184,3 @@ export type ModelExecutionAdapterBinding = {
   modelProviderId: ModelProviderId;
   adapter: AgentExecutionAdapter;
 };
-
-/**
- * Grok reads user-level config, sessions, hooks and compatibility integrations
- * from its home directory. Give every ShipGraph invocation an empty private
- * home, while retaining only the provider credential explicitly allow-listed
- * by the command adapter. The directory is removed after each child exits.
- */
-function createIsolatedGrokProcessRunner(runner: AgentProcessRunner): AgentProcessRunner {
-  return {
-    run: async (spec) => {
-      const home = mkdtempSync(join(tmpdir(), 'shipgraph-grok-home-'));
-      try {
-        return await runner.run({
-          ...spec,
-          env: {
-            ...spec.env,
-            HOME: home,
-            GROK_HOME: home,
-            XDG_CONFIG_HOME: home,
-            XDG_DATA_HOME: home,
-            XDG_CACHE_HOME: home,
-            GROK_WORKFLOWS: '0',
-          },
-        });
-      } finally {
-        rmSync(home, { recursive: true, force: true });
-      }
-    },
-  };
-}
