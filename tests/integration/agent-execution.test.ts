@@ -1033,6 +1033,64 @@ describe('AGENT-001 durable execution', () => {
     expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(0);
   });
 
+  it('persists a safety-limit outcome when no registered fallback is usable', async () => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    const providerAdapter: ModelProviderAdapter = {
+      providerId: 'opencode-go',
+      family: 'opencode',
+      displayName: 'OpenCode Go',
+      probe: async () => ({
+        availability: 'available', auth: 'authenticated', version: 'test',
+        capabilities: ['implementation'],
+      }),
+      discoverModels: async () => ({
+        status: 'known',
+        models: [{ modelId: 'opencode/no-fallback', capabilities: ['implementation'] }],
+      }),
+    };
+    const unavailableFallback: ModelProviderAdapter = {
+      providerId: 'codex',
+      family: 'openai',
+      displayName: 'Codex',
+      probe: async () => ({
+        availability: 'unavailable', auth: 'unknown', version: 'test',
+        capabilities: [], reason: 'test fallback unavailable',
+      }),
+      discoverModels: async () => ({ status: 'unknown', reason: 'provider unavailable' }),
+    };
+    const modelService = new ModelRoutingService({
+      db: harness.db,
+      projectId,
+      adapters: [providerAdapter, unavailableFallback],
+      executionAdapters: [{ modelProviderId: 'opencode-go', adapter: harness.options.adapter }],
+    });
+    const createRunId = () => {
+      harness?.db.prepare(
+        'UPDATE provider_health SET active_runs = ? WHERE project_id = ? AND provider_id = ?'
+      ).run(1_000_000, projectId, 'opencode-go');
+      return 'no-usable-fallback-run';
+    };
+
+    const result = await modelService.executeRoutedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, createRunId },
+      {
+        task: 'implementation',
+        risk: 'medium',
+        envelope: {
+          mode: 'balanced', maxConcurrentTickets: 1,
+          activeConcurrentTickets: 0, budgetRemaining: 'unknown',
+        },
+      },
+      { ticketId: 'AG-001', instructions: 'record no-fallback reservation exhaustion' }
+    );
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe('safety_limit');
+    expect(result.run.failureReason).toMatch(/No fallback provider could be reserved/);
+    expect((harness.options.adapter as FakeAdapter).requests).toHaveLength(0);
+  });
+
   it('releases a bound route when the prepared workspace becomes invalid before launch', async () => {
     harness = await createHarness();
     const projectId = (await inspectAgentProjectId(harness)).projectId;
