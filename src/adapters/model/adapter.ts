@@ -503,6 +503,7 @@ export function createModelProviderAdapters(options: {
       requiredVersionTokens: ['codex-cli'],
     },
     grok: {
+      executable: 'grok',
       catalogArgs: ['models'],
       authArgs: ['models'],
       authenticatedOutputTokens: ['You are logged in with grok.com.'],
@@ -511,7 +512,8 @@ export function createModelProviderAdapters(options: {
       requiredVersionTokens: ['grok'],
     },
     gemini: {
-      catalogArgs: ['models'],
+      executable: 'agy',
+      catalogArgs: ['--output-format', 'json', 'models'],
       expectedExecutableName: 'agy',
       versionPattern: SEMVER_VERSION_PATTERN,
     },
@@ -631,24 +633,39 @@ function parseAntigravityModelCatalog(
   raw: string,
   fallbackCapabilities: readonly ModelCapability[]
 ): ModelDiscoveryResult {
+  if (Buffer.byteLength(raw, 'utf8') > CATALOG_OUTPUT_BYTES) {
+    return { status: 'unknown', reason: 'provider catalog output exceeded the safety limit' };
+  }
   const output = redactSensitiveText(raw).trim();
-  const lines = output.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
-  const models = lines.flatMap((line) => {
-    if (line === 'Fetching available models...') return [];
-    const match = /^([^\t]+)\t.+$/u.exec(line);
-    if (match === null || !isValidModelId(match[1])) return [undefined];
-    return [{
-      modelId: match[1],
-      capabilities: normalizeCapabilities(fallbackCapabilities),
-    }];
-  });
-  if (models.length === 0 || models.some((model) => model === undefined)) {
+  try {
+    const machineReadableOutput = output.startsWith('Fetching available models...\n')
+      ? output.slice('Fetching available models...\n'.length)
+      : output;
+    const parsed: unknown = JSON.parse(machineReadableOutput);
+    if (typeof parsed !== 'object' || parsed === null) throw new Error('unsupported JSON shape');
+    const record = parsed as Record<string, unknown>;
+    const command = record.command;
+    if (
+      typeof command !== 'object' ||
+      command === null ||
+      (command as Record<string, unknown>).name !== 'models'
+    ) {
+      throw new Error('unsupported JSON shape');
+    }
+    const data = (command as Record<string, unknown>).data;
+    if (typeof data !== 'object' || data === null || !Array.isArray((data as Record<string, unknown>).models)) {
+      throw new Error('unsupported JSON shape');
+    }
+    return parseModelCatalog(
+      JSON.stringify({ models: (data as Record<string, unknown>).models }),
+      fallbackCapabilities
+    );
+  } catch {
     return {
       status: 'unknown',
       reason: 'provider catalog output was not a supported machine-readable model list',
     };
   }
-  return { status: 'known', models: uniqueSortedModels(models as DiscoveredModel[]) };
 }
 
 function parseCapabilities(raw: string): CapabilityProbeResult {

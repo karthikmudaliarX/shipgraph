@@ -74,17 +74,26 @@ describe('MODEL-001 provider adapters', () => {
         '  - grok-future-model',
         '  * grok-future-default (default)',
       ].join('\n')],
-      ['gemini', [
-        'Fetching available models...',
-        'gemini-future-model\tGemini Future Model',
-        'gemini-future-fast\tGemini Future Fast',
-      ].join('\n')],
+      ['gemini', `Fetching available models...\n${JSON.stringify({
+        conversation_id: '',
+        status: 'SUCCESS',
+        response: 'gemini-future-model\tGemini Future Model\n',
+        command: {
+          name: 'models',
+          data: {
+            models: [
+              { id: 'gemini-future-model', label: 'Gemini Future Model' },
+              { id: 'gemini-future-fast', label: 'Gemini Future Fast' },
+            ],
+          },
+        },
+      })}`],
     ]);
     const versionOutput: Record<string, string> = {
       '/tmp/opencode': '1.18.21\n',
       '/tmp/codex': 'codex-cli 0.147.0\n',
-      '/tmp/grok': 'grok 1.0.13 (current)\n',
-      '/tmp/agy': '1.1.22\n',
+      grok: 'grok 1.0.13 (current)\n',
+      agy: '1.1.22\n',
     };
     const calls: Array<{ command: string; args: readonly string[] }> = [];
     const runner: ModelProviderProcessRunner = {
@@ -99,7 +108,7 @@ describe('MODEL-001 provider adapters', () => {
         if (spec.command === '/tmp/codex' && spec.args[0] === 'login') {
           return result({ stdout: 'Logged in using ChatGPT\n' });
         }
-        if (spec.command === '/tmp/grok' && spec.args[0] === 'models') {
+        if (spec.command === 'grok' && spec.args[0] === 'models') {
           return result({ stdout: catalogOutput.get('grok') ?? '' });
         }
         const providerId = spec.command === '/tmp/opencode'
@@ -114,8 +123,6 @@ describe('MODEL-001 provider adapters', () => {
       configuration: {
         opencodeGo: { executable: '/tmp/opencode' },
         codex: { executable: '/tmp/codex' },
-        grok: { executable: '/tmp/grok' },
-        gemini: { executable: '/tmp/agy' },
       },
       processRunner: runner,
       cwd: '/tmp/project',
@@ -157,7 +164,20 @@ describe('MODEL-001 provider adapters', () => {
       ['models', 'opencode-go', '--pure'],
       ['debug', 'models'],
       ['models'],
-      ['models'],
+      ['--output-format', 'json', 'models'],
+    ]);
+    expect(calls.map((call) => call.command)).toEqual([
+      '/tmp/opencode',
+      '/tmp/opencode',
+      '/tmp/codex',
+      '/tmp/codex',
+      'grok',
+      'grok',
+      'agy',
+      '/tmp/opencode',
+      '/tmp/codex',
+      'grok',
+      'agy',
     ]);
   });
 
@@ -177,8 +197,12 @@ describe('MODEL-001 provider adapters', () => {
         family: 'google',
         displayName: 'Gemini',
         executable: '/tmp/agy',
-        catalogArgs: ['models'],
-        processRunner: { run: async () => result({ stdout: 'Fetching available models...\n' }) },
+        catalogArgs: ['--output-format', 'json', 'models'],
+        processRunner: {
+          run: async () => result({
+            stdout: JSON.stringify({ items: [{ id: 'unsupported-model' }] }),
+          }),
+        },
         cwd: '/tmp/project',
       }),
     ];
