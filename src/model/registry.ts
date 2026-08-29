@@ -12,6 +12,7 @@ import {
 } from '../adapters/agent/registry.js';
 import type {
   AgentCapability,
+  AgentExecutionAdapter,
   AgentExecutionRequest,
   AgentExecutionResult,
   AgentProbeResult,
@@ -189,6 +190,26 @@ export class ProviderRegistry {
 
   public executionCapabilitiesFor(target: ModelExecutionTarget): readonly AgentCapability[] {
     return this.executionAdapters.capabilities(target);
+  }
+
+  public executionLimitsFor(
+    target: ModelExecutionTarget
+  ): Partial<Pick<AgentExecutionAdapter, 'supportsTokenLimit' | 'supportsCostLimit' | 'reportsUsage'>> {
+    const binding = this.executionAdapters.get(target.modelProviderId);
+    if (binding === undefined) {
+      throw new Error(`No AGENT-001 execution adapter is bound to ${target.modelProviderId}`);
+    }
+    return {
+      ...(binding.adapter.supportsTokenLimit === undefined
+        ? {}
+        : { supportsTokenLimit: binding.adapter.supportsTokenLimit }),
+      ...(binding.adapter.supportsCostLimit === undefined
+        ? {}
+        : { supportsCostLimit: binding.adapter.supportsCostLimit }),
+      ...(binding.adapter.reportsUsage === undefined
+        ? {}
+        : { reportsUsage: binding.adapter.reportsUsage }),
+    };
   }
 
   public getRepository(): ModelRepository {

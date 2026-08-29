@@ -318,14 +318,16 @@ export class ModelRoutingService {
     let lastError: unknown;
 
     for (let attempt = 0; attempt < providerCount; attempt += 1) {
-      if (input.safety?.maxAttempts !== undefined && attempt >= input.safety.maxAttempts) {
-        throw new Error('Execution attempt budget exhausted; NEEDS_HUMAN approval is required');
-      }
       const preview = await this.route({ ...request, excludeProviders: [...excluded] });
       const target = this.resolveExecutionTarget(preview);
-      const executionSafety = input.safety === undefined
+      const routeRequiresApproval = preview.risk === 'high' || preview.risk === 'critical';
+      const executionSafety = input.safety === undefined && !routeRequiresApproval
         ? undefined
-        : { ...input.safety, attempt: (input.safety.attempt ?? 1) + attempt };
+        : {
+            ...(input.safety ?? {}),
+            ...(routeRequiresApproval ? { risk: preview.risk } : {}),
+            attempt: (input.safety?.attempt ?? 1) + attempt,
+          };
       const executionInput = executionSafety === undefined
         ? input
         : { ...input, safety: executionSafety };
@@ -339,6 +341,20 @@ export class ModelRoutingService {
           model: target.modelId,
         }
       );
+      if (input.safety?.maxAttempts === 0) {
+        const result = await executeAgentTask(
+          { ...options, adapter: this.createExecutionAdapter(target) },
+          {
+            ...executionInput,
+            runId: prepared.run.id,
+            task: target.task,
+            provider: target.provider,
+            modelProviderId: target.modelProviderId,
+            model: target.modelId,
+          }
+        );
+        return { ...result, decision: preview };
+      }
       const otherProviders = this.registry.list()
         .map((provider) => provider.providerId)
         .filter((providerId) => providerId !== target.modelProviderId);
@@ -351,11 +367,20 @@ export class ModelRoutingService {
         });
       } catch (error) {
         lastError = error;
-        await abandonPreparedAgentTaskRun(
-          options,
-          prepared.run.id,
-          `Selected provider could not be reserved before launch: ${error instanceof Error ? error.message : String(error)}`
-        );
+        const finalAllowedAttempt = input.safety?.maxAttempts !== undefined &&
+          attempt + 1 >= input.safety.maxAttempts;
+        const finalProviderAttempt = attempt === providerCount - 1;
+        const reason = `Selected provider could not be reserved before launch: ${error instanceof Error ? error.message : String(error)}`;
+        if (finalAllowedAttempt || finalProviderAttempt) {
+          const exhausted = await abandonPreparedAgentTaskRun(
+            options,
+            prepared.run.id,
+            `${reason}; execution safety limit is exhausted`,
+            'safety_limit'
+          );
+          return { created: true, run: exhausted, decision: preview };
+        }
+        await abandonPreparedAgentTaskRun(options, prepared.run.id, reason);
         excluded.add(target.modelProviderId);
         continue;
       }
@@ -430,6 +455,7 @@ export class ModelRoutingService {
     return {
       provider: target.provider,
       capabilities: this.registry.executionCapabilitiesFor(target),
+      ...this.registry.executionLimitsFor(target),
       probe: () => this.registry.probeExecution(target),
       execute: (request) => this.registry.executeExecution(target, request),
     };

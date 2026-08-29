@@ -85,6 +85,7 @@ export type RunRecord = {
   stderrTruncated?: boolean;
   evidence?: NormalizedAgentEvidence;
   instructionsSha256?: string;
+  safetyPolicySha256?: string;
   timeoutMs?: number;
 };
 
@@ -538,12 +539,13 @@ export function createRunRepository(db: DbConnection): RunRepository {
             model_provider_id, task,
             provider_session_id, provider_process_id, exit_code, termination_signal,
             timed_out, cancelled, failure_category, failure_reason, stdout, stderr,
-            stdout_truncated, stderr_truncated, evidence_json, instructions_sha256, timeout_ms
+            stdout_truncated, stderr_truncated, evidence_json, instructions_sha256, timeout_ms,
+            safety_policy_sha256
           ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?
+            ?, ?
           )`
         ).run(
           run.id,
@@ -576,7 +578,8 @@ export function createRunRepository(db: DbConnection): RunRepository {
           run.stderrTruncated === true ? 1 : 0,
           run.evidence === undefined ? null : JSON.stringify(run.evidence),
           run.instructionsSha256 ?? null,
-          run.timeoutMs ?? null
+          run.timeoutMs ?? null,
+          run.safetyPolicySha256 ?? null
         );
       } catch (error) {
         if (error instanceof Error && /UNIQUE constraint failed/.test(error.message)) {
@@ -978,6 +981,9 @@ function rowToRun(row: Record<string, unknown>): RunRecord {
       ? {}
       : { evidence: normalizedAgentEvidenceSchema.parse(JSON.parse(requiredString(row, 'evidence_json'))) }),
     instructionsSha256: requiredString(row, 'instructions_sha256'),
+    ...(row.safety_policy_sha256 === null || row.safety_policy_sha256 === undefined
+      ? {}
+      : { safetyPolicySha256: requiredString(row, 'safety_policy_sha256') }),
     timeoutMs: requiredInteger(row, 'timeout_ms'),
   }) as AgentRunRecord;
   return durable;
@@ -1009,6 +1015,7 @@ function validateRunForPersistence(db: DbConnection, run: RunRecord): void {
     stdoutTruncated: run.stdoutTruncated ?? false,
     stderrTruncated: run.stderrTruncated ?? false,
     instructionsSha256: run.instructionsSha256,
+    safetyPolicySha256: run.safetyPolicySha256,
     timeoutMs: run.timeoutMs,
   });
   if (

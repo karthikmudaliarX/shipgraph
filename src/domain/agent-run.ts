@@ -138,6 +138,8 @@ export const agentRunRecordSchema = z.object({
   stderrTruncated: z.boolean(),
   evidence: normalizedAgentEvidenceSchema.optional(),
   instructionsSha256: z.string().regex(/^[0-9a-f]{64}$/),
+  /** Canonical digest of the effective KAR-7 policy bound at preparation. */
+  safetyPolicySha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   timeoutMs: z.number().int().positive().max(MAX_AGENT_TIMEOUT_MS),
 }).strict();
 

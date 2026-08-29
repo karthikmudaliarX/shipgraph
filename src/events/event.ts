@@ -88,6 +88,7 @@ export const runCreatedPayloadSchema = z.object({
   createdAt: timestampSchema.optional(),
   timeoutMs: z.number().int().positive().optional(),
   instructionsSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  safetyPolicySha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
 }).strict();
 
 export const runCompletedPayloadSchema = z.object({
