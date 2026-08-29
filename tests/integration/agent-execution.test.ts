@@ -519,6 +519,7 @@ describe('AGENT-001 durable execution', () => {
 
   it('requires measurable usage when a cost budget is configured', async () => {
     harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
     const result = await executeAgentTask(harness.options, {
       ticketId: 'AG-001',
       modelProviderId: 'opencode-go',
@@ -530,6 +531,10 @@ describe('AGENT-001 durable execution', () => {
     expect(result.run.status).toBe('NEEDS_HUMAN');
     expect(result.run.failureCategory).toBe('safety_limit');
     expect(result.run.failureReason).toMatch(/did not report cost/);
+    expect(createModelRepository(harness.db).listUsage(projectId)
+      .filter((entry) => entry.runId === result.run.id)).toMatchObject([
+        { inputTokens: 'unknown', outputTokens: 'unknown', cost: 'unknown' },
+      ]);
   });
 
   it('allows a high-risk run only when explicit approval is present', async () => {

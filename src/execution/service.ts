@@ -403,7 +403,8 @@ export async function executeAgentTask(
       normalizedResult,
       createEventId,
       now,
-      executionStopped
+      executionStopped,
+      normalized.safety
     );
     return { created: true, run: finalRun };
   } catch (error) {
@@ -1079,12 +1080,13 @@ function finalizeRun(
   result: AgentExecutionResult,
   createEventId: () => string,
   now: () => string,
-  executionStopped: boolean
+  executionStopped: boolean,
+  safety: AgentSafetyPolicy
 ): AgentRunRecord {
   const completedAt = now();
   const finalize = options.db.transaction((): AgentRunRecord => {
     const repository = createRunRepository(options.db);
-    appendExecutionUsage(options, run, result, completedAt);
+    appendExecutionUsage(options, run, result, completedAt, safety);
     const update: RunUpdate = {
       completedAt,
       updatedAt: completedAt,
@@ -1151,9 +1153,14 @@ function appendExecutionUsage(
   options: AgentExecutionServiceOptions,
   run: AgentRunRecord,
   result: AgentExecutionResult,
-  recordedAt: string
+  recordedAt: string,
+  safety: AgentSafetyPolicy
 ): void {
-  if (result.usage === undefined || run.modelProviderId === undefined || run.task === undefined) {
+  if (
+    (result.usage === undefined && safety.maxTokens === undefined && safety.maxCost === undefined) ||
+    run.modelProviderId === undefined ||
+    run.task === undefined
+  ) {
     return;
   }
   const modelRepository = createModelRepository(options.db);
@@ -1174,9 +1181,9 @@ function appendExecutionUsage(
     elapsedMs,
     outcome: usageOutcome(result.outcome),
     outcomeQuality: result.outcome === 'SUCCEEDED' ? 'good' : 'unknown',
-    inputTokens: result.usage.inputTokens,
-    outputTokens: result.usage.outputTokens,
-    cost: result.usage.cost,
+    inputTokens: result.usage?.inputTokens,
+    outputTokens: result.usage?.outputTokens,
+    cost: result.usage?.cost,
   });
 }
 
