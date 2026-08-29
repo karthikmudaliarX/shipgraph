@@ -18,6 +18,7 @@ import { initProject } from '../../src/cli/init.js';
 import { syncBacklogProject } from '../../src/cli/backlog.js';
 import {
   createWorkspace,
+  getVerifiedWorkspaceForExecution,
   inspectWorkspace,
   listWorkspacesForProject,
   removeWorkspace,
@@ -542,6 +543,37 @@ describe('WORK-001 isolated worktree lifecycle', () => {
     const missing = await inspectWorkspace(harness.options, 'TA-1');
     expect(missing.health).toBe('MISSING');
     expect(missing.live.exists).toBe(false);
+  });
+
+  it('refuses review or repair when the ticket branch is replaced with unrelated history', async () => {
+    harness = setupProject(2, [ticket('TA-1')]);
+    const created = await createWorkspace(harness.options, 'TA-1');
+    const wsPath = created.workspace.worktreePath;
+
+    // Keep the recorded ShipGraph branch and worktree identity, but replace
+    // its tip with a new root commit that is not descended from the recorded
+    // base. Changed-workspace validation must reject this substituted history.
+    git(wsPath, 'switch', '--orphan', 'substituted-history');
+    writeFileSync(join(wsPath, 'unrelated-history.txt'), 'not the ticket history\n');
+    git(wsPath, 'add', '-A');
+    git(
+      wsPath,
+      '-c',
+      'user.email=shipgraph-test@example.com',
+      '-c',
+      'user.name=ShipGraph Test',
+      'commit',
+      '-m',
+      'unrelated history'
+    );
+    git(wsPath, 'branch', '--force', created.workspace.branchName);
+    git(wsPath, 'switch', created.workspace.branchName);
+
+    await expect(
+      getVerifiedWorkspaceForExecution(harness.options, 'TA-1', 'changed')
+    ).rejects.toThrow(/does not descend from recorded base SHA/);
+    expect(git(wsPath, 'symbolic-ref', '--short', 'HEAD')).toBe(created.workspace.branchName);
+    expect(git(wsPath, 'rev-parse', 'HEAD')).not.toBe(created.workspace.baseSha);
   });
 
   it('removes a clean workspace, retains its branch, and marks REMOVED', async () => {

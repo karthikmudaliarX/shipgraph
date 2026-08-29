@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { modelProviderIdSchema, modelTaskTypeSchema } from './model-provider.js';
 
 /** Durable lifecycle states for one provider execution attempt. */
 export const AGENT_RUN_STATES = [
@@ -55,7 +56,7 @@ export const agentFailureCategorySchema = z.enum(AGENT_FAILURE_CATEGORIES);
  * remain bounded process output and are never persisted as arbitrary JSON.
  */
 export const normalizedAgentEvidenceSchema = z.object({
-  outputFormat: z.literal('jsonl'),
+  outputFormat: z.enum(['json', 'jsonl']),
   eventCount: z.number().int().min(1).max(10_000),
   eventTypes: z.array(z.string().min(1).max(80)).max(64),
   summary: z.string().max(4_096).optional(),
@@ -76,6 +77,8 @@ export const agentExecutionResultSchema = z.object({
   terminationSignal: z.string().min(1).max(32).optional(),
   timedOut: z.boolean(),
   cancelled: z.boolean(),
+  /** Concrete command adapters must prove their owned process group stopped. */
+  processGroupStopped: z.boolean().optional(),
   stdout: z.string().max(AGENT_OUTPUT_LIMIT_BYTES),
   stderr: z.string().max(AGENT_OUTPUT_LIMIT_BYTES),
   stdoutTruncated: z.boolean(),
@@ -100,6 +103,10 @@ export const agentRunRecordSchema = z.object({
   branchName: z.string().min(1).max(256),
   status: agentRunStateSchema,
   provider: z.string().min(1).max(64),
+  /** MODEL-001 identity when this run came from a routed model selection. */
+  modelProviderId: modelProviderIdSchema.optional(),
+  /** The MODEL-001 task this durable run was prepared to perform. */
+  task: modelTaskTypeSchema.optional(),
   model: z.string().min(1).max(256),
   createdAt: timestampSchema,
   startedAt: timestampSchema,

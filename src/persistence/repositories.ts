@@ -23,6 +23,13 @@ import {
   type AgentRunRecord,
   type NormalizedAgentEvidence,
 } from '../domain/agent-run.js';
+import {
+  modelProviderIdSchema,
+  modelTaskTypeSchema,
+  MODEL_PROVIDER_TO_AGENT_PROVIDER,
+  type ModelProviderId,
+  type ModelTaskType,
+} from '../domain/model-provider.js';
 
 export type ProjectRecord = {
   id: string;
@@ -59,6 +66,8 @@ export type RunRecord = {
   workspaceId?: string;
   workspacePath?: string;
   provider?: string;
+  modelProviderId?: ModelProviderId;
+  task?: ModelTaskType;
   model?: string;
   createdAt?: string;
   updatedAt?: string;
@@ -526,10 +535,16 @@ export function createRunRepository(db: DbConnection): RunRepository {
           `INSERT INTO runs (
             id, ticket_id, base_sha, branch_name, status, started_at, completed_at,
             project_id, workspace_id, workspace_path, provider, model, created_at, updated_at,
+            model_provider_id, task,
             provider_session_id, provider_process_id, exit_code, termination_signal,
             timed_out, cancelled, failure_category, failure_reason, stdout, stderr,
             stdout_truncated, stderr_truncated, evidence_json, instructions_sha256, timeout_ms
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?
+          )`
         ).run(
           run.id,
           run.ticketId,
@@ -545,6 +560,8 @@ export function createRunRepository(db: DbConnection): RunRepository {
           run.model ?? null,
           run.createdAt ?? run.startedAt,
           run.updatedAt ?? run.startedAt,
+          run.modelProviderId ?? null,
+          run.task ?? null,
           run.providerSessionId ?? null,
           run.providerProcessId ?? null,
           run.exitCode ?? null,
@@ -924,6 +941,12 @@ function rowToRun(row: Record<string, unknown>): RunRecord {
     workspaceId: requiredString(row, 'workspace_id'),
     workspacePath: requiredString(row, 'workspace_path'),
     provider: requiredString(row, 'provider'),
+    ...(row.model_provider_id === null || row.model_provider_id === undefined
+      ? {}
+      : { modelProviderId: modelProviderIdSchema.parse(requiredString(row, 'model_provider_id')) }),
+    ...(row.task === null || row.task === undefined
+      ? {}
+      : { task: modelTaskTypeSchema.parse(requiredString(row, 'task')) }),
     model: requiredString(row, 'model'),
     createdAt: requiredString(row, 'created_at'),
     updatedAt: requiredString(row, 'updated_at'),
@@ -974,6 +997,8 @@ function validateRunForPersistence(db: DbConnection, run: RunRecord): void {
     workspaceId: run.workspaceId,
     workspacePath: run.workspacePath,
     provider: run.provider,
+    ...(run.modelProviderId === undefined ? {} : { modelProviderId: run.modelProviderId }),
+    ...(run.task === undefined ? {} : { task: run.task }),
     model: run.model,
     createdAt: run.createdAt ?? run.startedAt,
     updatedAt: run.updatedAt ?? run.startedAt,
@@ -986,6 +1011,14 @@ function validateRunForPersistence(db: DbConnection, run: RunRecord): void {
     instructionsSha256: run.instructionsSha256,
     timeoutMs: run.timeoutMs,
   });
+  if (
+    run.modelProviderId !== undefined &&
+    MODEL_PROVIDER_TO_AGENT_PROVIDER[run.modelProviderId] !== run.provider
+  ) {
+    throw new Error(
+      `Agent run ${run.id} model provider ${run.modelProviderId} does not use AGENT provider ${run.provider}`
+    );
+  }
   const ticket = db
     .prepare('SELECT project_id FROM tickets WHERE id = ?')
     .get(run.ticketId) as { project_id: string } | undefined;

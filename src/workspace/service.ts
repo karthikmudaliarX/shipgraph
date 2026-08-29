@@ -20,11 +20,13 @@ import {
   inspectWorktreeState,
   isStrictlyClean,
   hasGitlinkEntries,
+  isCommitAncestor,
   resolveCommitSha,
   resolveGitRepositoryIdentity,
   sameGitRepositoryIdentity,
   type GitRepositoryIdentity,
   type GitRunner,
+  type WorktreeLiveState,
 } from '../git/service.js';
 import { assertSafeShipgraphPaths } from '../utils/paths.js';
 import { loadConfig } from '../config/loader.js';
@@ -784,13 +786,18 @@ async function creationBelongsToReservation(
   }
 }
 
-/** All READY-validation invariants. Fail closed on any mismatch. */
-async function verifyReadyWorkspace(
+/**
+ * Validate the immutable identity of a recorded workspace without imposing a
+ * lifecycle-specific HEAD or cleanliness requirement. The branch, path,
+ * repository and creation audit remain fixed even after an implementation
+ * agent has changed the ticket worktree.
+ */
+async function verifyWorkspaceIdentity(
   options: WorkspaceServiceOptions,
   runner: GitRunner,
   row: WorkspaceRecord,
   worktreeRoot: string
-): Promise<void> {
+): Promise<WorktreeLiveState> {
   await assertCurrentRepositoryBinding(options, runner, row.projectId, row.sourceRepositoryPath);
   // Deterministic derivation must reproduce the recorded identity exactly.
   if (deriveBranchName(row.ticketId) !== row.branchName) {
@@ -812,14 +819,34 @@ async function verifyReadyWorkspace(
   if (!live.registered) {
     throw new Error(`Path is not a registered Git worktree: ${row.worktreePath}`);
   }
-  if (live.head !== row.baseSha) {
-    throw new Error(
-      `Worktree HEAD ${live.head ?? '<unknown>'} does not equal recorded base SHA ${row.baseSha}`
-    );
+  if (live.head === undefined) {
+    throw new Error(`Worktree HEAD is unknown: ${row.worktreePath}`);
   }
   if (live.branch !== `refs/heads/${row.branchName}`) {
     throw new Error(
       `Checked-out branch ${live.branch ?? '<detached>'} does not equal ${row.branchName}`
+    );
+  }
+  const audit = recordedCreationBaseSha(options, row.projectId, row.id, row.ticketId);
+  if (audit.error !== undefined || audit.baseSha !== row.baseSha) {
+    throw new Error(
+      `Workspace ${row.id} does not match its immutable creation provenance; refusing execution`
+    );
+  }
+  return live;
+}
+
+/** All READY-validation invariants. Fail closed on any mismatch. */
+async function verifyReadyWorkspace(
+  options: WorkspaceServiceOptions,
+  runner: GitRunner,
+  row: WorkspaceRecord,
+  worktreeRoot: string
+): Promise<void> {
+  const live = await verifyWorkspaceIdentity(options, runner, row, worktreeRoot);
+  if (live.head !== row.baseSha) {
+    throw new Error(
+      `Worktree HEAD ${live.head ?? '<unknown>'} does not equal recorded base SHA ${row.baseSha}`
     );
   }
   if (live.clean !== true) {
@@ -832,22 +859,51 @@ async function verifyReadyWorkspace(
       `New worktree contains untracked or ignored files: ${row.worktreePath}`
     );
   }
-  const audit = recordedCreationBaseSha(options, row.projectId, row.id, row.ticketId);
-  if (audit.error !== undefined || audit.baseSha !== row.baseSha) {
+}
+
+/**
+ * Validate a workspace that a review or repair agent must inspect after an
+ * implementation has changed it. Its immutable identity is still checked,
+ * but tracked/untracked changes and the current branch HEAD are the work being
+ * reviewed or repaired, not evidence that ShipGraph should refuse the handoff.
+ */
+async function verifyChangedWorkspace(
+  options: WorkspaceServiceOptions,
+  runner: GitRunner,
+  row: WorkspaceRecord,
+  worktreeRoot: string
+): Promise<void> {
+  const live = await verifyWorkspaceIdentity(options, runner, row, worktreeRoot);
+  if (
+    live.head === undefined ||
+    !(await isCommitAncestor(runner, row.sourceRepositoryPath, row.baseSha, live.head))
+  ) {
     throw new Error(
-      `Workspace ${row.id} does not match its immutable creation provenance; refusing execution`
+      `Worktree HEAD ${live.head ?? '<unknown>'} does not descend from recorded base SHA ${row.baseSha}; ` +
+        'refusing review or repair of substituted history'
+    );
+  }
+  if (live.statusKnown !== true) {
+    throw new Error(
+      `Worktree status could not be verified for review or repair: ${row.worktreePath}`
     );
   }
 }
 
 /**
  * Return only a workspace whose complete WORK-001 identity is live and
- * healthy. This is the execution hand-off boundary: it never creates a root,
- * recreates a worktree, adopts a path, or falls back to the source checkout.
+ * healthy. `ready` is the pre-implementation proof (exact base and clean);
+ * `changed` is the review/repair proof (same repository/path/branch/audit,
+ * while allowing the implementation's changed contents). This is the
+ * execution hand-off boundary: it never creates a root, recreates a worktree,
+ * adopts a path, or falls back to the source checkout.
  */
+export type WorkspaceExecutionValidation = 'ready' | 'changed';
+
 export async function getVerifiedWorkspaceForExecution(
   options: WorkspaceServiceOptions,
-  ticketIdInput: string
+  ticketIdInput: string,
+  validation: WorkspaceExecutionValidation = 'ready'
 ): Promise<WorkspaceRecord> {
   const { runner } = defaults(options);
   assertSafeTicketId(ticketIdInput);
@@ -878,7 +934,16 @@ export async function getVerifiedWorkspaceForExecution(
     context.canonicalProjectDir,
     false
   );
-  await verifyReadyWorkspace(options, runner, row, worktreeRoot);
+  switch (validation) {
+    case 'ready':
+      await verifyReadyWorkspace(options, runner, row, worktreeRoot);
+      break;
+    case 'changed':
+      await verifyChangedWorkspace(options, runner, row, worktreeRoot);
+      break;
+    default:
+      throw new Error(`Unsupported workspace execution validation: ${String(validation)}`);
+  }
   return row;
 }
 

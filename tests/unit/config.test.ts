@@ -44,6 +44,50 @@ project:
     expect(config.execution.maxRepairIterations).toBe(6);
     expect(config.release.requireHumanApproval).toBe(true);
     expect(config.agents.implementer).toBe('opencode');
+    expect(config.routing?.mode).toBeUndefined();
+  });
+
+  it('accepts routing mode and provider catalog configuration without model names', () => {
+    const config = parseConfig(`
+version: 1
+project:
+  name: providers
+  repository: owner/providers
+routing:
+  mode: eco
+providers:
+  opencodeGo:
+    executable: /usr/local/bin/opencode
+    catalogArgs:
+      - models
+    authArgs:
+      - auth
+      - list
+    authenticatedOutputTokens:
+      - OpenCode Go
+`);
+
+    expect(config.routing?.mode).toBe('eco');
+    expect(config.providers?.opencodeGo?.executable).toBe('/usr/local/bin/opencode');
+    expect(config.providers?.opencodeGo?.catalogArgs).toEqual(['models']);
+    expect(config.providers?.opencodeGo?.authArgs).toEqual(['auth', 'list']);
+    expect(config.providers?.opencodeGo?.authenticatedOutputTokens).toEqual(['OpenCode Go']);
+  });
+
+  it('rejects authentication configuration without positive evidence', () => {
+    expect(() => validateConfig({
+      version: 1,
+      project: { name: 'providers', repository: 'owner/providers' },
+      providers: { codex: { authArgs: ['login', 'status'] } },
+    })).toThrow(/authentication probes require command arguments and positive output evidence/);
+  });
+
+  it('rejects NUL characters in provider command configuration', () => {
+    expect(() => validateConfig({
+      version: 1,
+      project: { name: 'providers', repository: 'owner/providers' },
+      providers: { codex: { executable: 'codex\0unsafe' } },
+    })).toThrow();
   });
 
   it('rejects an invalid config shape', () => {

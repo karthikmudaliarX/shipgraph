@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { AGENT_PROVIDERS } from '../domain/agent-provider.js';
+import { MODEL_ROUTING_MODES } from '../domain/model-provider.js';
+import type { ModelProviderConfiguration } from '../adapters/model/adapter.js';
 
 /**
  * Supported ShipGraph configuration major versions.
@@ -33,6 +35,67 @@ export const releaseConfigSchema = z.object({
   requireExactShaReviews: z.boolean().default(true),
 }).strict();
 
+export const modelProviderSettingsSchema = z.object({
+  enabled: z.boolean().default(true),
+  executable: z.string().min(1).max(4_096).refine((value) => !value.includes('\0'), {
+    message: 'provider executable cannot contain NUL characters',
+  }).optional(),
+  capabilityArgs: z.array(
+    z.string().min(1).max(1_024).refine((value) => !value.includes('\0'), {
+      message: 'provider capability arguments cannot contain NUL characters',
+    })
+  ).max(32).optional(),
+  catalogArgs: z.array(
+    z.string().min(1).max(1_024).refine((value) => !value.includes('\0'), {
+      message: 'provider catalog arguments cannot contain NUL characters',
+    })
+  ).max(32).optional(),
+  authArgs: z.array(
+    z.string().min(1).max(1_024).refine((value) => !value.includes('\0'), {
+      message: 'provider authentication arguments cannot contain NUL characters',
+    })
+  ).max(32).optional(),
+  authenticatedOutputTokens: z.array(
+    z.string().min(1).max(1_024).refine((value) => !value.includes('\0'), {
+      message: 'provider authenticated output tokens cannot contain NUL characters',
+    })
+  ).max(32).optional(),
+  unauthenticatedOutputTokens: z.array(
+    z.string().min(1).max(1_024).refine((value) => !value.includes('\0'), {
+      message: 'provider unauthenticated output tokens cannot contain NUL characters',
+    })
+  ).max(32).optional(),
+}).strict().superRefine((settings, context) => {
+  const hasAuthArgs = settings.authArgs !== undefined;
+  const hasPositiveEvidence = settings.authenticatedOutputTokens !== undefined;
+  const hasNegativeEvidence = settings.unauthenticatedOutputTokens !== undefined;
+  if (hasAuthArgs !== hasPositiveEvidence) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: hasAuthArgs ? ['authenticatedOutputTokens'] : ['authArgs'],
+      message: 'authentication probes require command arguments and positive output evidence',
+    });
+  }
+  if (hasNegativeEvidence && !hasAuthArgs) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['unauthenticatedOutputTokens'],
+      message: 'unauthenticated output evidence requires authentication command arguments',
+    });
+  }
+}).default({});
+
+export const modelProvidersConfigSchema = z.object({
+  opencodeGo: modelProviderSettingsSchema.optional(),
+  codex: modelProviderSettingsSchema.optional(),
+  grok: modelProviderSettingsSchema.optional(),
+  gemini: modelProviderSettingsSchema.optional(),
+}).strict();
+
+export const routingConfigSchema = z.object({
+  mode: z.enum(MODEL_ROUTING_MODES).default('balanced'),
+}).strict();
+
 export const agentsConfigSchema = z.object({
   implementer: z.enum(AGENT_PROVIDERS).default('opencode'),
   reviewers: z
@@ -46,6 +109,8 @@ export const shipgraphConfigSchema = z.object({
   execution: executionConfigSchema.default({}),
   release: releaseConfigSchema.default({}),
   agents: agentsConfigSchema.default({}),
+  providers: modelProvidersConfigSchema.optional(),
+  routing: routingConfigSchema.optional(),
 }).strict();
 
 export type ShipgraphConfig = z.infer<typeof shipgraphConfigSchema>;
@@ -53,6 +118,9 @@ export type ProjectConfig = z.infer<typeof projectConfigSchema>;
 export type ExecutionConfig = z.infer<typeof executionConfigSchema>;
 export type ReleaseConfig = z.infer<typeof releaseConfigSchema>;
 export type AgentsConfig = z.infer<typeof agentsConfigSchema>;
+export type ModelProvidersConfig = z.infer<typeof modelProvidersConfigSchema>;
+export type RoutingConfig = z.infer<typeof routingConfigSchema>;
+export type { ModelProviderConfiguration };
 
 export type PersistedProjectIdentity = {
   name: string;

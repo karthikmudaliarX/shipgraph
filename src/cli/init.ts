@@ -49,6 +49,17 @@ agents:
   implementer: opencode
   reviewers:
     - correctness
+routing:
+  mode: balanced
+providers:
+  opencodeGo:
+    enabled: true
+  codex:
+    enabled: true
+  grok:
+    enabled: true
+  gemini:
+    enabled: true
 `;
 
 /**

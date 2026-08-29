@@ -246,6 +246,229 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE status IN ('CREATED', 'STARTING', 'RUNNING');
     `,
   },
+  {
+    version: 7,
+    name: 'persist_model_provider_control_plane',
+    up: `
+      CREATE TABLE IF NOT EXISTS provider_registry (
+        project_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        family TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        configured INTEGER NOT NULL CHECK (configured IN (0, 1)),
+        availability TEXT NOT NULL,
+        version TEXT,
+        capabilities_json TEXT NOT NULL,
+        catalog_status TEXT NOT NULL CHECK (catalog_status IN ('known', 'unknown')),
+        catalog_reason TEXT,
+        checked_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, provider_id),
+        FOREIGN KEY (project_id) REFERENCES projects(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS model_catalog (
+        project_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        capabilities_json TEXT NOT NULL,
+        context_window INTEGER,
+        discovered_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, provider_id, model_id),
+        FOREIGN KEY (project_id) REFERENCES projects(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_model_catalog_provider
+        ON model_catalog(project_id, provider_id, model_id);
+
+      CREATE TABLE IF NOT EXISTS provider_health (
+        project_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        auth TEXT NOT NULL,
+        quota_pressure TEXT NOT NULL,
+        quota_remaining_json TEXT NOT NULL,
+        quota_reset_at_json TEXT NOT NULL,
+        recent_failure_count INTEGER NOT NULL,
+        active_runs INTEGER NOT NULL,
+        max_concurrent_runs_json TEXT NOT NULL,
+        last_failure_at TEXT,
+        last_success_at TEXT,
+        checked_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (project_id, provider_id),
+        FOREIGN KEY (project_id) REFERENCES projects(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS usage_ledger (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        task TEXT NOT NULL,
+        retry_count INTEGER NOT NULL,
+        elapsed_ms INTEGER NOT NULL,
+        outcome TEXT NOT NULL,
+        outcome_quality TEXT NOT NULL,
+        input_tokens_json TEXT NOT NULL,
+        output_tokens_json TEXT NOT NULL,
+        cost_json TEXT NOT NULL,
+        quota_remaining_json TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        FOREIGN KEY (project_id) REFERENCES projects(id),
+        FOREIGN KEY (run_id) REFERENCES runs(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_usage_ledger_project_time
+        ON usage_ledger(project_id, recorded_at, id);
+      CREATE INDEX IF NOT EXISTS idx_usage_ledger_provider_model
+        ON usage_ledger(project_id, provider_id, model_id, recorded_at);
+
+      CREATE TRIGGER IF NOT EXISTS usage_ledger_are_append_only_update
+      BEFORE UPDATE ON usage_ledger
+      BEGIN
+        SELECT RAISE(ABORT, 'usage ledger is append-only');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_ledger_are_append_only_delete
+      BEFORE DELETE ON usage_ledger
+      BEGIN
+        SELECT RAISE(ABORT, 'usage ledger is append-only');
+      END;
+
+      CREATE TABLE IF NOT EXISTS routing_decisions (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        task TEXT NOT NULL,
+        risk TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        provider_family TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        candidates_considered INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (project_id) REFERENCES projects(id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_routing_decisions_project_time
+        ON routing_decisions(project_id, created_at, id);
+
+      CREATE TRIGGER IF NOT EXISTS routing_decisions_are_append_only_update
+      BEFORE UPDATE ON routing_decisions
+      BEGIN
+        SELECT RAISE(ABORT, 'routing decisions are append-only');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS routing_decisions_are_append_only_delete
+      BEFORE DELETE ON routing_decisions
+      BEGIN
+        SELECT RAISE(ABORT, 'routing decisions are append-only');
+      END;
+    `,
+  },
+  {
+    version: 8,
+    name: 'bind_model_capacity_reservations',
+    up: `
+      ALTER TABLE usage_ledger ADD COLUMN routing_decision_id TEXT
+        REFERENCES routing_decisions(id);
+
+      CREATE TABLE IF NOT EXISTS provider_capacity_reservations (
+        routing_decision_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('active', 'released')),
+        reserved_at TEXT NOT NULL,
+        released_at TEXT,
+        FOREIGN KEY (project_id) REFERENCES projects(id),
+        FOREIGN KEY (routing_decision_id) REFERENCES routing_decisions(id)
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_capacity_request
+        ON provider_capacity_reservations(project_id, request_id);
+      CREATE INDEX IF NOT EXISTS idx_provider_capacity_provider_status
+        ON provider_capacity_reservations(project_id, provider_id, status);
+    `,
+  },
+  {
+    version: 9,
+    name: 'bind_model_capacity_to_runs',
+    up: `
+      ALTER TABLE provider_capacity_reservations ADD COLUMN run_id TEXT
+        REFERENCES runs(id);
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_capacity_run
+        ON provider_capacity_reservations(project_id, run_id)
+        WHERE run_id IS NOT NULL AND status = 'active';
+    `,
+  },
+  {
+    version: 10,
+    name: 'guard_model_usage_finalization',
+    up: `
+      -- Do not rewrite or reject legacy duplicate telemetry during upgrade.
+      -- New finalization attempts are rejected by this append-only guard.
+      CREATE TRIGGER IF NOT EXISTS usage_ledger_one_finalization_per_route
+      BEFORE INSERT ON usage_ledger
+      WHEN NEW.routing_decision_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM usage_ledger
+          WHERE routing_decision_id = NEW.routing_decision_id
+        )
+      BEGIN
+        SELECT RAISE(ABORT, 'usage ledger routing decision was already finalized');
+      END;
+    `,
+  },
+  {
+    version: 11,
+    name: 'persist_provider_execution_capability',
+    up: `
+      -- Metadata availability is not execution availability. Keep the
+      -- capability-probed AGENT-001 surface explicit and fail closed for old
+      -- provider rows until a current execution probe succeeds.
+      ALTER TABLE provider_registry ADD COLUMN execution_status TEXT NOT NULL DEFAULT 'unknown'
+        CHECK (execution_status IN ('available', 'unavailable', 'unknown'));
+      ALTER TABLE provider_registry ADD COLUMN execution_provider TEXT;
+      ALTER TABLE provider_registry ADD COLUMN execution_reason TEXT;
+    `,
+  },
+  {
+    version: 12,
+    name: 'persist_model_routing_request_fingerprint',
+    up: `
+      -- Older persisted decisions have no safe record of their selection
+      -- constraints; new durable routes carry a canonical request fingerprint
+      -- and refuse replay when it is absent.
+      ALTER TABLE routing_decisions ADD COLUMN request_fingerprint TEXT;
+    `,
+  },
+  {
+    version: 13,
+    name: 'persist_model_provider_identity_on_runs',
+    up: `
+      -- AGENT-001 keeps its provider-neutral adapter identity in provider;
+      -- routed MODEL-001 runs also retain the concrete model-provider identity
+      -- so ACP-backed Grok and Antigravity runs cannot be substituted.
+      ALTER TABLE runs ADD COLUMN model_provider_id TEXT;
+    `,
+  },
+  {
+    version: 14,
+    name: 'persist_model_task_on_runs',
+    up: `
+      -- A prepared AGENT-001 run is an execution contract for one MODEL-001
+      -- task. Legacy rows may remain NULL, but new route reservations must
+      -- match this value exactly before they can start.
+      ALTER TABLE runs ADD COLUMN task TEXT
+        CHECK (task IS NULL OR task IN ('implementation', 'review', 'repair'));
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {

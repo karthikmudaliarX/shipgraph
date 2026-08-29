@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -45,7 +45,13 @@ describe('OpenCode adapter and process boundary', () => {
     let captured: AgentProcessSpec | undefined;
     const adapter = new OpenCodeAdapter({
       executable: '/opt/opencode',
-      environment: { FAKE_PROVIDER_MODE: 'success' },
+      environment: {
+        FAKE_PROVIDER_MODE: 'success',
+        OPENCODE_API_KEY: 'opencode-secret',
+        OPENAI_API_KEY: 'codex-secret',
+        XAI_API_KEY: 'grok-secret',
+        GOOGLE_GENERATIVE_AI_API_KEY: 'gemini-secret',
+      },
       processRunner: {
         run: async (spec) => {
           captured = spec;
@@ -55,6 +61,7 @@ describe('OpenCode adapter and process boundary', () => {
             unexpectedTermination: false,
             timedOut: false,
             cancelled: false,
+            processGroupStopped: true,
             outputLimitExceeded: false,
             stdout: `${successfulOutput}\n`,
             stderr: '',
@@ -87,6 +94,10 @@ describe('OpenCode adapter and process boundary', () => {
     ]);
     expect(captured?.env.OPENCODE_CLIENT).toBe('shipgraph');
     expect(captured?.env.FAKE_PROVIDER_MODE).toBe('success');
+    expect(captured?.env.OPENCODE_API_KEY).toBe('opencode-secret');
+    expect(captured?.env.OPENAI_API_KEY).toBeUndefined();
+    expect(captured?.env.XAI_API_KEY).toBeUndefined();
+    expect(captured?.env.GOOGLE_GENERATIVE_AI_API_KEY).toBeUndefined();
     expect(result).toMatchObject({
       outcome: 'SUCCEEDED',
       providerSessionId: 'ses_123',
@@ -107,6 +118,36 @@ describe('OpenCode adapter and process boundary', () => {
     await expect(
       adapter.execute({ ...request, provider: 'codex' })
     ).rejects.toThrow(/cannot execute provider codex/);
+  });
+
+  it('pins the OpenCode executable identity between capability probe and launch', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'shipgraph-opencode-probe-'));
+    temporaryDirectories.push(directory);
+    const executable = join(directory, 'opencode');
+    const replacement = join(directory, 'replacement');
+    const script = `#!/bin/sh
+case "$1 $2" in
+  "--version ") printf '1.0.0\\n' ;;
+  "run --help") printf '%s\\n' '--format --dir --model --auto' ;;
+  *) printf '%s\\n' '${successfulOutput}' ;;
+esac
+`;
+    writeFileSync(executable, script, { mode: 0o700 });
+    writeFileSync(replacement, script, { mode: 0o700 });
+    chmodSync(executable, 0o700);
+    chmodSync(replacement, 0o700);
+
+    const adapter = new OpenCodeAdapter({
+      executable,
+      cwd: process.cwd(),
+      environment: { PATH: directory },
+    });
+    await expect(adapter.probe()).resolves.toMatchObject({ available: true, version: '1.0.0' });
+    renameSync(replacement, executable);
+
+    await expect(adapter.execute({ ...request, workspacePath: process.cwd() })).rejects.toThrow(
+      /executable provenance changed/
+    );
   });
 
   it.each([
@@ -130,6 +171,7 @@ describe('OpenCode adapter and process boundary', () => {
           unexpectedTermination: false,
           timedOut: false,
           cancelled: false,
+          processGroupStopped: true,
           outputLimitExceeded: false,
           stdout: successfulOutput,
           stderr: '',
@@ -159,7 +201,48 @@ describe('OpenCode adapter and process boundary', () => {
     expect(redactSensitiveText('token=super-secret api_key="secret-value" ghp_12345678901234567890')).toContain(
       '[REDACTED_SECRET]'
     );
+    const redactedJson = redactSensitiveText(
+      '{"client_secret":"json-secret-value","apiKey":"another-json-secret"}'
+    );
+    expect(redactedJson).toBe(
+      '{"client_secret":"[REDACTED_SECRET]","apiKey":"[REDACTED_SECRET]"}'
+    );
+    expect(redactedJson).not.toContain('json-secret-value');
+    expect(redactedJson).not.toContain('another-json-secret');
+    expect(redactSensitiveText('Authorization: Basic dXNlcjpzdXBlci1zZWNyZXQ=')).toBe(
+      'Authorization: Basic [REDACTED_SECRET]'
+    );
+    expect(redactSensitiveText('{"secretAccessKey":"aws-secret-value"}')).toBe(
+      '{"secretAccessKey":"[REDACTED_SECRET]"}'
+    );
+    const escapedJson = String.raw`{\"client_secret\":\"escaped-json-secret\"}`;
+    expect(redactSensitiveText(escapedJson)).toBe(
+      String.raw`{\"client_secret\":\"[REDACTED_SECRET]\"}`
+    );
+    expect(redactSensitiveText('{"credential":"credential-secret"}')).toBe(
+      '{"credential":"[REDACTED_SECRET]"}'
+    );
+    const punctuationSecret = redactSensitiveText(
+      '{"token":"secret,with}json]punctuation"}'
+    );
+    expect(punctuationSecret).toBe('{"token":"[REDACTED_SECRET]"}');
+    expect(punctuationSecret).not.toContain('secret,with}json]punctuation');
+    const escapedPunctuationSecret = redactSensitiveText(
+      JSON.stringify({ token: 'secret,with}]"quoted' })
+    );
+    expect(escapedPunctuationSecret).toBe('{"token":"[REDACTED_SECRET]"}');
     expect(redactSensitiveText('ordinary project output')).toBe('ordinary project output');
+  });
+
+  it('redacts authorization headers and provider token formats before persistence', () => {
+    const redacted = redactSensitiveText(
+      'Authorization: Bearer bearer-secret-value-123456 xai-xxxxxxxxxxxxxxxxxxxx '
+        + 'AIzaSyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+    );
+    expect(redacted).not.toContain('bearer-secret-value-123456');
+    expect(redacted).not.toContain('xai-xxxxxxxxxxxxxxxxxxxx');
+    expect(redacted).not.toContain('AIzaSyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
+    expect(redacted.match(/\[REDACTED_SECRET\]/gu)).toHaveLength(3);
   });
 
   it('redacts credential-shaped provider evidence before it crosses the adapter boundary', async () => {
@@ -170,6 +253,7 @@ describe('OpenCode adapter and process boundary', () => {
           unexpectedTermination: false,
           timedOut: false,
           cancelled: false,
+          processGroupStopped: true,
           outputLimitExceeded: false,
           stdout: `${JSON.stringify({ type: 'text', text: 'api_key=secret-value' })}\n`,
           stderr: '',
@@ -209,6 +293,35 @@ describe('OpenCode adapter and process boundary', () => {
     expect(Buffer.byteLength(result.stdout, 'utf8')).toBeLessThanOrEqual(128);
     expect(result.stdoutTruncated).toBe(true);
     expect(result.outputLimitExceeded).toBe(true);
+  });
+
+  it('does not report a clean result while a normal provider leader leaves a descendant', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'shipgraph-agent-descendant-'));
+    temporaryDirectories.push(directory);
+    const script = join(directory, 'provider.sh');
+    writeFileSync(
+      script,
+      '#!/bin/sh\n' +
+        `sh -c 'echo $$ > "${join(directory, 'descendant.pid')}"; sleep 30' >/dev/null 2>/dev/null &\n` +
+        `while [ ! -s "${join(directory, 'descendant.pid')}" ]; do sleep 0.01; done\n` +
+        'printf "provider-complete\\n"\n'
+    );
+    chmodSync(script, 0o700);
+
+    const result = await createAgentProcessRunner().run({
+      command: script,
+      args: [],
+      cwd: directory,
+      env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+      timeoutMs: 5_000,
+      maxOutputBytes: 128,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.unexpectedTermination).toBe(true);
+    expect(result.processGroupStopped).toBe(true);
+    const descendantPid = Number(readFileSync(join(directory, 'descendant.pid'), 'utf8').trim());
+    expect(() => process.kill(descendantPid, 0)).toThrow();
   });
 
   it('terminates the provider process tree on timeout', async () => {
@@ -251,6 +364,21 @@ describe('OpenCode adapter and process boundary', () => {
     expect(result.cancelled).toBe(true);
     expect(result.processId).toBeUndefined();
     expect(result.spawnErrorCode).toBeUndefined();
+  });
+
+  it('proves no process group started when spawn fails without assigning a PID', async () => {
+    const result = await createAgentProcessRunner().run({
+      command: '/definitely/not/a/real/provider',
+      args: [],
+      cwd: process.cwd(),
+      env: {},
+      timeoutMs: 1_000,
+      maxOutputBytes: 128,
+    });
+
+    expect(result.processId).toBeUndefined();
+    expect(result.spawnErrorCode).toBe('ENOENT');
+    expect(result.processGroupStopped).toBe(true);
   });
 
   it('rejects unsafe inherited environment controls', () => {

@@ -10,16 +10,23 @@ import {
   type NormalizedAgentEvidence,
 } from '../../domain/agent-run.js';
 import {
+  resolveExecutable,
+  sameExecutable,
+  probeCommandSurface,
+  type ResolvedExecutable,
+} from './command.js';
+import {
   createAgentProcessRunner,
   type AgentProcessResult,
   type AgentProcessRunner,
 } from './process.js';
 import { redactSensitiveText } from './safety.js';
+import { registerModelProviderAdapter } from './model-provider-owner.js';
 
 export { redactSensitiveText } from './safety.js';
 
 const OPENCODE_PROVIDER = 'opencode' as const;
-const PROBE_TIMEOUT_MS = 5_000;
+const OPENCODE_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
 const MAX_EVENT_TYPES = 64;
 const MAX_SUMMARY_LENGTH = 4_096;
 
@@ -35,18 +42,28 @@ const SAFE_INHERITED_ENVIRONMENT = [
   'XDG_CONFIG_HOME',
   'XDG_DATA_HOME',
   'XDG_CACHE_HOME',
-  // OpenCode can use these provider credentials. They are passed to the
-  // child only and are never included in a persisted run record.
-  'OPENAI_API_KEY',
-  'ANTHROPIC_API_KEY',
-  'GOOGLE_GENERATIVE_AI_API_KEY',
-  'XAI_API_KEY',
+  // Only the OpenCode account credential crosses this process boundary. Other
+  // provider credentials are intentionally filtered even when callers supply
+  // them as explicit environment additions.
   'OPENCODE_API_KEY',
 ] as const;
+
+const PROVIDER_CREDENTIAL_ENVIRONMENT_KEYS = new Set([
+  'CODEX_HOME',
+  'GROK_HOME',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'GOOGLE_API_KEY',
+  'GOOGLE_GENERATIVE_AI_API_KEY',
+  'GEMINI_API_KEY',
+  'XAI_API_KEY',
+  'OPENCODE_API_KEY',
+]);
 
 const BLOCKED_ENVIRONMENT_KEYS = /^(?:GIT_|NODE_OPTIONS$|BASH_ENV$|ENV$|CDPATH$|LD_PRELOAD$|DYLD_)/;
 
 export type OpenCodeAdapterOptions = {
+  enabled?: boolean;
   executable?: string;
   processRunner?: AgentProcessRunner;
   /** Explicit test/provider environment additions; never persisted. */
@@ -63,39 +80,52 @@ type ParsedOpenCodeOutput = {
 /** First concrete adapter for the provider-neutral AGENT-001 boundary. */
 export class OpenCodeAdapter implements AgentExecutionAdapter {
   public readonly provider = OPENCODE_PROVIDER;
-  public readonly capabilities = ['execute'] as const;
+  // OpenCode's verified headless coding surface is task-neutral; the
+  // provider-neutral request carries implementation, review, or repair
+  // instructions explicitly.
+  public readonly capabilities = ['execute', 'review', 'repair'] as const;
 
+  private readonly enabled: boolean;
   private readonly executable: string;
   private readonly processRunner: AgentProcessRunner;
   private readonly environment: Readonly<Record<string, string>>;
+  private readonly enforceExecutableProvenance: boolean;
+  private resolvedExecutable: ResolvedExecutable | undefined;
 
   public constructor(options: OpenCodeAdapterOptions = {}) {
+    this.enabled = options.enabled ?? true;
     this.executable = options.executable ?? 'opencode';
     this.processRunner = options.processRunner ?? createAgentProcessRunner();
     this.environment = buildEnvironment(options.environment);
+    this.enforceExecutableProvenance = options.processRunner === undefined;
+    registerModelProviderAdapter(this, 'opencode-go');
   }
 
   public async probe(): Promise<AgentProbeResult> {
-    const result = await this.processRunner.run({
-      command: this.executable,
-      args: ['--version'],
-      cwd: process.cwd(),
-      env: this.environment,
-      timeoutMs: PROBE_TIMEOUT_MS,
-      maxOutputBytes: 8_192,
-    });
-    if (result.spawnErrorCode !== undefined) {
+    const resolved = this.enforceExecutableProvenance && this.enabled
+      ? resolveExecutable(this.executable, process.cwd(), this.environment.PATH)
+      : undefined;
+    if (this.enforceExecutableProvenance && this.enabled && resolved === undefined) {
       return {
         available: false,
-        reason: `OpenCode could not be started (${result.spawnErrorCode})`,
+        reason: 'OpenCode executable was not found or is not executable',
       };
     }
-    if (result.timedOut) return { available: false, reason: 'OpenCode version probe timed out' };
-    if (result.exitCode !== 0) {
-      return { available: false, reason: 'OpenCode version probe failed' };
-    }
-    const version = result.stdout.trim().split(/\r?\n/u)[0]?.trim();
-    return version ? { available: true, version } : { available: true };
+    const result = await probeCommandSurface({
+      displayName: 'OpenCode',
+      enabled: this.enabled,
+      executable: resolved?.path ?? this.executable,
+      configuredExecutable: this.executable,
+      probeArgs: ['run', '--help'],
+      requiredProbeTokens: ['--format', '--dir', '--model', '--auto'],
+      versionPattern: OPENCODE_VERSION_PATTERN,
+      expectedExecutableName: 'opencode',
+      processRunner: this.processRunner,
+      cwd: process.cwd(),
+      environment: this.environment,
+    });
+    this.resolvedExecutable = result.available ? resolved : undefined;
+    return result;
   }
 
   public async execute(request: AgentExecutionRequest): Promise<AgentExecutionResult> {
@@ -109,7 +139,7 @@ export class OpenCodeAdapter implements AgentExecutionAdapter {
     }
 
     const processResult = await this.processRunner.run({
-      command: this.executable,
+      command: this.executableForExecution(),
       // `--dir` and `cwd` are both pinned to the exact verified worktree. The
       // command is spawned without a shell, so instructions remain one argv
       // value and cannot become shell syntax.
@@ -134,6 +164,20 @@ export class OpenCodeAdapter implements AgentExecutionAdapter {
 
     return normalizeOpenCodeResult(processResult);
   }
+
+  private executableForExecution(): string {
+    if (!this.enforceExecutableProvenance) return this.executable;
+    if (this.resolvedExecutable === undefined) {
+      throw new Error('OpenCode execution requires a successful capability probe');
+    }
+    const current = resolveExecutable(this.executable, process.cwd(), this.environment.PATH);
+    if (current === undefined || !sameExecutable(current, this.resolvedExecutable)) {
+      throw new Error(
+        `OpenCode executable provenance changed after capability probing; refusing launch`
+      );
+    }
+    return current.path;
+  }
 }
 
 export function createOpenCodeAdapter(options: OpenCodeAdapterOptions = {}): OpenCodeAdapter {
@@ -155,6 +199,9 @@ function buildEnvironment(
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) {
       throw new Error(`Invalid OpenCode environment variable name: ${key}`);
     }
+    if (PROVIDER_CREDENTIAL_ENVIRONMENT_KEYS.has(key) && key !== 'OPENCODE_API_KEY') {
+      continue;
+    }
     environment[key] = value;
   }
   environment.OPENCODE_CLIENT = 'shipgraph';
@@ -171,6 +218,7 @@ function normalizeOpenCodeResult(result: AgentProcessResult): AgentExecutionResu
       : { terminationSignal: result.terminationSignal }),
     timedOut: result.timedOut,
     cancelled: result.cancelled,
+    processGroupStopped: result.processGroupStopped === true,
     stdout: redactSensitiveText(result.stdout),
     stderr: redactSensitiveText(result.stderr),
     stdoutTruncated: result.stdoutTruncated,

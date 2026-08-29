@@ -89,9 +89,28 @@ WORK-001 shipped:
 - Persistent, provenance-checked isolated Git worktrees
 - Deterministic workspace lifecycle and fail-closed cleanup
 
-AGENT-001 (this PR) adds one bounded provider execution in an already verified
-workspace. It does not choose work, select models, create pull requests, review
-changes, or merge code.
+AGENT-001 shipped one bounded provider execution in an already verified
+workspace. MODEL-001 (this PR) adds deterministic provider discovery, health,
+usage telemetry, model routing and capability-probed execution-adapter
+selection. Neither ticket chooses work, creates pull requests, reviews changes,
+or merges code.
+
+The execution envelope is a Scheduler-owned snapshot: MODEL-001 validates the
+supplied global mode, budget and ticket counts but does not claim global ticket
+capacity. A route supplied with a durable `--run-id` reserves a provider run
+slot. Known provider limits are enforced directly; when a provider exposes no
+trustworthy concurrency limit, ShipGraph uses a conservative one-at-a-time
+local admission bound, without estimating quota. The durable run must already
+identify the exact AGENT adapter and discovered model. A route without one is a
+non-persistent decision preview. `resolveExecutionTarget()` returns only an
+opaque target; only `ModelRoutingService.executeSelectedAgentTask()` accepts an
+active run-bound reservation and enters the AGENT-001 lifecycle. Usage finalization releases an execution-bound
+reservation only when the same durable run and routing decision ID are
+supplied and the owning AGENT run is terminal. A normal terminal result
+releases the slot; timeout, cancellation, output-limit termination and
+ambiguous recovery retain it until provider-process ownership is explicitly
+reconciled. Usage finalization remains append-only and idempotent for capacity
+release.
 
 ## CLI examples
 
@@ -127,7 +146,27 @@ shipgraph ready
 shipgraph ready --json
 
 # Execute one explicitly supplied task with the OpenCode adapter
-shipgraph agent run AG-001 --model openai/gpt-5 --instructions "Implement the approved task"
+shipgraph agent run AG-001 --model <discovered-provider/model> --instructions "Implement the approved task"
+
+# Explicitly select the shared ACP boundary's Antigravity adapter
+shipgraph agent run AG-001 --provider acp --model-provider gemini --model <discovered-provider/model> --instructions "Implement the approved task"
+
+# Let MODEL-001 select, reserve, and execute the provider in one operation
+shipgraph agent run-routed AG-001 --task implementation --risk medium --mode balanced --max-concurrent-tickets 2 --active-concurrent-tickets 0 --instructions "Implement the approved task"
+
+# Refresh capability-probed provider and model metadata
+shipgraph providers refresh --json
+
+# Preview a route; --run-id <run-id> binds it to a durable execution reservation
+# Retries without --request-id use the durable run ID as their stable key
+shipgraph providers route implementation --risk medium --mode balanced --run-id <run-id> --json
+# After a terminal run releases that reservation, use a new request ID for a new attempt. Explicit recovery retains it for human reconciliation.
+# After independently proving the provider process stopped, release retained capacity explicitly:
+shipgraph agent reconcile <run-id> --execution-stopped
+# Usage records telemetry only; it never releases provider capacity.
+
+# Inspect persisted provider health and discovered models
+shipgraph providers list --json
 
 # Inspect durable execution state
 shipgraph agent inspect <run-id> --json
@@ -137,6 +176,21 @@ shipgraph agent list --json
 `init` never persists the template's empty identity. Once a valid configuration
 has initialized the database, both `init` and `status` fail closed if the file's
 identity or validated configuration drifts from the persisted project.
+
+Provider settings identify executable and catalog surfaces, not model names.
+They are trusted local configuration: do not point them at repository-supplied
+or otherwise untrusted executables. OpenCode, Codex and Antigravity may use the
+current user's HOME/XDG stores for existing CLI authentication; ShipGraph's
+environment filtering is not host-filesystem or credential-store isolation.
+OpenCode, Codex, Grok and Antigravity (`agy`) have conservative execution
+defaults; Grok uses its `workspace` sandbox profile and Antigravity uses its
+supported `--sandbox` mode. Configure a provider's machine-readable
+`catalogArgs` when its model catalog surface is available. A documented login
+status surface can be configured with `authArgs` and positive output markers;
+without positive authentication evidence a provider remains non-routable.
+Providers without a supported catalog or capability-probed execution surface
+remain unknown/disabled rather than being guessed into service.
+Unsupported quota, token and cost values stay `unknown`.
 
 ## Installation
 
@@ -163,15 +217,17 @@ Shipped:
 - **CORE-001 ✅** — Project foundation and safe state boundary
 - **CORE-002 ✅** — Persistent backlog DAG and eligibility scheduler
 - **WORK-001 ✅** — Safe isolated git worktree lifecycle
+- **AGENT-001 ✅** — Provider-neutral bounded agent execution and OpenCode adapter
 
 Active in this PR:
 
-- **AGENT-001** — Provider-neutral bounded agent execution and OpenCode adapter
-  ([design](docs/architecture/EXECUTION.md))
+- **MODEL-001** — Provider registry, dynamic model catalog, capability-probed
+  execution adapters, health, usage ledger and deterministic routing
+  ([design](docs/architecture/ADAPTERS.md))
 
 Next up:
 
-- **MODEL-001** — Dynamic model routing and compute-aware execution policy
+- **KAR-7** — Execution budgets and human safety gates
 
 Planned successor tickets (not yet implemented):
 

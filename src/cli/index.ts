@@ -7,14 +7,44 @@ import { initProject } from './init.js';
 import { showStatus } from './status.js';
 import { syncBacklogProject, validateBacklogProject } from './backlog.js';
 import { emitReady, showReady } from './ready.js';
+import {
+  modelServiceOptions,
+  parseMode,
+  parseKnownInteger,
+  parseKnownNumber,
+  parseRisk,
+  parseTask,
+  providerIdForCli,
+  runProvidersList,
+  runProvidersRefresh,
+  runProvidersRoute,
+  runProvidersUsage,
+} from './providers.js';
+import {
+  createCodexAdapter,
+  createGeminiAdapter,
+  createGrokAdapter,
+} from '../adapters/agent/providers.js';
 import { createOpenCodeAdapter } from '../adapters/agent/opencode.js';
+import type { AgentExecutionAdapter } from '../adapters/agent/adapter.js';
 import { AGENT_PROVIDERS, type AgentProvider } from '../domain/agent-provider.js';
 import { DEFAULT_AGENT_TIMEOUT_MS } from '../domain/agent-run.js';
+import {
+  normalizeModelProviderId,
+  type ModelProviderId,
+} from '../domain/model-provider.js';
+import type {
+  ModelProviderAdapterConfiguration,
+  ModelProviderConfiguration,
+} from '../adapters/model/adapter.js';
+import { agentProviderForModelProvider } from '../adapters/agent/registry.js';
 import {
   agentServiceOptions,
   runAgentInspect,
   runAgentList,
+  runAgentReconcile,
   runAgentRecover,
+  runRoutedAgentTask,
   runAgentTask,
 } from './agent.js';
 import { assertSafeShipgraphPaths } from '../utils/paths.js';
@@ -166,6 +196,172 @@ export function createProgram(): Command {
       }
     });
 
+  const providers = program
+    .command('providers')
+    .description('Discover provider/model metadata and choose a deterministic route');
+
+  providers
+    .command('refresh')
+    .description('Probe configured providers and refresh their current model catalogs')
+    .option('--provider <provider>', 'refresh one provider')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--json', 'output structured provider metadata as JSON')
+    .action(async (options: { provider?: string; projectDir?: string; json?: boolean }) => {
+      let db: DbConnection | undefined;
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        db = openInitializedDatabase(projectDir);
+        const report = await runProvidersRefresh(
+          modelServiceOptions(db, projectDir),
+          options.provider
+        );
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          for (const provider of report.providers as Array<Record<string, unknown>>) {
+            console.log(
+              `${String(provider.providerId)}  ${String(provider.availability)}  ` +
+                `${String(provider.catalogStatus)}  models=${String(provider.modelCount)}`
+            );
+          }
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
+        db?.close();
+      }
+    });
+
+  providers
+    .command('list')
+    .description('List the persisted provider health and discovered model metadata')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--json', 'output structured provider metadata as JSON')
+    .action((options: { projectDir?: string; json?: boolean }) => {
+      let db: DbConnection | undefined;
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        db = openInitializedDatabase(projectDir);
+        const report = runProvidersList(modelServiceOptions(db, projectDir));
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          for (const provider of report.providers as Array<Record<string, unknown>>) {
+            const health = provider.health as Record<string, unknown> | undefined;
+            console.log(
+              `${String(provider.providerId)}  ${String(provider.availability)}  ` +
+                `health=${String(health?.status ?? 'unknown')}  models=${String(provider.modelCount)}`
+            );
+          }
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
+        db?.close();
+      }
+    });
+
+  providers
+    .command('route <task>')
+    .description('Choose one provider/model for an explicitly supplied engineering step')
+    .requiredOption('--risk <risk>', 'task risk: low, medium, high, or critical')
+    .option('--mode <mode>', 'execution mode: eco, balanced, or max')
+    .option('--run-id <run-id>', 'durable execution run to reserve provider capacity for')
+    .option('--request-id <request-id>', 'stable routing request id for replay')
+    .option('--implementation-provider <provider>', 'provider used for implementation diversity')
+    .option('--fallback-from <provider>', 'provider to exclude for a fallback attempt')
+    .option('--exclude-provider <provider...>', 'additional providers to exclude')
+    .option('--max-concurrent-tickets <count>', 'global execution capacity')
+    .option('--active-concurrent-tickets <count>', 'currently active global executions')
+    .option('--budget-remaining <value>', 'known budget value or unknown')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--json', 'output the routing decision as JSON')
+    .action(async (
+      task: string,
+      options: {
+        risk: string;
+        mode?: string;
+        runId?: string;
+        requestId?: string;
+        implementationProvider?: string;
+        fallbackFrom?: string;
+        excludeProvider?: string[];
+        maxConcurrentTickets?: string;
+        activeConcurrentTickets?: string;
+        budgetRemaining?: string;
+        projectDir?: string;
+        json?: boolean;
+      }
+    ) => {
+      let db: DbConnection | undefined;
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        db = openInitializedDatabase(projectDir);
+        const report = await runProvidersRoute(
+          modelServiceOptions(db, projectDir),
+          {
+            task: parseTask(task),
+            risk: parseRisk(options.risk),
+            mode: options.mode === undefined ? '' : parseMode(options.mode),
+            runId: options.runId,
+            requestId: options.requestId,
+            ...(options.implementationProvider === undefined
+              ? {}
+              : { implementationProvider: providerIdForCli(options.implementationProvider) }),
+            ...(options.fallbackFrom === undefined
+              ? {}
+              : { fallbackFromProvider: providerIdForCli(options.fallbackFrom) }),
+            ...(options.excludeProvider === undefined
+              ? {}
+              : { excludeProviders: options.excludeProvider.map(providerIdForCli) }),
+            maxConcurrentTickets: options.maxConcurrentTickets,
+            activeConcurrentTickets: options.activeConcurrentTickets,
+            budgetRemaining: options.budgetRemaining,
+          }
+        );
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          const decision = report.decision as Record<string, unknown>;
+          console.log(`Provider: ${String(decision.providerId)}`);
+          console.log(`Model: ${String(decision.modelId)}`);
+          console.log(`Reason: ${String(decision.reason)}`);
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
+        db?.close();
+      }
+    });
+
+  providers
+    .command('usage')
+    .description('List append-only provider usage telemetry')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--json', 'output usage telemetry as JSON')
+    .action((options: { projectDir?: string; json?: boolean }) => {
+      let db: DbConnection | undefined;
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        db = openInitializedDatabase(projectDir);
+        const report = runProvidersUsage(modelServiceOptions(db, projectDir));
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          for (const entry of report.usage as Array<Record<string, unknown>>) {
+            console.log(
+              `${String(entry.runId)}  ${String(entry.providerId)}  ${String(entry.modelId)}  ` +
+                `${String(entry.outcome)}  elapsed=${String(entry.elapsedMs)}ms`
+            );
+          }
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
+        db?.close();
+      }
+    });
+
   const workspace = program
     .command('workspace')
     .description('Manage isolated Git workspaces for eligible tickets');
@@ -299,8 +495,9 @@ export function createProgram(): Command {
     .description('Run one provider adapter in the ticket\'s READY workspace')
     .requiredOption('--model <provider/model>', 'explicit provider model identifier')
     .requiredOption('--instructions <text>', 'instructions supplied to the coding agent')
-    .option('--provider <provider>', 'provider adapter', 'opencode')
-    .option('--executable <path>', 'OpenCode executable or absolute test double', 'opencode')
+    .option('--provider <provider>', 'AGENT adapter identity (opencode, codex, or acp)', 'opencode')
+    .option('--model-provider <provider>', 'MODEL provider identity (needed to distinguish acp adapters)')
+    .option('--executable <path>', 'selected provider executable or absolute test double')
     .option('--timeout-ms <milliseconds>', 'execution timeout', String(DEFAULT_AGENT_TIMEOUT_MS))
     .option('--project-dir <path>', 'target project directory', process.cwd())
     .option('--worktree-root <path>', 'ShipGraph worktree root override')
@@ -311,6 +508,7 @@ export function createProgram(): Command {
         model: string;
         instructions: string;
         provider?: string;
+        modelProvider?: string;
         executable?: string;
         timeoutMs?: string;
         projectDir?: string;
@@ -326,18 +524,27 @@ export function createProgram(): Command {
       try {
         const projectDir = options.projectDir ?? process.cwd();
         const provider = parseAgentProvider(options.provider ?? 'opencode');
-        if (provider !== 'opencode') {
+        const modelProvider = resolveCliModelProvider(provider, options.modelProvider);
+        db = openInitializedDatabase(projectDir);
+        const modelOptions = modelServiceOptions(db, projectDir);
+        const adapter = createCliAgentAdapter(
+          modelProvider,
+          options.executable,
+          modelOptions.configuration
+        );
+        const probe = await adapter.probe();
+        if (!probe.available) {
           throw new Error(
-            `Provider ${provider} has no AGENT-001 adapter yet; only opencode is available`
+            `Provider ${modelProvider} has no usable AGENT-001 execution surface: ${probe.reason}`
           );
         }
-        db = openInitializedDatabase(projectDir);
         const base = workspaceServiceOptions(db, projectDir, options.worktreeRoot);
         const report = await runAgentTask(
-          agentServiceOptions(base, createOpenCodeAdapter({ executable: options.executable })),
+          agentServiceOptions(base, adapter),
           {
             ticketId,
             provider,
+            modelProviderId: modelProvider,
             model: options.model,
             instructions: options.instructions,
             timeoutMs: parsePositiveInteger(options.timeoutMs, 'timeout-ms'),
@@ -362,6 +569,63 @@ export function createProgram(): Command {
       } finally {
         process.removeListener('SIGINT', abortExecution);
         process.removeListener('SIGTERM', abortExecution);
+        db?.close();
+      }
+    });
+
+  agent
+    .command('run-routed <ticket-id>')
+    .description('Select, reserve, and execute one provider through MODEL-001 routing')
+    .requiredOption('--task <task>', 'implementation, review, or repair')
+    .requiredOption('--risk <risk>', 'low, medium, high, or critical')
+    .requiredOption('--mode <mode>', 'eco, balanced, or max')
+    .requiredOption('--instructions <text>', 'instructions supplied to the coding agent')
+    .requiredOption('--max-concurrent-tickets <count>', 'global execution capacity')
+    .requiredOption('--active-concurrent-tickets <count>', 'currently active global executions')
+    .option('--budget-remaining <value>', 'known budget value or unknown', 'unknown')
+    .option('--timeout-ms <milliseconds>', 'execution timeout', String(DEFAULT_AGENT_TIMEOUT_MS))
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--worktree-root <path>', 'ShipGraph worktree root override')
+    .option('--json', 'output the decision and durable run as JSON')
+    .action(async (ticketId: string, options: {
+      task: string; risk: string; mode: string; instructions: string;
+      maxConcurrentTickets: string; activeConcurrentTickets: string; budgetRemaining: string;
+      timeoutMs: string; projectDir?: string; worktreeRoot?: string; json?: boolean;
+    }) => {
+      let db: DbConnection | undefined;
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        db = openInitializedDatabase(projectDir);
+        const report = await runRoutedAgentTask(
+          modelServiceOptions(db, projectDir),
+          workspaceServiceOptions(db, projectDir, options.worktreeRoot),
+          {
+            task: parseTask(options.task),
+            risk: parseRisk(options.risk),
+            envelope: {
+              mode: parseMode(options.mode),
+              maxConcurrentTickets: parseKnownInteger(options.maxConcurrentTickets),
+              activeConcurrentTickets: parseKnownInteger(options.activeConcurrentTickets),
+              budgetRemaining: parseKnownNumber(options.budgetRemaining),
+            },
+          },
+          {
+            ticketId,
+            instructions: options.instructions,
+            timeoutMs: parsePositiveInteger(options.timeoutMs, 'timeout-ms'),
+          }
+        );
+        if (options.json) console.log(JSON.stringify(report, null, 2));
+        else {
+          const decision = report.decision as Record<string, unknown>;
+          const run = report.run as Record<string, unknown>;
+          console.log(`Agent run ${String(run.id)} ${String(run.status).toLowerCase()}.`);
+          console.log(`Route: ${String(decision.providerId)}/${String(decision.modelId)}`);
+        }
+        if ((report.run as Record<string, unknown>).status !== 'SUCCEEDED') process.exitCode = 1;
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
         db?.close();
       }
     });
@@ -453,6 +717,32 @@ export function createProgram(): Command {
       }
     });
 
+  agent
+    .command('reconcile <run-id>')
+    .description('Release retained provider capacity after independently proving execution stopped')
+    .requiredOption('--execution-stopped', 'confirm that no provider process for this run remains')
+    .option('--project-dir <path>', 'target project directory', process.cwd())
+    .option('--json', 'output the reconciliation result as JSON')
+    .action(async (runId: string, options: { executionStopped: boolean; projectDir?: string; json?: boolean }) => {
+      let db: DbConnection | undefined;
+      try {
+        const projectDir = options.projectDir ?? process.cwd();
+        db = openInitializedDatabase(projectDir);
+        const report = await runAgentReconcile(workspaceServiceOptions(db, projectDir), runId);
+        if (options.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          console.log(report.released
+            ? `Released retained provider capacity for run ${runId}.`
+            : `Run ${runId} has no active provider reservation.`);
+        }
+      } catch (error) {
+        emitCommandError(error, options.json);
+      } finally {
+        db?.close();
+      }
+    });
+
   return program;
 }
 
@@ -471,6 +761,66 @@ function parseAgentProvider(value: string): AgentProvider {
     throw new Error(`Unsupported agent provider: ${value}`);
   }
   return value as AgentProvider;
+}
+
+function resolveCliModelProvider(
+  provider: AgentProvider,
+  requested: string | undefined
+): ModelProviderId {
+  if (requested !== undefined) {
+    const modelProvider = normalizeModelProviderId(requested);
+    if (agentProviderForModelProvider(modelProvider) !== provider) {
+      throw new Error(
+        `MODEL provider ${modelProvider} uses AGENT adapter ${agentProviderForModelProvider(modelProvider)}, not ${provider}`
+      );
+    }
+    return modelProvider;
+  }
+  if (provider === 'opencode') return 'opencode-go';
+  if (provider === 'codex') return 'codex';
+  throw new Error('AGENT provider acp is ambiguous; supply --model-provider grok or gemini');
+}
+
+function createCliAgentAdapter(
+  modelProvider: ModelProviderId,
+  executable: string | undefined,
+  configuration?: ModelProviderConfiguration
+): AgentExecutionAdapter {
+  const configured = configurationForModelProvider(configuration, modelProvider);
+  const options = {
+    ...(configured?.enabled === undefined ? {} : { enabled: configured.enabled }),
+    ...(executable === undefined
+      ? configured?.executable === undefined
+        ? {}
+        : { executable: configured.executable }
+      : { executable }),
+  };
+  switch (modelProvider) {
+    case 'opencode-go':
+      return createOpenCodeAdapter(options);
+    case 'codex':
+      return createCodexAdapter(options);
+    case 'grok':
+      return createGrokAdapter(options);
+    case 'gemini':
+      return createGeminiAdapter(options);
+  }
+}
+
+function configurationForModelProvider(
+  configuration: ModelProviderConfiguration | undefined,
+  modelProvider: ModelProviderId
+): ModelProviderAdapterConfiguration | undefined {
+  switch (modelProvider) {
+    case 'opencode-go':
+      return configuration?.opencodeGo;
+    case 'codex':
+      return configuration?.codex;
+    case 'grok':
+      return configuration?.grok;
+    case 'gemini':
+      return configuration?.gemini;
+  }
 }
 
 function parsePositiveInteger(value: string | undefined, optionName: string): number {

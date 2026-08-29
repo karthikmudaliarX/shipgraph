@@ -119,9 +119,14 @@ describe('CLI smoke tests', () => {
       'status',
       'backlog',
       'ready',
+      'providers',
       'workspace',
       'agent',
     ]);
+    expect(program.commands.find((command) => command.name() === 'agent')?.commands
+      .map((command) => command.name())).toContain('run-routed');
+    expect(program.commands.find((command) => command.name() === 'agent')?.commands
+      .map((command) => command.name())).toContain('reconcile');
   });
 
   it('renders human-readable status output', () => {
@@ -180,6 +185,40 @@ describe('CLI smoke tests', () => {
 
     expect(consoleSpy).toHaveBeenCalledWith('ShipGraph initialized:');
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('"ticketCount": 0'));
+    consoleSpy.mockRestore();
+  });
+
+  it('honors a disabled MODEL provider for direct agent execution', async () => {
+    initProject(projectDir, {
+      config: {
+        ...TEST_CONFIG,
+        providers: { opencodeGo: { enabled: false } },
+      },
+    });
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    process.exitCode = undefined;
+
+    await createProgram().parseAsync(
+      [
+        'agent',
+        'run',
+        'AG-001',
+        '--model',
+        'provider/dynamic-model',
+        '--instructions',
+        'must be refused',
+        '--project-dir',
+        projectDir,
+        '--json',
+      ],
+      { from: 'user' }
+    );
+
+    expect(process.exitCode).toBe(1);
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining('disabled by configuration')
+    );
+    process.exitCode = undefined;
     consoleSpy.mockRestore();
   });
 
