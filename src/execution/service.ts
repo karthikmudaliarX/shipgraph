@@ -26,7 +26,7 @@ import {
   MAX_AGENT_TIMEOUT_MS,
   agentExecutionResultSchema,
   agentRunRecordSchema,
-  reviewReportSchema,
+  reviewOutputSchema,
   reviewTypeSchema,
   type AgentFailureCategory,
   type AgentRunRecord,
@@ -839,7 +839,7 @@ function applyReviewResult(
 
   const direct = result.reviewResult === undefined
     ? undefined
-    : reviewReportSchema.safeParse({
+    : reviewOutputSchema.safeParse({
         result: result.reviewResult,
         findings: result.reviewFindings ?? [],
       });
@@ -871,17 +871,17 @@ function applyReviewResult(
 function parseReviewReport(
   stdout: string,
   normalizedSummary?: string
-): ReturnType<typeof reviewReportSchema.parse> | undefined {
+): ReturnType<typeof reviewOutputSchema.parse> | undefined {
   const report = parseReviewJson(stdout);
   return report ?? (normalizedSummary === undefined ? undefined : parseReviewJson(normalizedSummary));
 }
 
-function parseReviewJson(value: string): ReturnType<typeof reviewReportSchema.parse> | undefined {
+function parseReviewJson(value: string): ReturnType<typeof reviewOutputSchema.parse> | undefined {
   const output = redactSensitiveText(value).trim();
   if (output.length === 0) return undefined;
   try {
     const parsed: unknown = JSON.parse(output);
-    const report = reviewReportSchema.safeParse(parsed);
+    const report = reviewOutputSchema.safeParse(parsed);
     return report.success ? report.data : undefined;
   } catch {
     return undefined;

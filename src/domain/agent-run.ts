@@ -62,8 +62,8 @@ export const REVIEW_RESULTS = ['PASS', 'FAIL'] as const;
 export type ReviewResult = (typeof REVIEW_RESULTS)[number];
 export const reviewResultSchema = z.enum(REVIEW_RESULTS);
 
-/** The only structured reviewer finding shape persisted by KAR-9. */
-export const reviewReportSchema = z.object({
+/** Strict provider-output validation for KAR-9; this is not the KAR-12 Ticket Contract. */
+export const reviewOutputSchema = z.object({
   result: reviewResultSchema,
   findings: z.array(z.string().min(1).max(2_048)).max(100),
 }).strict().superRefine((report, context) => {
@@ -76,7 +76,7 @@ export const reviewReportSchema = z.object({
   }
 });
 
-export type ReviewReport = z.infer<typeof reviewReportSchema>;
+export type ReviewOutput = z.infer<typeof reviewOutputSchema>;
 
 /**
  * Deliberately small, provider-neutral evidence. Raw provider event streams
