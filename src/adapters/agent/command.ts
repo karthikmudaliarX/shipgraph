@@ -492,12 +492,15 @@ function hasErrorPayload(entry: Record<string, unknown>): boolean {
 }
 
 function extractEventText(entry: Record<string, unknown>): string | undefined {
-  const direct = firstString(entry, ['text', 'summary', 'message', 'result', 'response', 'content']);
+  // A KAR-9 report uses `result` as a structured field. Treating that field as
+  // generic evidence text would manufacture a contradictory `summary` channel
+  // such as `PASS` alongside the complete report in stdout.
+  const direct = firstString(entry, ['text', 'summary', 'message', 'response', 'content']);
   if (direct !== undefined) return direct;
   for (const key of ['part', 'data', 'payload', 'msg', 'message']) {
     const nested = entry[key];
     if (isObject(nested)) {
-      const value = firstString(nested, ['text', 'summary', 'message', 'result', 'response', 'content']);
+      const value = firstString(nested, ['text', 'summary', 'message', 'response', 'content']);
       if (value !== undefined) return value;
     }
   }

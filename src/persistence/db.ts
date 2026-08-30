@@ -478,6 +478,20 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE runs ADD COLUMN safety_policy_sha256 TEXT;
     `,
   },
+  {
+    version: 16,
+    name: 'persist_pre_pr_review_provenance',
+    up: `
+      -- KAR-9 review evidence is stored with the existing durable AGENT run.
+      -- The exact reviewed commit and axis are immutable run provenance.
+      ALTER TABLE runs ADD COLUMN review_type TEXT
+        CHECK (review_type IS NULL OR review_type IN ('contract', 'engineering'));
+      ALTER TABLE runs ADD COLUMN reviewed_sha TEXT;
+      ALTER TABLE runs ADD COLUMN review_result TEXT
+        CHECK (review_result IS NULL OR review_result IN ('PASS', 'FAIL'));
+      ALTER TABLE runs ADD COLUMN review_findings_json TEXT;
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {

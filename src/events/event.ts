@@ -6,6 +6,8 @@ import {
 import {
   agentRunStateSchema,
   normalizedAgentEvidenceSchema,
+  reviewResultSchema,
+  reviewTypeSchema,
 } from '../domain/agent-run.js';
 import { modelProviderIdSchema, modelTaskTypeSchema } from '../domain/model-provider.js';
 
@@ -89,6 +91,8 @@ export const runCreatedPayloadSchema = z.object({
   timeoutMs: z.number().int().positive().optional(),
   instructionsSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   safetyPolicySha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  reviewType: reviewTypeSchema.optional(),
+  reviewedSha: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/).optional(),
 }).strict();
 
 export const runCompletedPayloadSchema = z.object({
@@ -105,6 +109,10 @@ export const runCompletedPayloadSchema = z.object({
   failureCategory: z.string().min(1).optional(),
   failureReason: z.string().min(1).optional(),
   evidence: normalizedAgentEvidenceSchema.optional(),
+  reviewType: reviewTypeSchema.optional(),
+  reviewedSha: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/).optional(),
+  reviewResult: reviewResultSchema.optional(),
+  reviewFindings: z.array(z.string().min(1).max(2_048)).max(100).optional(),
 }).strict();
 
 export const runStateChangedPayloadSchema = z.object({

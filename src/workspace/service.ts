@@ -903,7 +903,8 @@ export type WorkspaceExecutionValidation = 'ready' | 'changed';
 export async function getVerifiedWorkspaceForExecution(
   options: WorkspaceServiceOptions,
   ticketIdInput: string,
-  validation: WorkspaceExecutionValidation = 'ready'
+  validation: WorkspaceExecutionValidation = 'ready',
+  expectedHeadSha?: string
 ): Promise<WorkspaceRecord> {
   const { runner } = defaults(options);
   assertSafeTicketId(ticketIdInput);
@@ -943,6 +944,14 @@ export async function getVerifiedWorkspaceForExecution(
       break;
     default:
       throw new Error(`Unsupported workspace execution validation: ${String(validation)}`);
+  }
+  if (expectedHeadSha !== undefined) {
+    const live = await inspectWorktreeState(runner, row.sourceRepositoryPath, row.worktreePath);
+    if (!live.registered || live.head !== expectedHeadSha) {
+      throw new Error(
+        `Worktree HEAD ${live.head ?? '<unknown>'} does not equal the expected review SHA ${expectedHeadSha}`
+      );
+    }
   }
   return row;
 }

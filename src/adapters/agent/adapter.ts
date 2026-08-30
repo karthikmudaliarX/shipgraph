@@ -10,6 +10,8 @@ import type {
   AgentExecutionUsage,
   AgentRunState,
   NormalizedAgentEvidence,
+  ReviewType,
+  ReviewResult,
 } from '../../domain/agent-run.js';
 
 export type AgentCapability = 'execute' | 'review' | 'repair';
@@ -43,6 +45,8 @@ export type AgentExecutionRequest = {
   provider: AgentProvider;
   model: string;
   instructions: string;
+  reviewType?: ReviewType;
+  reviewedSha?: string;
   timeoutMs: number;
   maxOutputBytes: number;
   /** Remaining ShipGraph-owned budgets for adapters that enforce them. */
@@ -76,6 +80,8 @@ export type AgentExecutionResult = {
   evidence?: NormalizedAgentEvidence;
   /** Provider-reported usage, when the execution surface exposes it. */
   usage?: AgentExecutionUsage;
+  reviewResult?: ReviewResult;
+  reviewFindings?: readonly string[];
   failureCategory?: AgentFailureCategory;
   failureReason?: string;
 };

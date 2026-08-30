@@ -368,12 +368,14 @@ function parseJsonLines(stdout: string, truncated: boolean): ParsedOpenCodeOutpu
 }
 
 function extractEventText(event: Record<string, unknown>): string | undefined {
-  const direct = firstString(event, ['text', 'summary', 'message', 'result']);
+  // A KAR-9 report uses `result` as a structured field. Do not turn it into a
+  // second, contradictory summary channel during generic normalization.
+  const direct = firstString(event, ['text', 'summary', 'message']);
   if (direct !== undefined) return direct;
   for (const key of ['part', 'data', 'payload']) {
     const nested = event[key];
     if (isObject(nested)) {
-      const value = firstString(nested, ['text', 'summary', 'message', 'result']);
+      const value = firstString(nested, ['text', 'summary', 'message']);
       if (value !== undefined) return value;
     }
   }

@@ -29,9 +29,12 @@ import { ModelRouter } from './router.js';
 import {
   abandonPreparedAgentTaskRun,
   executeAgentTask,
+  executePrePrReviewTask,
   prepareAgentTaskRun,
+  preparePrePrReviewTask,
   type AgentExecutionServiceOptions,
   type AgentTaskResult,
+  type PrePrReviewProvenance,
   type SelectedAgentTaskInput,
 } from '../execution/service.js';
 import { getCurrentProjectId } from '../workspace/service.js';
@@ -274,6 +277,25 @@ export class ModelRoutingService {
     target: ModelExecutionTarget,
     input: SelectedAgentTaskInput
   ): Promise<AgentTaskResult> {
+    return this.executeSelectedAgentTaskInternal(options, target, input);
+  }
+
+  /** Execute a routed KAR-9 review run with provenance bound by this operation. */
+  public async executeSelectedPrePrReviewTask(
+    options: Omit<AgentExecutionServiceOptions, 'adapter'>,
+    target: ModelExecutionTarget,
+    input: SelectedAgentTaskInput,
+    review: PrePrReviewProvenance
+  ): Promise<AgentTaskResult> {
+    return this.executeSelectedAgentTaskInternal(options, target, input, review);
+  }
+
+  private async executeSelectedAgentTaskInternal(
+    options: Omit<AgentExecutionServiceOptions, 'adapter'>,
+    target: ModelExecutionTarget,
+    input: SelectedAgentTaskInput,
+    review?: PrePrReviewProvenance
+  ): Promise<AgentTaskResult> {
     if (
       !target.executionBound ||
       target.routingDecisionId === undefined ||
@@ -292,18 +314,22 @@ export class ModelRoutingService {
       (persistedDecision.decision.risk === 'high' || persistedDecision.decision.risk === 'critical')
       ? { ...(input.safety ?? {}), risk: persistedDecision.decision.risk }
       : input.safety;
-    return executeAgentTask(
-      { ...options, adapter: this.createExecutionAdapter(target) },
-      {
-        ...input,
-        task: target.task,
-        runId: target.runId,
-        provider: target.provider,
-        modelProviderId: target.modelProviderId,
-        model: target.modelId,
-        ...(safety === undefined ? {} : { safety }),
-      }
-    );
+    const taskInput = {
+      ...input,
+      task: target.task,
+      runId: target.runId,
+      provider: target.provider,
+      modelProviderId: target.modelProviderId,
+      model: target.modelId,
+      ...(safety === undefined ? {} : { safety }),
+    };
+    return review === undefined
+      ? executeAgentTask({ ...options, adapter: this.createExecutionAdapter(target) }, taskInput)
+      : executePrePrReviewTask(
+          { ...options, adapter: this.createExecutionAdapter(target) },
+          taskInput,
+          review
+        );
   }
 
   /** Select, durably bind, and execute one agent task without caller-managed routing choreography. */
@@ -311,6 +337,25 @@ export class ModelRoutingService {
     options: Omit<AgentExecutionServiceOptions, 'adapter'>,
     routingInput: Omit<ModelRoutingRequest, 'runId'>,
     input: SelectedAgentTaskInput
+  ): Promise<RoutedAgentTaskResult> {
+    return this.executeRoutedAgentTaskInternal(options, routingInput, input);
+  }
+
+  /** Select, bind, and execute one provenance-bound KAR-9 review axis. */
+  public async executeRoutedPrePrReviewTask(
+    options: Omit<AgentExecutionServiceOptions, 'adapter'>,
+    routingInput: Omit<ModelRoutingRequest, 'runId'>,
+    input: SelectedAgentTaskInput,
+    review: PrePrReviewProvenance
+  ): Promise<RoutedAgentTaskResult> {
+    return this.executeRoutedAgentTaskInternal(options, routingInput, input, review);
+  }
+
+  private async executeRoutedAgentTaskInternal(
+    options: Omit<AgentExecutionServiceOptions, 'adapter'>,
+    routingInput: Omit<ModelRoutingRequest, 'runId'>,
+    input: SelectedAgentTaskInput,
+    review?: PrePrReviewProvenance
   ): Promise<RoutedAgentTaskResult> {
     const request = modelRoutingRequestSchema.parse(routingInput);
     const excluded = new Set(request.excludeProviders ?? []);
@@ -355,28 +400,34 @@ export class ModelRoutingService {
       const executionInput = executionSafety === undefined
         ? input
         : { ...input, safety: executionSafety };
-      const prepared = await prepareAgentTaskRun(
-        { ...options, adapter: this.createExecutionAdapter(target) },
-        {
-          ...executionInput,
-          task: target.task,
-          provider: target.provider,
-          modelProviderId: target.modelProviderId,
-          model: target.modelId,
-        }
-      );
+      const preparedInput = {
+        ...executionInput,
+        task: target.task,
+        provider: target.provider,
+        modelProviderId: target.modelProviderId,
+        model: target.modelId,
+      };
+      const prepared = review === undefined
+        ? await prepareAgentTaskRun(
+            { ...options, adapter: this.createExecutionAdapter(target) },
+            preparedInput
+          )
+        : await preparePrePrReviewTask(
+            { ...options, adapter: this.createExecutionAdapter(target) },
+            preparedInput,
+            review
+          );
       if (input.safety?.maxAttempts === 0) {
-        const result = await executeAgentTask(
-          { ...options, adapter: this.createExecutionAdapter(target) },
-          {
-            ...executionInput,
-            runId: prepared.run.id,
-            task: target.task,
-            provider: target.provider,
-            modelProviderId: target.modelProviderId,
-            model: target.modelId,
-          }
-        );
+        const result = review === undefined
+          ? await executeAgentTask(
+              { ...options, adapter: this.createExecutionAdapter(target) },
+              { ...preparedInput, runId: prepared.run.id }
+            )
+          : await executePrePrReviewTask(
+              { ...options, adapter: this.createExecutionAdapter(target) },
+              { ...preparedInput, runId: prepared.run.id },
+              review
+            );
         return { ...result, decision: preview };
       }
       const otherProviders = this.registry.list()
@@ -409,7 +460,9 @@ export class ModelRoutingService {
         continue;
       }
       const executionTarget = this.resolveExecutionTarget(decision);
-      const result = await this.executeSelectedAgentTask(options, executionTarget, executionInput);
+      const result = review === undefined
+        ? await this.executeSelectedAgentTask(options, executionTarget, executionInput)
+        : await this.executeSelectedPrePrReviewTask(options, executionTarget, executionInput, review);
       return { ...result, decision };
     }
     throw new Error(

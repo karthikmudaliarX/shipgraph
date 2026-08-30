@@ -28,6 +28,7 @@ import { UsageLedger } from '../../src/model/ledger.js';
 import {
   executeAgentTask,
   prepareAgentTaskRun,
+  preparePrePrReviewTask,
   reconcileAgentRun,
   recoverAgentRun,
   type AgentExecutionServiceOptions,
@@ -206,6 +207,25 @@ describe('AGENT-001 durable execution', () => {
     const persisted = harness.db.prepare('SELECT * FROM runs WHERE id = ?').get(result.run.id) as Record<string, unknown>;
     expect(persisted.instructions).toBeUndefined();
     expect(persisted.workspace_path).toBe(harness.workspacePath);
+  });
+
+  it('does not persist unbound adapter review fields as KAR-9 evidence', async () => {
+    harness = await createHarness();
+    const adapter = fakeAdapter({ reviewResult: 'PASS', reviewFindings: [] });
+    const result = await executeAgentTask(
+      { ...harness.options, adapter },
+      {
+        ticketId: 'AG-001',
+        model: 'openai/gpt-5',
+        instructions: 'Execute the generic AGENT-001 task.',
+      }
+    );
+
+    expect(result.run.status).toBe('SUCCEEDED');
+    expect(result.run.reviewType).toBeUndefined();
+    expect(result.run.reviewedSha).toBeUndefined();
+    expect(result.run.reviewResult).toBeUndefined();
+    expect(result.run.reviewFindings).toBeUndefined();
   });
 
   it('refuses execution before the adapter when the READY workspace is detached or on another branch', async () => {
@@ -822,16 +842,29 @@ describe('AGENT-001 durable execution', () => {
     if (task === 'review') {
       // A reviewer must receive the implementation's committed change, not
       // the original READY/base-SHA-only workspace proof.
-      writeFileSync(join(harness.workspacePath, 'README.md'), '# reviewed implementation\n');
-      git(harness.workspacePath, 'add', 'README.md');
-      git(harness.workspacePath, 'commit', '-m', 'implementation change for review');
+    writeFileSync(join(harness.workspacePath, 'README.md'), '# reviewed implementation\n');
+    git(harness.workspacePath, 'add', 'README.md');
+    git(harness.workspacePath, 'commit', '-m', 'implementation change for review');
     } else {
       // A repair agent may need to inspect an implementation's still-dirty
       // edits. The changed-workspace proof preserves them for the adapter.
       writeFileSync(join(harness.workspacePath, 'README.md'), '# dirty implementation\n');
     }
 
-    const adapter = fakeAdapter({}, ['execute', task]);
+    const adapter = fakeAdapter(
+      task === 'review'
+        ? {
+            stdout: JSON.stringify({ result: 'PASS', findings: [] }),
+            evidence: {
+              outputFormat: 'jsonl',
+              eventCount: 1,
+              eventTypes: ['review'],
+              summary: JSON.stringify({ result: 'PASS', findings: [] }),
+            },
+          }
+        : {},
+      ['execute', task]
+    );
     const providerAdapter: ModelProviderAdapter = {
       providerId: 'opencode-go',
       family: 'opencode',
@@ -853,21 +886,27 @@ describe('AGENT-001 durable execution', () => {
       adapters: [providerAdapter],
       executionAdapters: [{ modelProviderId: 'opencode-go', adapter }],
     });
-    const prepared = await prepareAgentTaskRun(
-      {
-        ...harness.options,
-        adapter,
-        createRunId: () => `model-${task}-run`,
-      },
-      {
-        ticketId: 'AG-001',
-        provider: 'opencode',
-        modelProviderId: 'opencode-go',
-        model: `opencode/${task}-model`,
-        task,
-        instructions: `run the ${task} task through the selected route`,
-      }
-    );
+    const reviewProvenance = task === 'review'
+      ? { reviewType: 'contract' as const, reviewedSha: git(harness.workspacePath, 'rev-parse', 'HEAD') }
+      : undefined;
+    const preparationInput = {
+      ticketId: 'AG-001',
+      provider: 'opencode' as const,
+      modelProviderId: 'opencode-go' as const,
+      model: `opencode/${task}-model`,
+      task,
+      instructions: `run the ${task} task through the selected route`,
+    };
+    const prepared = reviewProvenance === undefined
+      ? await prepareAgentTaskRun(
+          { ...harness.options, adapter, createRunId: () => `model-${task}-run` },
+          preparationInput
+        )
+      : await preparePrePrReviewTask(
+          { ...harness.options, adapter, createRunId: () => `model-${task}-run` },
+          preparationInput,
+          reviewProvenance
+        );
     const decision = await modelService.route({
       runId: prepared.run.id,
       task,
@@ -880,11 +919,18 @@ describe('AGENT-001 durable execution', () => {
       },
     });
     const target = modelService.resolveExecutionTarget(decision);
-    const execution = await modelService.executeSelectedAgentTask(
-      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
-      target,
-      { ticketId: 'AG-001', instructions: `run the ${task} task through the selected route` }
-    );
+    const execution = reviewProvenance === undefined
+      ? await modelService.executeSelectedAgentTask(
+          { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+          target,
+          { ticketId: 'AG-001', instructions: `run the ${task} task through the selected route` }
+        )
+      : await modelService.executeSelectedPrePrReviewTask(
+          { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+          target,
+          { ticketId: 'AG-001', instructions: `run the ${task} task through the selected route` },
+          reviewProvenance
+        );
 
     expect(target).not.toHaveProperty('adapter');
     expect(target.task).toBe(task);
