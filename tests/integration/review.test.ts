@@ -202,7 +202,7 @@ function reviewAdapter(results: readonly string[]): ReviewAdapter {
           stdout: JSON.stringify({
             type: 'text',
             text: VALID_REVIEW_REPORT,
-            error: { message: 'provider error' },
+            data: { error: { message: 'provider error' } },
           }),
           stderr: '',
           stdoutTruncated: false,

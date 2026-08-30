@@ -1014,7 +1014,7 @@ function parseProviderEnvelope(value: unknown): ParsedReviewChannel {
   if (!isKnownProviderEnvelope(value)) return { malformed: true };
   if (hasProviderError(value)) return { malformed: true };
   const payloads = providerTextPayloads(value);
-  if (payloads.length === 0) return { malformed: false };
+  if (payloads.length === 0) return { malformed: true };
   const reports: Array<ReturnType<typeof reviewOutputSchema.parse>> = [];
   for (const payload of payloads) {
     const report = parseReviewJson(payload);
@@ -1051,8 +1051,16 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function hasProviderError(value: unknown): boolean {
   if (!isObject(value)) return false;
-  const error = value.error;
-  return (typeof error === 'string' && error.length > 0) || isObject(error);
+  if (isProviderErrorValue(value.error)) return true;
+  for (const key of ['part', 'data', 'payload', 'msg', 'message', 'content'] as const) {
+    const nested = value[key];
+    if (isObject(nested) && isProviderErrorValue(nested.error)) return true;
+  }
+  return false;
+}
+
+function isProviderErrorValue(value: unknown): boolean {
+  return (typeof value === 'string' && value.length > 0) || isObject(value);
 }
 
 function parseReviewSummary(value: string | undefined): ParsedReviewChannel {

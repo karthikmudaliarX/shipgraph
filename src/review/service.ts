@@ -313,5 +313,7 @@ function axisResult(
 function boundedText(value: string, limit: number): { value: string; truncated: boolean } {
   const bytes = Buffer.from(value, 'utf8');
   if (bytes.byteLength <= limit) return { value, truncated: false };
-  return { value: bytes.subarray(0, limit).toString('utf8'), truncated: true };
+  let bounded = bytes.subarray(0, limit).toString('utf8');
+  while (Buffer.byteLength(bounded, 'utf8') > limit) bounded = bounded.slice(0, -1);
+  return { value: bounded, truncated: true };
 }
