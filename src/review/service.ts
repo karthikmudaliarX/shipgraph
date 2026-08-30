@@ -12,6 +12,7 @@ import {
   type WorkspaceServiceOptions,
 } from '../workspace/service.js';
 import {
+  AGENT_INSTRUCTIONS_LIMIT_BYTES,
   DEFAULT_AGENT_TIMEOUT_MS,
   REVIEW_TYPES,
   reviewResultSchema,
@@ -24,9 +25,12 @@ import type { ModelRoutingRequest } from '../domain/model-provider.js';
 import { redactSensitiveText } from '../adapters/agent/safety.js';
 import { ModelRoutingService, type RoutedAgentTaskResult } from '../model/service.js';
 import type { AgentSafetyPolicy } from '../execution/service.js';
+import { ShipgraphError } from '../utils/errors.js';
 
 const REVIEW_DIFF_LIMIT_BYTES = 32 * 1024;
 const FULL_SHA_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/u;
+const REVIEW_INCOMPLETE_DIFF_MARKER =
+  '[INCOMPLETE DIFF: diff content was reduced to fit the 64 KiB review instruction limit; inspect the repository for the complete diff.]';
 
 export type PrePrReviewInput = {
   ticketId: string;
@@ -67,9 +71,13 @@ export async function runPrePrReviews(input: PrePrReviewInput): Promise<PrePrRev
     maxAttempts: input.safety?.maxAttempts ?? 1,
     maxTimeoutMs: input.safety?.maxTimeoutMs ?? (input.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS),
   };
+  const instructions = REVIEW_TYPES.map((reviewType) => ({
+    reviewType,
+    value: composeReviewInstructions(reviewType, snapshot),
+  }));
   const results = [] as PrePrReviewAxisResult[];
 
-  for (const reviewType of REVIEW_TYPES) {
+  for (const { reviewType, value: reviewInstruction } of instructions) {
     if (reviewType !== 'contract') {
       await assertCurrentReviewHead(input.workspace, input.ticketId, snapshot.headSha);
     }
@@ -82,7 +90,7 @@ export async function runPrePrReviews(input: PrePrReviewInput): Promise<PrePrRev
       },
       {
         ticketId: input.ticketId,
-        instructions: reviewInstructions(reviewType, snapshot),
+        instructions: reviewInstruction,
         ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
         ...(input.signal === undefined ? {} : { signal: input.signal }),
         safety: reviewSafety,
@@ -111,6 +119,43 @@ function reviewRequestId(baseRequestId: string, reviewType: ReviewType): string 
   const maxBaseLength = 256 - suffix.length;
   if (baseRequestId.length <= maxBaseLength) return `${baseRequestId}${suffix}`;
   return `${createHash('sha256').update(baseRequestId).digest('hex')}${suffix}`;
+}
+
+function composeReviewInstructions(
+  reviewType: ReviewType,
+  snapshot: Awaited<ReturnType<typeof readReviewSnapshot>>
+): string {
+  const complete = reviewInstructions(reviewType, snapshot);
+  if (Buffer.byteLength(complete, 'utf8') <= AGENT_INSTRUCTIONS_LIMIT_BYTES) return complete;
+
+  const contractBytes = Buffer.byteLength(JSON.stringify(snapshot.contract), 'utf8');
+  const withoutDiff = reviewInstructions(reviewType, snapshot, '', false);
+  if (Buffer.byteLength(withoutDiff, 'utf8') > AGENT_INSTRUCTIONS_LIMIT_BYTES) {
+    throw new ShipgraphError(
+      `KAR-9 ${reviewType} review contract cannot fit within the ${AGENT_INSTRUCTIONS_LIMIT_BYTES}-byte instruction limit (contract JSON is ${contractBytes} bytes)`,
+      'KAR9_REVIEW_INPUT_TOO_LARGE'
+    );
+  }
+
+  const withMarker = reviewInstructions(reviewType, snapshot, '', true);
+  const markerBytes = Buffer.byteLength(withMarker, 'utf8');
+  if (markerBytes > AGENT_INSTRUCTIONS_LIMIT_BYTES) {
+    throw new ShipgraphError(
+      `KAR-9 ${reviewType} review input cannot fit within the ${AGENT_INSTRUCTIONS_LIMIT_BYTES}-byte instruction limit after reserving the incomplete-diff marker (contract JSON is ${contractBytes} bytes)`,
+      'KAR9_REVIEW_INPUT_TOO_LARGE'
+    );
+  }
+
+  const availableDiffBytes = AGENT_INSTRUCTIONS_LIMIT_BYTES - markerBytes;
+  const reducedDiff = boundedText(snapshot.diff, availableDiffBytes).value;
+  const bounded = reviewInstructions(reviewType, snapshot, reducedDiff, true);
+  if (Buffer.byteLength(bounded, 'utf8') > AGENT_INSTRUCTIONS_LIMIT_BYTES) {
+    throw new ShipgraphError(
+      `KAR-9 ${reviewType} review input could not be bounded within the ${AGENT_INSTRUCTIONS_LIMIT_BYTES}-byte instruction limit (contract JSON is ${contractBytes} bytes)`,
+      'KAR9_REVIEW_INPUT_TOO_LARGE'
+    );
+  }
+  return bounded;
 }
 
 /**
@@ -222,13 +267,15 @@ async function assertCurrentReviewHead(
 
 function reviewInstructions(
   reviewType: ReviewType,
-  snapshot: Awaited<ReturnType<typeof readReviewSnapshot>>
+  snapshot: Awaited<ReturnType<typeof readReviewSnapshot>>,
+  diff = snapshot.diff,
+  diffIncomplete = snapshot.diffTruncated
 ): string {
   const axis = reviewType === 'contract'
     ? 'CONTRACT REVIEW: determine whether every requested acceptance criterion is met, whether requested behavior is missing, partial, or incorrect, whether explicit out-of-scope boundaries were respected, and whether scope creep is present.'
     : 'ENGINEERING REVIEW: determine whether the change is correct, appropriately small, maintainable, and consistent with repository standards; inspect coupling, speculative or duplicated mechanisms, failure handling, security/reliability, and apply the deletion test to abstractions.';
-  const truncation = snapshot.diffTruncated
-    ? '\nThe supplied diff is bounded and marked incomplete; inspect the read-only repository for the complete change before deciding.'
+  const truncation = diffIncomplete
+    ? `\n${REVIEW_INCOMPLETE_DIFF_MARKER}`
     : '';
   return [
     'Perform one bounded KAR-9 pre-PR review axis.',
@@ -241,7 +288,7 @@ function reviewInstructions(
     `Base commit SHA: ${snapshot.baseSha}`,
     `Head commit SHA: ${snapshot.headSha}`,
     `Ticket contract: ${JSON.stringify(snapshot.contract)}`,
-    `Diff from base to head:\n${snapshot.diff}${truncation}`,
+    `Diff from base to head:\n${diff}${truncation}`,
   ].filter((line) => line.length > 0).join('\n\n');
 }
 

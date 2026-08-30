@@ -19,6 +19,7 @@ import type {
 import type { ModelProviderAdapter } from '../../src/adapters/model/adapter.js';
 import { registerModelProviderAdapter } from '../../src/adapters/agent/registry.js';
 import { ModelRoutingService } from '../../src/model/service.js';
+import { AGENT_INSTRUCTIONS_LIMIT_BYTES } from '../../src/domain/agent-run.js';
 import {
   listCurrentPrePrReviewEvidence,
   runPrePrReviews,
@@ -31,6 +32,12 @@ const CONFIG = {
   release: { requireHumanApproval: true, requireCleanCI: true, requireExactShaReviews: true },
   agents: { implementer: 'opencode' as const, reviewers: ['correctness'] as const },
 };
+
+const VALID_REVIEW_REPORT = JSON.stringify({ result: 'PASS', findings: [] });
+const LONG_REVIEW_REPORT = JSON.stringify({
+  result: 'FAIL',
+  findings: Array.from({ length: 3 }, (_, index) => `finding-${index}-${'x'.repeat(2_030)}`),
+});
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -108,6 +115,82 @@ function reviewAdapter(results: readonly string[]): ReviewAdapter {
           stdoutTruncated: false,
           stderrTruncated: false,
           reviewResult: 'PASS',
+        } satisfies AgentExecutionResult;
+      }
+      if (output === 'json-envelope') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: JSON.stringify({ type: 'text', text: VALID_REVIEW_REPORT }),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        } satisfies AgentExecutionResult;
+      }
+      if (output === 'jsonl-envelope') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: `${JSON.stringify({ type: 'text', part: { text: VALID_REVIEW_REPORT } })}\n`,
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          evidence: {
+            outputFormat: 'jsonl',
+            eventCount: 1,
+            eventTypes: ['text'],
+          },
+        } satisfies AgentExecutionResult;
+      }
+      if (output === 'long-envelope') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: JSON.stringify({ type: 'text', text: LONG_REVIEW_REPORT }),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          evidence: {
+            outputFormat: 'json',
+            eventCount: 1,
+            eventTypes: ['text'],
+            summary: LONG_REVIEW_REPORT.slice(0, 4_096),
+          },
+        } satisfies AgentExecutionResult;
+      }
+      if (output === 'malformed-envelope') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: JSON.stringify({ type: 'text', text: '{"result":"PASS"}' }),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        } satisfies AgentExecutionResult;
+      }
+      if (output === 'envelope-direct-conflict') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: JSON.stringify({
+            type: 'text',
+            text: JSON.stringify({ result: 'FAIL', findings: ['envelope finding'] }),
+          }),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          reviewResult: 'PASS',
+          reviewFindings: [],
         } satisfies AgentExecutionResult;
       }
       if (output === 'cross-channel-conflict') {
@@ -316,8 +399,65 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
     )).toHaveLength(0);
   });
 
-  it('fails closed when a review provider does not return the required report', async () => {
-    harness = await createHarness(['{"type":"text","text":"{\\"result\\":\\"PASS\\",\\"findings\\":[]}"}', JSON.stringify({ result: 'PASS', findings: [] })]);
+  it('parses a valid review report inside a JSON provider envelope', async () => {
+    harness = await createHarness(['json-envelope', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(true);
+    expect(result.contract.result).toBe('PASS');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('parses a valid review report inside a JSONL provider envelope', async () => {
+    harness = await createHarness(['jsonl-envelope', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(true);
+    expect(result.contract.result).toBe('PASS');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('parses a long valid embedded report from stdout instead of bounded evidence.summary', async () => {
+    harness = await createHarness(['long-envelope', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.result).toBe('FAIL');
+    expect(result.contract.findings).toHaveLength(3);
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('fails closed when a provider envelope contains malformed review JSON', async () => {
+    harness = await createHarness(['malformed-envelope', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(false);
+    expect(result.contract.run.status).toBe('NEEDS_HUMAN');
+    expect(result.contract.run.failureCategory).toBe('malformed_output');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('fails closed when an embedded envelope report conflicts with direct report fields', async () => {
+    harness = await createHarness(['envelope-direct-conflict', VALID_REVIEW_REPORT]);
     const result = await runPrePrReviews({
       ticketId: 'REV-001',
       modelService: harness.modelService,
@@ -446,5 +586,58 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
     expect(result.contract.run.status).toBe('NEEDS_HUMAN');
     expect(result.contract.run.failureCategory).toBe('approval_required');
     expect(result.engineering.run.status).toBe('NEEDS_HUMAN');
+  });
+
+  it('keeps a large but reviewable ticket within the complete instruction limit', async () => {
+    harness = await createHarness([VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
+    harness.db.prepare('UPDATE tickets SET description = ? WHERE id = ?').run('x'.repeat(12_000), 'REV-001');
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.passed).toBe(true);
+    expect(harness.adapter.requests.every((request) =>
+      Buffer.byteLength(request.instructions, 'utf8') <= AGENT_INSTRUCTIONS_LIMIT_BYTES
+    )).toBe(true);
+    expect(harness.adapter.requests[0]?.instructions).toContain('x'.repeat(12_000));
+  });
+
+  it('fails closed before provider execution when the complete contract cannot fit', async () => {
+    harness = await createHarness([VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
+    harness.db.prepare('UPDATE tickets SET description = ? WHERE id = ?').run('x'.repeat(70_000), 'REV-001');
+
+    await expect(runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    })).rejects.toMatchObject({
+      code: 'KAR9_REVIEW_INPUT_TOO_LARGE',
+    });
+    expect(harness.adapter.requests).toHaveLength(0);
+  });
+
+  it('marks a reduced diff explicitly when the complete review input needs it', async () => {
+    harness = await createHarness([VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
+    harness.db.prepare('UPDATE tickets SET description = ? WHERE id = ?').run('x'.repeat(45_000), 'REV-001');
+    writeFileSync(join(harness.workspacePath, 'README.md'), 'x'.repeat(30_000));
+    git(harness.workspacePath, 'add', 'README.md');
+    git(harness.workspacePath, 'commit', '-m', 'large candidate change');
+
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.passed).toBe(true);
+    expect(harness.adapter.requests[0]?.instructions).toContain('[INCOMPLETE DIFF:');
+    expect(harness.adapter.requests.every((request) =>
+      Buffer.byteLength(request.instructions, 'utf8') <= AGENT_INSTRUCTIONS_LIMIT_BYTES
+    )).toBe(true);
   });
 });

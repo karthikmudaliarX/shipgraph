@@ -900,11 +900,16 @@ function applyReviewResult(
   if (direct?.success === true) reports.push(direct.data);
   const stdoutChannel = parseReviewChannel(result.stdout, result.evidence?.outputFormat);
   const summaryChannel = parseReviewSummary(result.evidence?.summary);
-  if (stdoutChannel.malformed || summaryChannel.malformed) {
+  if (stdoutChannel.malformed) {
     return malformedReviewResult(result, reviewType);
   }
   if (stdoutChannel.reports !== undefined) reports.push(...stdoutChannel.reports);
   if (summaryChannel.reports !== undefined) reports.push(...summaryChannel.reports);
+  // evidence.summary is deliberately bounded and is not authoritative when
+  // the complete provider payload was retained in stdout.
+  if (summaryChannel.malformed && reports.length === 0) {
+    return malformedReviewResult(result, reviewType);
+  }
   const report = reports[0];
   if (
     report === undefined ||
@@ -960,8 +965,10 @@ function parseReviewChannel(value: string, format: 'json' | 'jsonl' | undefined)
       const report = reviewOutputSchema.safeParse(entry);
       if (report.success) {
         reports.push(report.data);
-      } else if (!isKnownProviderEnvelope(entry)) {
-        return { malformed: true };
+      } else {
+        const envelope = parseProviderEnvelope(entry);
+        if (envelope.malformed) return { malformed: true };
+        if (envelope.reports !== undefined) reports.push(...envelope.reports);
       }
     }
     return { reports, malformed: false };
@@ -970,7 +977,7 @@ function parseReviewChannel(value: string, format: 'json' | 'jsonl' | undefined)
     const parsed: unknown = JSON.parse(output);
     const report = reviewOutputSchema.safeParse(parsed);
     if (report.success) return { reports: [report.data], malformed: false };
-    return isKnownProviderEnvelope(parsed) ? { malformed: false } : { malformed: true };
+    return parseProviderEnvelope(parsed);
   } catch {
     return { malformed: true };
   }
@@ -999,6 +1006,44 @@ function isKnownProviderEnvelope(value: unknown): boolean {
     'msg',
     'error',
   ].some((key) => key in entry);
+}
+
+function parseProviderEnvelope(value: unknown): ParsedReviewChannel {
+  if (!isKnownProviderEnvelope(value)) return { malformed: true };
+  const payloads = providerTextPayloads(value);
+  if (payloads.length === 0) return { malformed: false };
+  const reports: Array<ReturnType<typeof reviewOutputSchema.parse>> = [];
+  for (const payload of payloads) {
+    const report = parseReviewJson(payload);
+    if (report === undefined) return { malformed: true };
+    reports.push(report);
+  }
+  return { reports, malformed: false };
+}
+
+function providerTextPayloads(value: unknown): readonly string[] {
+  if (!isKnownProviderEnvelope(value)) return [];
+  const entry = value as Record<string, unknown>;
+  const textKeys = ['text', 'summary', 'message', 'response', 'content'] as const;
+  const nestedKeys = ['part', 'data', 'payload', 'msg', 'content'] as const;
+  const payloads: string[] = [];
+  for (const key of textKeys) {
+    if (typeof entry[key] === 'string' && entry[key].trim().length > 0) payloads.push(entry[key]);
+  }
+  for (const key of nestedKeys) {
+    const nested = entry[key];
+    if (!isObject(nested)) continue;
+    for (const textKey of textKeys) {
+      if (typeof nested[textKey] === 'string' && nested[textKey].trim().length > 0) {
+        payloads.push(nested[textKey]);
+      }
+    }
+  }
+  return payloads;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function parseReviewSummary(value: string | undefined): ParsedReviewChannel {
