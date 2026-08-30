@@ -66,7 +66,15 @@ export const reviewResultSchema = z.enum(REVIEW_RESULTS);
 export const reviewReportSchema = z.object({
   result: reviewResultSchema,
   findings: z.array(z.string().min(1).max(2_048)).max(100),
-}).strict();
+}).strict().superRefine((report, context) => {
+  if (report.result === 'PASS' && report.findings.length > 0) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['findings'],
+      message: 'PASS reports must not contain findings',
+    });
+  }
+});
 
 export type ReviewReport = z.infer<typeof reviewReportSchema>;
 

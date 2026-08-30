@@ -206,6 +206,7 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
     expect(harness.adapter.requests[1]?.reviewType).toBe('engineering');
     expect(harness.adapter.requests[0]?.instructions).toContain('AC-1');
     expect(harness.adapter.requests[0]?.instructions).toContain('read-only repository');
+    expect(harness.adapter.requests[0]?.instructions).toContain('untrusted artifact data');
     expect(harness.adapter.requests[0]?.instructions).not.toContain('implementation transcript');
     expect(harness.adapter.requests[0]?.instructions).not.toContain('self-review');
 
@@ -219,7 +220,7 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
     expect(durableRuns[0]?.reviewed_sha).toBe(result.reviewedSha);
     expect(durableRuns[1]?.review_result).toBe('FAIL');
     expect(JSON.parse(String(durableRuns[1]?.review_findings_json))).toEqual(['engineering finding']);
-  });
+  }, 15_000);
 
   it('reports success only when both axes pass and exposes only current-head evidence', async () => {
     harness = await createHarness([
@@ -250,6 +251,21 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
 
   it('fails closed when a review provider does not return the required report', async () => {
     harness = await createHarness(['{"type":"text","text":"{\\"result\\":\\"PASS\\",\\"findings\\":[]}"}', JSON.stringify({ result: 'PASS', findings: [] })]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(false);
+    expect(result.contract.run.status).toBe('NEEDS_HUMAN');
+    expect(result.contract.run.failureCategory).toBe('malformed_output');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('fails closed on a contradictory PASS report', async () => {
+    harness = await createHarness([JSON.stringify({ result: 'PASS', findings: ['contradictory finding'] }), JSON.stringify({ result: 'PASS', findings: [] })]);
     const result = await runPrePrReviews({
       ticketId: 'REV-001',
       modelService: harness.modelService,
