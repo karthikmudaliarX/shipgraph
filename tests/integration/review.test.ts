@@ -209,6 +209,30 @@ function reviewAdapter(results: readonly string[]): ReviewAdapter {
           stderrTruncated: false,
         } satisfies AgentExecutionResult;
       }
+      if (output === 'primitive-error-envelope') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: JSON.stringify({ type: 'text', text: VALID_REVIEW_REPORT, error: true }),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        } satisfies AgentExecutionResult;
+      }
+      if (output === 'malformed-text-envelope') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: JSON.stringify({ type: 'text', text: 42, data: { text: VALID_REVIEW_REPORT } }),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        } satisfies AgentExecutionResult;
+      }
       if (output === 'non-report-envelope') {
         return {
           outcome: 'SUCCEEDED',
@@ -522,6 +546,36 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
 
   it('fails closed when a provider error accompanies an embedded report', async () => {
     harness = await createHarness(['error-envelope', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(false);
+    expect(result.contract.run.status).toBe('NEEDS_HUMAN');
+    expect(result.contract.run.failureCategory).toBe('malformed_output');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('fails closed when a primitive provider error accompanies an embedded report', async () => {
+    harness = await createHarness(['primitive-error-envelope', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(false);
+    expect(result.contract.run.status).toBe('NEEDS_HUMAN');
+    expect(result.contract.run.failureCategory).toBe('malformed_output');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('fails closed when a malformed provider text field accompanies a valid report', async () => {
+    harness = await createHarness(['malformed-text-envelope', VALID_REVIEW_REPORT]);
     const result = await runPrePrReviews({
       ticketId: 'REV-001',
       modelService: harness.modelService,

@@ -1013,6 +1013,7 @@ function isKnownProviderEnvelope(value: unknown): boolean {
 function parseProviderEnvelope(value: unknown): ParsedReviewChannel {
   if (!isKnownProviderEnvelope(value)) return { malformed: true };
   if (hasProviderError(value)) return { malformed: true };
+  if (hasMalformedProviderText(value)) return { malformed: true };
   const payloads = providerTextPayloads(value);
   if (payloads.length === 0) return { malformed: true };
   const reports: Array<ReturnType<typeof reviewOutputSchema.parse>> = [];
@@ -1049,6 +1050,30 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function hasMalformedProviderText(value: unknown): boolean {
+  if (!isKnownProviderEnvelope(value)) return false;
+  const entry = value as Record<string, unknown>;
+  for (const key of ['text', 'summary', 'response'] as const) {
+    if (key in entry && !isNonEmptyText(entry[key])) return true;
+  }
+  for (const key of ['message', 'content'] as const) {
+    if (key in entry && !isNonEmptyText(entry[key]) && !isObject(entry[key])) return true;
+  }
+  for (const key of ['part', 'data', 'payload', 'msg', 'message', 'content'] as const) {
+    if (!(key in entry)) continue;
+    const nested = entry[key];
+    if (!isObject(nested)) return true;
+    for (const textKey of ['text', 'summary', 'message', 'response', 'content'] as const) {
+      if (textKey in nested && !isNonEmptyText(nested[textKey])) return true;
+    }
+  }
+  return false;
+}
+
+function isNonEmptyText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
 function hasProviderError(value: unknown): boolean {
   if (!isObject(value)) return false;
   if (isProviderErrorValue(value.error)) return true;
@@ -1060,7 +1085,7 @@ function hasProviderError(value: unknown): boolean {
 }
 
 function isProviderErrorValue(value: unknown): boolean {
-  return (typeof value === 'string' && value.length > 0) || isObject(value);
+  return value !== undefined && value !== null && !(typeof value === 'string' && value.length === 0);
 }
 
 function parseReviewSummary(value: string | undefined): ParsedReviewChannel {
