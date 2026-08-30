@@ -548,12 +548,9 @@ function validateTaskInput(
   const reviewType = input.reviewType === undefined
     ? undefined
     : reviewTypeSchema.parse(input.reviewType);
-  if (task === 'review' && reviewType === undefined) {
-    throw new Error('Review execution requires a KAR-9 review axis');
-  }
-  if (task === 'review' && input.reviewedSha === undefined) {
-    throw new Error('Review execution requires the exact reviewed SHA');
-  }
+  // Existing AGENT-001 generic review runs remain compatible. KAR-9 review
+  // evidence is created only when this operation supplies both provenance
+  // fields below.
   if (reviewType !== undefined && task !== 'review') {
     throw new Error('KAR-9 review provenance requires a review task');
   }
