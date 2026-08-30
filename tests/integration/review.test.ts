@@ -146,6 +146,131 @@ function reviewAdapter(results: readonly string[]): ReviewAdapter {
           },
         } satisfies AgentExecutionResult;
       }
+      if (output === 'jsonl-status-envelope') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: [
+            JSON.stringify({ type: 'session', session_id: 'review-session' }),
+            JSON.stringify({ type: 'status', event: 'complete' }),
+            JSON.stringify({ type: 'text', text: VALID_REVIEW_REPORT }),
+          ].join('\n'),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          evidence: {
+            outputFormat: 'jsonl',
+            eventCount: 3,
+            eventTypes: ['session', 'status', 'text'],
+          },
+        } satisfies AgentExecutionResult;
+      }
+      if (output === 'jsonl-malformed-metadata-envelope') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: [
+            JSON.stringify({ type: 42, session_id: null }),
+            JSON.stringify({ type: 'text', text: VALID_REVIEW_REPORT }),
+          ].join('\n'),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          evidence: {
+            outputFormat: 'jsonl',
+            eventCount: 2,
+            eventTypes: ['text'],
+          },
+        } satisfies AgentExecutionResult;
+      }
+      if (output === 'jsonl-arbitrary-metadata-envelope') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: [
+            JSON.stringify({ type: 'status', part: false, data: 42, payload: null, msg: ['complete'] }),
+            JSON.stringify({ type: 'text', text: VALID_REVIEW_REPORT }),
+          ].join('\n'),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          evidence: {
+            outputFormat: 'jsonl',
+            eventCount: 2,
+            eventTypes: ['status', 'text'],
+          },
+        } satisfies AgentExecutionResult;
+      }
+      if (output === 'jsonl-malformed-conversation-envelope') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: [
+            JSON.stringify({ type: 'status', conversationId: 42 }),
+            JSON.stringify({ type: 'text', text: VALID_REVIEW_REPORT }),
+          ].join('\n'),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          evidence: {
+            outputFormat: 'jsonl',
+            eventCount: 2,
+            eventTypes: ['status', 'text'],
+          },
+        } satisfies AgentExecutionResult;
+      }
+      if (output === 'jsonl-malformed-report-field-envelope') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: [
+            JSON.stringify({ type: 'status', result: 'MAYBE' }),
+            JSON.stringify({ type: 'text', text: VALID_REVIEW_REPORT }),
+          ].join('\n'),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          evidence: {
+            outputFormat: 'jsonl',
+            eventCount: 2,
+            eventTypes: ['status', 'text'],
+          },
+        } satisfies AgentExecutionResult;
+      }
+      if (output === 'message-envelope') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: JSON.stringify({ type: 'message', message: VALID_REVIEW_REPORT }),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        } satisfies AgentExecutionResult;
+      }
+      if (output === 'content-envelope') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: JSON.stringify({ type: 'content', content: VALID_REVIEW_REPORT }),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        } satisfies AgentExecutionResult;
+      }
       if (output === 'long-envelope') {
         return {
           outcome: 'SUCCEEDED',
@@ -473,6 +598,107 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
 
   it('parses a valid review report inside a JSONL provider envelope', async () => {
     harness = await createHarness(['jsonl-envelope', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(true);
+    expect(result.contract.result).toBe('PASS');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('ignores valid JSONL status events before a valid report event', async () => {
+    harness = await createHarness(['jsonl-status-envelope', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(true);
+    expect(result.contract.result).toBe('PASS');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('fails closed on malformed JSONL event metadata before a valid report event', async () => {
+    harness = await createHarness(['jsonl-malformed-metadata-envelope', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(false);
+    expect(result.contract.run.status).toBe('NEEDS_HUMAN');
+    expect(result.contract.run.failureCategory).toBe('malformed_output');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('ignores arbitrary non-text provider metadata before a valid report event', async () => {
+    harness = await createHarness(['jsonl-arbitrary-metadata-envelope', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(true);
+    expect(result.contract.result).toBe('PASS');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('fails closed on a malformed conversation identifier before a valid report event', async () => {
+    harness = await createHarness(['jsonl-malformed-conversation-envelope', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(false);
+    expect(result.contract.run.status).toBe('NEEDS_HUMAN');
+    expect(result.contract.run.failureCategory).toBe('malformed_output');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('fails closed on a malformed report field before a valid report event', async () => {
+    harness = await createHarness(['jsonl-malformed-report-field-envelope', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(false);
+    expect(result.contract.run.status).toBe('NEEDS_HUMAN');
+    expect(result.contract.run.failureCategory).toBe('malformed_output');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('parses a valid review report from a top-level message string', async () => {
+    harness = await createHarness(['message-envelope', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(true);
+    expect(result.contract.result).toBe('PASS');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('parses a valid review report from a top-level content string', async () => {
+    harness = await createHarness(['content-envelope', VALID_REVIEW_REPORT]);
     const result = await runPrePrReviews({
       ticketId: 'REV-001',
       modelService: harness.modelService,

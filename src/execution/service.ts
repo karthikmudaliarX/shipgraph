@@ -988,7 +988,7 @@ function parseReviewChannel(value: string, format: 'json' | 'jsonl' | undefined)
 function isKnownProviderEnvelope(value: unknown): boolean {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const entry = value as Record<string, unknown>;
-  if ('findings' in entry) return false;
+  if ('result' in entry || 'findings' in entry) return false;
   return [
     'type',
     'event',
@@ -997,6 +997,7 @@ function isKnownProviderEnvelope(value: unknown): boolean {
     'sessionID',
     'sessionId',
     'session_id',
+    'conversationId',
     'text',
     'summary',
     'message',
@@ -1015,7 +1016,7 @@ function parseProviderEnvelope(value: unknown): ParsedReviewChannel {
   if (hasProviderError(value)) return { malformed: true };
   if (hasMalformedProviderText(value)) return { malformed: true };
   const payloads = providerTextPayloads(value);
-  if (payloads.length === 0) return { malformed: true };
+  if (payloads.length === 0) return { malformed: false };
   const reports: Array<ReturnType<typeof reviewOutputSchema.parse>> = [];
   for (const payload of payloads) {
     const report = parseReviewJson(payload);
@@ -1053,6 +1054,18 @@ function isObject(value: unknown): value is Record<string, unknown> {
 function hasMalformedProviderText(value: unknown): boolean {
   if (!isKnownProviderEnvelope(value)) return false;
   const entry = value as Record<string, unknown>;
+  for (const key of [
+    'type',
+    'event',
+    'eventType',
+    'event_type',
+    'sessionID',
+    'sessionId',
+    'session_id',
+    'conversationId',
+  ] as const) {
+    if (key in entry && !isNonEmptyText(entry[key])) return true;
+  }
   for (const key of ['text', 'summary', 'response'] as const) {
     if (key in entry && !isNonEmptyText(entry[key])) return true;
   }
@@ -1062,7 +1075,8 @@ function hasMalformedProviderText(value: unknown): boolean {
   for (const key of ['part', 'data', 'payload', 'msg', 'message', 'content'] as const) {
     if (!(key in entry)) continue;
     const nested = entry[key];
-    if (!isObject(nested)) return true;
+    if ((key === 'message' || key === 'content') && isNonEmptyText(nested)) continue;
+    if (!isObject(nested)) continue;
     for (const textKey of ['text', 'summary', 'message', 'response', 'content'] as const) {
       if (textKey in nested && !isNonEmptyText(nested[textKey])) return true;
     }
