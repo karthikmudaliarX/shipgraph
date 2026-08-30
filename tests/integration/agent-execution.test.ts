@@ -822,16 +822,29 @@ describe('AGENT-001 durable execution', () => {
     if (task === 'review') {
       // A reviewer must receive the implementation's committed change, not
       // the original READY/base-SHA-only workspace proof.
-      writeFileSync(join(harness.workspacePath, 'README.md'), '# reviewed implementation\n');
-      git(harness.workspacePath, 'add', 'README.md');
-      git(harness.workspacePath, 'commit', '-m', 'implementation change for review');
+    writeFileSync(join(harness.workspacePath, 'README.md'), '# reviewed implementation\n');
+    git(harness.workspacePath, 'add', 'README.md');
+    git(harness.workspacePath, 'commit', '-m', 'implementation change for review');
     } else {
       // A repair agent may need to inspect an implementation's still-dirty
       // edits. The changed-workspace proof preserves them for the adapter.
       writeFileSync(join(harness.workspacePath, 'README.md'), '# dirty implementation\n');
     }
 
-    const adapter = fakeAdapter({}, ['execute', task]);
+    const adapter = fakeAdapter(
+      task === 'review'
+        ? {
+            stdout: JSON.stringify({ result: 'PASS', findings: [] }),
+            evidence: {
+              outputFormat: 'jsonl',
+              eventCount: 1,
+              eventTypes: ['review'],
+              summary: JSON.stringify({ result: 'PASS', findings: [] }),
+            },
+          }
+        : {},
+      ['execute', task]
+    );
     const providerAdapter: ModelProviderAdapter = {
       providerId: 'opencode-go',
       family: 'opencode',
@@ -866,6 +879,9 @@ describe('AGENT-001 durable execution', () => {
         model: `opencode/${task}-model`,
         task,
         instructions: `run the ${task} task through the selected route`,
+        ...(task === 'review'
+          ? { reviewType: 'contract' as const, reviewedSha: git(harness.workspacePath, 'rev-parse', 'HEAD') }
+          : {}),
       }
     );
     const decision = await modelService.route({
@@ -883,7 +899,13 @@ describe('AGENT-001 durable execution', () => {
     const execution = await modelService.executeSelectedAgentTask(
       { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
       target,
-      { ticketId: 'AG-001', instructions: `run the ${task} task through the selected route` }
+      {
+        ticketId: 'AG-001',
+        instructions: `run the ${task} task through the selected route`,
+        ...(task === 'review'
+          ? { reviewType: 'contract' as const, reviewedSha: git(harness.workspacePath, 'rev-parse', 'HEAD') }
+          : {}),
+      }
     );
 
     expect(target).not.toHaveProperty('adapter');

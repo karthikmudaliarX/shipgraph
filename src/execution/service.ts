@@ -548,6 +548,12 @@ function validateTaskInput(
   const reviewType = input.reviewType === undefined
     ? undefined
     : reviewTypeSchema.parse(input.reviewType);
+  if (task === 'review' && reviewType === undefined) {
+    throw new Error('Review execution requires a KAR-9 review axis');
+  }
+  if (task === 'review' && input.reviewedSha === undefined) {
+    throw new Error('Review execution requires the exact reviewed SHA');
+  }
   if (reviewType !== undefined && task !== 'review') {
     throw new Error('KAR-9 review provenance requires a review task');
   }
@@ -840,9 +846,12 @@ function applyReviewResult(
         result: result.reviewResult,
         findings: result.reviewFindings ?? [],
       });
+  const hasDirectReportFields = result.reviewResult !== undefined || result.reviewFindings !== undefined;
   const report = direct?.success === true
     ? direct.data
-    : parseReviewReport(result.stdout, result.evidence?.summary);
+    : hasDirectReportFields
+      ? undefined
+      : parseReviewReport(result.stdout, result.evidence?.summary);
   if (report === undefined) {
     return {
       ...result,

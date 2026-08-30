@@ -83,6 +83,20 @@ function reviewAdapter(results: readonly string[]): ReviewAdapter {
     execute: async (request) => {
       requests.push(request);
       const output = results[requests.length - 1] ?? results.at(-1) ?? '{"result":"FAIL","findings":["missing test result"]}';
+      if (output === 'direct-contradictory') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: JSON.stringify({ result: 'PASS', findings: [] }),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          reviewResult: 'PASS',
+          reviewFindings: ['contradictory finding'],
+        } satisfies AgentExecutionResult;
+      }
       return {
         outcome: 'SUCCEEDED',
         timedOut: false,
@@ -266,6 +280,21 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
 
   it('fails closed on a contradictory PASS report', async () => {
     harness = await createHarness([JSON.stringify({ result: 'PASS', findings: ['contradictory finding'] }), JSON.stringify({ result: 'PASS', findings: [] })]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(false);
+    expect(result.contract.run.status).toBe('NEEDS_HUMAN');
+    expect(result.contract.run.failureCategory).toBe('malformed_output');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('fails closed when direct adapter report fields contradict stdout', async () => {
+    harness = await createHarness(['direct-contradictory', JSON.stringify({ result: 'PASS', findings: [] })]);
     const result = await runPrePrReviews({
       ticketId: 'REV-001',
       modelService: harness.modelService,
