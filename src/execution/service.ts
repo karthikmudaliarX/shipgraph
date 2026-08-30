@@ -878,7 +878,13 @@ function applyReviewResult(
   result: AgentExecutionResult,
   reviewType: ReviewType | undefined
 ): AgentExecutionResult {
-  if (reviewType === undefined || result.outcome !== 'SUCCEEDED') return result;
+  if (reviewType === undefined || result.outcome !== 'SUCCEEDED') {
+    return {
+      ...result,
+      reviewResult: undefined,
+      reviewFindings: undefined,
+    };
+  }
 
   const reports: Array<ReturnType<typeof reviewOutputSchema.parse>> = [];
   const direct = result.reviewResult === undefined

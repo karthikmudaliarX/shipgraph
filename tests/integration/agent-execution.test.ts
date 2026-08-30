@@ -209,6 +209,25 @@ describe('AGENT-001 durable execution', () => {
     expect(persisted.workspace_path).toBe(harness.workspacePath);
   });
 
+  it('does not persist unbound adapter review fields as KAR-9 evidence', async () => {
+    harness = await createHarness();
+    const adapter = fakeAdapter({ reviewResult: 'PASS', reviewFindings: [] });
+    const result = await executeAgentTask(
+      { ...harness.options, adapter },
+      {
+        ticketId: 'AG-001',
+        model: 'openai/gpt-5',
+        instructions: 'Execute the generic AGENT-001 task.',
+      }
+    );
+
+    expect(result.run.status).toBe('SUCCEEDED');
+    expect(result.run.reviewType).toBeUndefined();
+    expect(result.run.reviewedSha).toBeUndefined();
+    expect(result.run.reviewResult).toBeUndefined();
+    expect(result.run.reviewFindings).toBeUndefined();
+  });
+
   it('refuses execution before the adapter when the READY workspace is detached or on another branch', async () => {
     harness = await createHarness();
     git(harness.workspacePath, 'checkout', '--detach');
