@@ -6,6 +6,7 @@ import {
   OpenCodeAdapter,
   redactSensitiveText,
 } from '../../src/adapters/agent/opencode.js';
+import { normalizeCommandResult } from '../../src/adapters/agent/command.js';
 import {
   createAgentProcessRunner,
   type AgentProcessSpec,
@@ -39,6 +40,29 @@ describe('OpenCode adapter and process boundary', () => {
   afterEach(() => {
     for (const directory of temporaryDirectories) rmSync(directory, { recursive: true, force: true });
     temporaryDirectories = [];
+  });
+
+  it('does not manufacture a conflicting summary for a complete KAR-9 report', () => {
+    const normalized = normalizeCommandResult(
+      {
+        exitCode: 0,
+        unexpectedTermination: false,
+        timedOut: false,
+        cancelled: false,
+        processGroupStopped: true,
+        outputLimitExceeded: false,
+        stdout: '{"result":"PASS","findings":[]}\n',
+        stderr: '',
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        durationMs: 1,
+      },
+      'review provider',
+      'json'
+    );
+
+    expect(normalized.evidence?.summary).toBeUndefined();
+    expect(normalized.stdout).toContain('"result":"PASS"');
   });
 
   it('maps provider JSONL into normalized evidence and pins cwd, model, and argv', async () => {

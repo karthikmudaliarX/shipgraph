@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   createGitRunner,
   inspectWorktreeState,
@@ -61,6 +61,7 @@ export type PrePrReviewResult = {
  */
 export async function runPrePrReviews(input: PrePrReviewInput): Promise<PrePrReviewResult> {
   const snapshot = await readReviewSnapshot(input.workspace, input.ticketId);
+  const baseRequestId = input.routing.requestId ?? randomUUID();
   const reviewSafety: AgentSafetyPolicy = {
     ...(input.safety ?? {}),
     maxAttempts: input.safety?.maxAttempts ?? 1,
@@ -76,7 +77,7 @@ export async function runPrePrReviews(input: PrePrReviewInput): Promise<PrePrRev
       input.workspace,
       {
         ...input.routing,
-        requestId: `${input.routing.requestId ?? randomUUID()}:${reviewType}`,
+        requestId: reviewRequestId(baseRequestId, reviewType),
         task: 'review',
       },
       {
@@ -103,6 +104,13 @@ export async function runPrePrReviews(input: PrePrReviewInput): Promise<PrePrRev
     engineering,
     passed: contract.passed && engineering.passed,
   };
+}
+
+function reviewRequestId(baseRequestId: string, reviewType: ReviewType): string {
+  const suffix = `:${reviewType}`;
+  const maxBaseLength = 256 - suffix.length;
+  if (baseRequestId.length <= maxBaseLength) return `${baseRequestId}${suffix}`;
+  return `${createHash('sha256').update(baseRequestId).digest('hex')}${suffix}`;
 }
 
 /**

@@ -97,6 +97,19 @@ function reviewAdapter(results: readonly string[]): ReviewAdapter {
           reviewFindings: ['contradictory finding'],
         } satisfies AgentExecutionResult;
       }
+      if (output === 'direct-missing-findings') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: '',
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          reviewResult: 'PASS',
+        } satisfies AgentExecutionResult;
+      }
       if (output === 'cross-channel-conflict') {
         return {
           outcome: 'SUCCEEDED',
@@ -346,6 +359,43 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
     expect(result.contract.run.status).toBe('NEEDS_HUMAN');
     expect(result.contract.run.failureCategory).toBe('malformed_output');
     expect(result.engineering.passed).toBe(true);
+  });
+
+  it('fails closed when direct adapter report fields omit findings', async () => {
+    harness = await createHarness(['direct-missing-findings', JSON.stringify({ result: 'PASS', findings: [] })]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(false);
+    expect(result.contract.run.status).toBe('NEEDS_HUMAN');
+    expect(result.contract.run.failureCategory).toBe('malformed_output');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('bounds long caller request IDs while keeping review axes distinct', async () => {
+    harness = await createHarness([
+      JSON.stringify({ result: 'PASS', findings: [] }),
+      JSON.stringify({ result: 'PASS', findings: [] }),
+    ]);
+    const requestId = 'r'.repeat(256);
+    await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: { ...routing(), requestId },
+    });
+
+    const decisions = harness.db.prepare(
+      'SELECT request_id FROM routing_decisions ORDER BY created_at'
+    ).all() as Array<{ request_id: string }>;
+    expect(decisions).toHaveLength(2);
+    expect(decisions[0]?.request_id.length).toBeLessThanOrEqual(256);
+    expect(decisions[1]?.request_id.length).toBeLessThanOrEqual(256);
+    expect(decisions[0]?.request_id).not.toBe(decisions[1]?.request_id);
   });
 
   it('fails closed when valid report channels disagree', async () => {

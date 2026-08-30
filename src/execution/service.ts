@@ -891,7 +891,7 @@ function applyReviewResult(
     ? undefined
     : reviewOutputSchema.safeParse({
         result: result.reviewResult,
-        findings: result.reviewFindings ?? [],
+        findings: result.reviewFindings,
       });
   const hasDirectReportFields = result.reviewResult !== undefined || result.reviewFindings !== undefined;
   if (hasDirectReportFields && direct?.success !== true) {
