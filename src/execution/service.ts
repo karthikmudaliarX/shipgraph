@@ -837,6 +837,7 @@ function applyReviewResult(
 ): AgentExecutionResult {
   if (reviewType === undefined || result.outcome !== 'SUCCEEDED') return result;
 
+  const reports: Array<ReturnType<typeof reviewOutputSchema.parse>> = [];
   const direct = result.reviewResult === undefined
     ? undefined
     : reviewOutputSchema.safeParse({
@@ -844,22 +845,26 @@ function applyReviewResult(
         findings: result.reviewFindings ?? [],
       });
   const hasDirectReportFields = result.reviewResult !== undefined || result.reviewFindings !== undefined;
-  const report = direct?.success === true
-    ? direct.data
-    : hasDirectReportFields
-      ? undefined
-      : parseReviewReport(result.stdout, result.evidence?.summary);
-  if (report === undefined) {
-    return {
-      ...result,
-      outcome: 'NEEDS_HUMAN',
-      timedOut: false,
-      cancelled: false,
-      failureCategory: 'malformed_output',
-      failureReason: `The ${reviewType} reviewer did not return a supported PASS/FAIL report`,
-      reviewResult: undefined,
-      reviewFindings: undefined,
-    };
+  if (hasDirectReportFields && direct?.success !== true) {
+    return malformedReviewResult(result, reviewType);
+  }
+  if (direct?.success === true) reports.push(direct.data);
+  const stdoutReport = parseReviewJson(result.stdout);
+  if (stdoutReport !== undefined) reports.push(stdoutReport);
+  const summaryReport = result.evidence?.summary === undefined
+    ? undefined
+    : parseReviewJson(result.evidence.summary);
+  if (summaryReport !== undefined) reports.push(summaryReport);
+  const report = reports[0];
+  if (
+    report === undefined ||
+    reports.some((candidate) =>
+      candidate.result !== report.result ||
+      candidate.findings.length !== report.findings.length ||
+      candidate.findings.some((finding, index) => finding !== report.findings[index])
+    )
+  ) {
+    return malformedReviewResult(result, reviewType);
   }
   return {
     ...result,
@@ -868,14 +873,27 @@ function applyReviewResult(
   };
 }
 
-function parseReviewReport(
-  stdout: string,
-  normalizedSummary?: string
-): ReturnType<typeof reviewOutputSchema.parse> | undefined {
-  const report = parseReviewJson(stdout);
-  return report ?? (normalizedSummary === undefined ? undefined : parseReviewJson(normalizedSummary));
+function malformedReviewResult(
+  result: AgentExecutionResult,
+  reviewType: ReviewType
+): AgentExecutionResult {
+  return {
+    ...result,
+    outcome: 'NEEDS_HUMAN',
+    timedOut: false,
+    cancelled: false,
+    failureCategory: 'malformed_output',
+    failureReason: `The ${reviewType} reviewer did not return one consistent PASS/FAIL report`,
+    reviewResult: undefined,
+    reviewFindings: undefined,
+  };
 }
 
+/*
+ * Keep this helper narrow: it validates a complete provider-output object and
+ * does not search arbitrary nested values for a report. Every present channel
+ * is compared by the caller before the result is accepted.
+ */
 function parseReviewJson(value: string): ReturnType<typeof reviewOutputSchema.parse> | undefined {
   const output = redactSensitiveText(value).trim();
   if (output.length === 0) return undefined;
