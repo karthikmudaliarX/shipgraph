@@ -842,7 +842,7 @@ function applyReviewResult(
       });
   const report = direct?.success === true
     ? direct.data
-    : parseReviewReport(result.stdout);
+    : parseReviewReport(result.stdout, result.evidence?.summary);
   if (report === undefined) {
     return {
       ...result,
@@ -862,54 +862,24 @@ function applyReviewResult(
   };
 }
 
-function parseReviewReport(stdout: string): ReturnType<typeof reviewReportSchema.parse> | undefined {
-  const output = redactSensitiveText(stdout).trim();
-  if (output.length === 0) return undefined;
-  const candidates: unknown[] = [];
-  try {
-    candidates.push(JSON.parse(output) as unknown);
-  } catch {
-    for (const line of output.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean)) {
-      try {
-        candidates.push(JSON.parse(line) as unknown);
-      } catch {
-        // A provider's structured event may still carry the report as text.
-      }
-    }
-  }
-  for (const candidate of candidates) {
-    const report = findReviewReport(candidate, 0);
-    if (report !== undefined) return report;
-  }
-  return undefined;
+function parseReviewReport(
+  stdout: string,
+  normalizedSummary?: string
+): ReturnType<typeof reviewReportSchema.parse> | undefined {
+  const report = parseReviewJson(stdout);
+  return report ?? (normalizedSummary === undefined ? undefined : parseReviewJson(normalizedSummary));
 }
 
-function findReviewReport(value: unknown, depth: number): ReturnType<typeof reviewReportSchema.parse> | undefined {
-  if (depth > 4 || value === null || value === undefined) return undefined;
-  if (typeof value === 'string') {
-    const text = value.trim();
-    if (!text.startsWith('{') && !text.startsWith('[')) return undefined;
-    try {
-      return findReviewReport(JSON.parse(text) as unknown, depth + 1);
-    } catch {
-      return undefined;
-    }
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      const report = findReviewReport(entry, depth + 1);
-      if (report !== undefined) return report;
-    }
+function parseReviewJson(value: string): ReturnType<typeof reviewReportSchema.parse> | undefined {
+  const output = redactSensitiveText(value).trim();
+  if (output.length === 0) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(output);
+    const report = reviewReportSchema.safeParse(parsed);
+    return report.success ? report.data : undefined;
+  } catch {
     return undefined;
   }
-  if (typeof value !== 'object') return undefined;
-  const direct = reviewReportSchema.safeParse(value);
-  if (direct.success) return direct.data;
-  for (const entry of Object.values(value)) {
-    const report = findReviewReport(entry, depth + 1);
-    if (report !== undefined) return report;
-  }
-  return undefined;
 }
 
 async function getVerifiedExecutionWorkspace(

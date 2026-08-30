@@ -26,7 +26,6 @@ import { ModelRoutingService, type RoutedAgentTaskResult } from '../model/servic
 import type { AgentSafetyPolicy } from '../execution/service.js';
 
 const REVIEW_DIFF_LIMIT_BYTES = 32 * 1024;
-const REVIEW_VERIFICATION_LIMIT_BYTES = 8 * 1024;
 const FULL_SHA_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/u;
 
 export type PrePrReviewInput = {
@@ -37,8 +36,6 @@ export type PrePrReviewInput = {
   timeoutMs?: number;
   signal?: AbortSignal;
   safety?: AgentSafetyPolicy;
-  /** Read-only verification results supplied by the caller, not transcripts. */
-  verificationEvidence?: readonly string[];
 };
 
 export type PrePrReviewAxisResult = {
@@ -63,7 +60,7 @@ export type PrePrReviewResult = {
  * ticket; each still receives a separate routed run and request identity.
  */
 export async function runPrePrReviews(input: PrePrReviewInput): Promise<PrePrReviewResult> {
-  const snapshot = await readReviewSnapshot(input.workspace, input.ticketId, input.verificationEvidence);
+  const snapshot = await readReviewSnapshot(input.workspace, input.ticketId);
   const reviewSafety: AgentSafetyPolicy = {
     ...(input.safety ?? {}),
     maxAttempts: input.safety?.maxAttempts ?? 1,
@@ -138,8 +135,7 @@ export async function listCurrentPrePrReviewEvidence(
 
 async function readReviewSnapshot(
   options: WorkspaceServiceOptions,
-  ticketId: string,
-  verificationEvidence?: readonly string[]
+  ticketId: string
 ): Promise<{
   workspace: WorkspaceRecord;
   baseSha: string;
@@ -147,7 +143,6 @@ async function readReviewSnapshot(
   diff: string;
   diffTruncated: boolean;
   contract: Record<string, unknown>;
-  verificationEvidence: readonly string[];
 }> {
   const workspace = await getVerifiedWorkspaceForExecution(options, ticketId, 'changed');
   const runner = options.gitRunner ?? createGitRunner();
@@ -189,7 +184,6 @@ async function readReviewSnapshot(
     agent: ticket.agent,
     release: ticket.release,
   } satisfies Record<string, unknown>;
-  const evidence = boundedVerificationEvidence(verificationEvidence);
   return {
     workspace,
     baseSha: workspace.baseSha,
@@ -197,7 +191,6 @@ async function readReviewSnapshot(
     diff: boundedDiff.value,
     diffTruncated: boundedDiff.truncated,
     contract,
-    verificationEvidence: evidence,
   };
 }
 
@@ -230,9 +223,6 @@ function reviewInstructions(
   const truncation = snapshot.diffTruncated
     ? '\nThe supplied diff is bounded and marked incomplete; inspect the read-only repository for the complete change before deciding.'
     : '';
-  const evidence = snapshot.verificationEvidence.length === 0
-    ? ''
-    : `\nVerification evidence (read-only results only):\n${JSON.stringify(snapshot.verificationEvidence)}`;
   return [
     'Perform one bounded KAR-9 pre-PR review axis.',
     axis,
@@ -244,7 +234,6 @@ function reviewInstructions(
     `Head commit SHA: ${snapshot.headSha}`,
     `Ticket contract: ${JSON.stringify(snapshot.contract)}`,
     `Diff from base to head:\n${snapshot.diff}${truncation}`,
-    evidence,
   ].filter((line) => line.length > 0).join('\n\n');
 }
 
@@ -264,23 +253,6 @@ function axisResult(
     passed: run.status === 'SUCCEEDED' && result === 'PASS',
     run,
   };
-}
-
-function boundedVerificationEvidence(values: readonly string[] | undefined): readonly string[] {
-  if (values === undefined) return [];
-  const bounded: string[] = [];
-  let bytes = 0;
-  for (const value of values) {
-    if (typeof value !== 'string' || value.length === 0) continue;
-    const redacted = redactSensitiveText(value);
-    const remaining = REVIEW_VERIFICATION_LIMIT_BYTES - bytes;
-    if (remaining <= 0) break;
-    const part = boundedText(redacted, remaining);
-    bounded.push(part.value);
-    bytes += Buffer.byteLength(part.value, 'utf8');
-    if (part.truncated) break;
-  }
-  return bounded;
 }
 
 function boundedText(value: string, limit: number): { value: string; truncated: boolean } {

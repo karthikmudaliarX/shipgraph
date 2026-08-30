@@ -195,7 +195,6 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
       modelService: harness.modelService,
       workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
       routing: routing(),
-      verificationEvidence: ['pnpm test: 1 passed'],
     });
 
     expect(result.passed).toBe(false);
@@ -206,7 +205,6 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
     expect(harness.adapter.requests[0]?.reviewType).toBe('contract');
     expect(harness.adapter.requests[1]?.reviewType).toBe('engineering');
     expect(harness.adapter.requests[0]?.instructions).toContain('AC-1');
-    expect(harness.adapter.requests[0]?.instructions).toContain('pnpm test: 1 passed');
     expect(harness.adapter.requests[0]?.instructions).toContain('read-only repository');
     expect(harness.adapter.requests[0]?.instructions).not.toContain('implementation transcript');
     expect(harness.adapter.requests[0]?.instructions).not.toContain('self-review');
@@ -251,7 +249,7 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
   });
 
   it('fails closed when a review provider does not return the required report', async () => {
-    harness = await createHarness(['{"type":"text","text":"not a review"}', JSON.stringify({ result: 'PASS', findings: [] })]);
+    harness = await createHarness(['{"type":"text","text":"{\\"result\\":\\"PASS\\",\\"findings\\":[]}"}', JSON.stringify({ result: 'PASS', findings: [] })]);
     const result = await runPrePrReviews({
       ticketId: 'REV-001',
       modelService: harness.modelService,
