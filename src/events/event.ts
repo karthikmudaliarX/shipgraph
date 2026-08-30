@@ -10,6 +10,7 @@ import {
   reviewTypeSchema,
 } from '../domain/agent-run.js';
 import { modelProviderIdSchema, modelTaskTypeSchema } from '../domain/model-provider.js';
+import { repairAttemptEvidenceSchema } from '../domain/repair.js';
 
 /** Core event types for the append-only audit log. */
 export const EVENT_TYPES = [
@@ -24,6 +25,7 @@ export const EVENT_TYPES = [
   'workspace.removed',
   'workspace.failed',
   'run.state_changed',
+  'repair.attempt_recorded',
 ] as const;
 
 export const EventType = {
@@ -38,6 +40,7 @@ export const EventType = {
   WORKSPACE_REMOVED: EVENT_TYPES[8],
   WORKSPACE_FAILED: EVENT_TYPES[9],
   RUN_STATE_CHANGED: EVENT_TYPES[10],
+  REPAIR_ATTEMPT_RECORDED: EVENT_TYPES[11],
 } as const;
 
 export type EventTypeValue = (typeof EVENT_TYPES)[number];
@@ -226,6 +229,13 @@ const eventUnionSchema = z.discriminatedUnion('type', [
     type: z.literal(EventType.RUN_STATE_CHANGED),
     payload: runStateChangedPayloadSchema,
   }).strict(),
+  z.object({
+    ...baseEnvelopeShape,
+    ticketId: identitySchema,
+    runId: identitySchema.optional(),
+    type: z.literal(EventType.REPAIR_ATTEMPT_RECORDED),
+    payload: repairAttemptEvidenceSchema,
+  }).strict(),
 ]);
 
 /** Runtime-typed event union with duplicated envelope identities kept consistent. */
@@ -260,6 +270,22 @@ export const eventSchema = eventUnionSchema.superRefine((event, context) => {
       });
     }
   }
+  if (event.type === EventType.REPAIR_ATTEMPT_RECORDED) {
+    if (event.payload.repairRunId !== undefined && event.runId !== event.payload.repairRunId) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['payload', 'repairRunId'],
+        message: 'payload.repairRunId must match event.runId',
+      });
+    }
+    if (event.payload.repairRunId === undefined && event.runId !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['runId'],
+        message: 'event.runId requires payload.repairRunId',
+      });
+    }
+  }
 });
 
 export type ShipgraphEvent = z.infer<typeof eventSchema>;
@@ -277,6 +303,7 @@ export type WorkspaceCreatingPayload = z.infer<typeof workspaceCreatingPayloadSc
 export type WorkspaceReadyPayload = z.infer<typeof workspaceReadyPayloadSchema>;
 export type WorkspaceRemovedPayload = z.infer<typeof workspaceRemovedPayloadSchema>;
 export type WorkspaceFailedPayload = z.infer<typeof workspaceFailedPayloadSchema>;
+export type RepairAttemptRecordedPayload = z.infer<typeof repairAttemptEvidenceSchema>;
 
 export function isValidStateValue(value: string): value is TicketStateValue {
   return ticketStateSchema.safeParse(value).success;

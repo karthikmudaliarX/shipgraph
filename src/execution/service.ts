@@ -1146,7 +1146,7 @@ async function getVerifiedExecutionWorkspace(
   }
   const requiredStates = task === 'implementation' && afterStart
     ? [TicketState.PLANNING, TicketState.IMPLEMENTING]
-    : [requiredTicketState(task)];
+    : requiredTicketStates(task);
   if (!requiredStates.includes(ticket.status)) {
     throw new Error(
       `Ticket ${ticketId} has state ${ticket.status}; ${task} agent execution requires ${requiredStates.join(' or ')}`
@@ -1169,6 +1169,12 @@ function requiredTicketState(task: ModelTaskType): TicketStateValue {
     case 'repair':
       return TicketState.REPAIRING;
   }
+}
+
+function requiredTicketStates(task: ModelTaskType): readonly TicketStateValue[] {
+  return task === 'review'
+    ? [TicketState.VERIFYING, TicketState.REVIEWING]
+    : [requiredTicketState(task)];
 }
 
 function buildAgentRun(
@@ -1336,7 +1342,7 @@ function persistCreatedRun(
     if (
       !ticket ||
       ticket.projectId !== run.projectId ||
-      ticket.status !== requiredTicketState(task)
+      !requiredTicketStates(task).includes(ticket.status)
     ) {
       throw new Error(
         `Ticket ${run.ticketId} changed before the ${task} agent run was persisted`
