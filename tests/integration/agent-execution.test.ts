@@ -28,6 +28,7 @@ import { UsageLedger } from '../../src/model/ledger.js';
 import {
   executeAgentTask,
   prepareAgentTaskRun,
+  preparePrePrReviewTask,
   reconcileAgentRun,
   recoverAgentRun,
   type AgentExecutionServiceOptions,
@@ -866,24 +867,27 @@ describe('AGENT-001 durable execution', () => {
       adapters: [providerAdapter],
       executionAdapters: [{ modelProviderId: 'opencode-go', adapter }],
     });
-    const prepared = await prepareAgentTaskRun(
-      {
-        ...harness.options,
-        adapter,
-        createRunId: () => `model-${task}-run`,
-      },
-      {
-        ticketId: 'AG-001',
-        provider: 'opencode',
-        modelProviderId: 'opencode-go',
-        model: `opencode/${task}-model`,
-        task,
-        instructions: `run the ${task} task through the selected route`,
-        ...(task === 'review'
-          ? { reviewType: 'contract' as const, reviewedSha: git(harness.workspacePath, 'rev-parse', 'HEAD') }
-          : {}),
-      }
-    );
+    const reviewProvenance = task === 'review'
+      ? { reviewType: 'contract' as const, reviewedSha: git(harness.workspacePath, 'rev-parse', 'HEAD') }
+      : undefined;
+    const preparationInput = {
+      ticketId: 'AG-001',
+      provider: 'opencode' as const,
+      modelProviderId: 'opencode-go' as const,
+      model: `opencode/${task}-model`,
+      task,
+      instructions: `run the ${task} task through the selected route`,
+    };
+    const prepared = reviewProvenance === undefined
+      ? await prepareAgentTaskRun(
+          { ...harness.options, adapter, createRunId: () => `model-${task}-run` },
+          preparationInput
+        )
+      : await preparePrePrReviewTask(
+          { ...harness.options, adapter, createRunId: () => `model-${task}-run` },
+          preparationInput,
+          reviewProvenance
+        );
     const decision = await modelService.route({
       runId: prepared.run.id,
       task,
@@ -896,17 +900,18 @@ describe('AGENT-001 durable execution', () => {
       },
     });
     const target = modelService.resolveExecutionTarget(decision);
-    const execution = await modelService.executeSelectedAgentTask(
-      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
-      target,
-      {
-        ticketId: 'AG-001',
-        instructions: `run the ${task} task through the selected route`,
-        ...(task === 'review'
-          ? { reviewType: 'contract' as const, reviewedSha: git(harness.workspacePath, 'rev-parse', 'HEAD') }
-          : {}),
-      }
-    );
+    const execution = reviewProvenance === undefined
+      ? await modelService.executeSelectedAgentTask(
+          { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+          target,
+          { ticketId: 'AG-001', instructions: `run the ${task} task through the selected route` }
+        )
+      : await modelService.executeSelectedPrePrReviewTask(
+          { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+          target,
+          { ticketId: 'AG-001', instructions: `run the ${task} task through the selected route` },
+          reviewProvenance
+        );
 
     expect(target).not.toHaveProperty('adapter');
     expect(target.task).toBe(task);

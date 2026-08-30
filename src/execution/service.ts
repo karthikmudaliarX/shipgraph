@@ -91,9 +91,6 @@ export type AgentTaskInput = {
   provider?: AgentProvider;
   /** Concrete MODEL-001 identity when this run is selected by the router. */
   modelProviderId?: ModelProviderId;
-  /** KAR-9 review provenance; both fields are required for review runs. */
-  reviewType?: ReviewType;
-  reviewedSha?: string;
   /** Existing CREATED run to execute after MODEL-001 binds its route. */
   runId?: string;
   timeoutMs?: number;
@@ -121,6 +118,13 @@ export type AgentTaskPreparationInput = Omit<AgentTaskInput, 'runId'>;
 
 export type SelectedAgentTaskInput = Omit<AgentTaskInput, 'model' | 'provider' | 'runId' | 'task'>;
 
+export type PrePrReviewProvenance = {
+  reviewType: ReviewType;
+  reviewedSha: string;
+};
+
+type ExecutionTaskInput = AgentTaskInput & Partial<PrePrReviewProvenance>;
+
 /**
  * Persist a CREATED AGENT-001 run without launching a provider. MODEL-001 can
  * then bind a route to this run before ModelRoutingService starts it through
@@ -129,6 +133,22 @@ export type SelectedAgentTaskInput = Omit<AgentTaskInput, 'model' | 'provider' |
 export async function prepareAgentTaskRun(
   options: AgentExecutionServiceOptions,
   input: AgentTaskPreparationInput
+): Promise<AgentTaskResult> {
+  return prepareAgentTaskRunInternal(options, withoutReviewProvenance(input));
+}
+
+/** Prepare one KAR-9 review run with provenance unavailable to generic callers. */
+export async function preparePrePrReviewTask(
+  options: AgentExecutionServiceOptions,
+  input: AgentTaskPreparationInput,
+  review: PrePrReviewProvenance
+): Promise<AgentTaskResult> {
+  return prepareAgentTaskRunInternal(options, { ...input, ...review });
+}
+
+async function prepareAgentTaskRunInternal(
+  options: AgentExecutionServiceOptions,
+  input: ExecutionTaskInput
 ): Promise<AgentTaskResult> {
   const normalized = validateTaskInput(options, input);
   const workspace = await getVerifiedExecutionWorkspace(
@@ -197,6 +217,22 @@ export async function abandonPreparedAgentTaskRun(
 export async function executeAgentTask(
   options: AgentExecutionServiceOptions,
   input: AgentTaskInput
+): Promise<AgentTaskResult> {
+  return executeAgentTaskInternal(options, withoutReviewProvenance(input));
+}
+
+/** Execute one KAR-9 review run with provenance unavailable to generic callers. */
+export async function executePrePrReviewTask(
+  options: AgentExecutionServiceOptions,
+  input: AgentTaskInput,
+  review: PrePrReviewProvenance
+): Promise<AgentTaskResult> {
+  return executeAgentTaskInternal(options, { ...input, ...review });
+}
+
+async function executeAgentTaskInternal(
+  options: AgentExecutionServiceOptions,
+  input: ExecutionTaskInput
 ): Promise<AgentTaskResult> {
   const now = options.now ?? (() => new Date().toISOString());
   const createEventId = options.createEventId ?? randomUUID;
@@ -448,6 +484,13 @@ export async function executeAgentTask(
   }
 }
 
+function withoutReviewProvenance<T extends AgentTaskInput>(input: T): T {
+  const genericInput = { ...input } as T & Partial<PrePrReviewProvenance>;
+  delete genericInput.reviewType;
+  delete genericInput.reviewedSha;
+  return genericInput;
+}
+
 /** Read one durable run after validating current-project ownership. */
 export async function inspectAgentRun(
   options: WorkspaceServiceOptions,
@@ -513,7 +556,7 @@ export async function reconcileAgentRun(
 
 function validateTaskInput(
   options: AgentExecutionServiceOptions,
-  input: AgentTaskInput
+  input: ExecutionTaskInput
 ): {
   instructions: string;
   model: string;

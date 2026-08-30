@@ -72,7 +72,7 @@ export async function runPrePrReviews(input: PrePrReviewInput): Promise<PrePrRev
     if (reviewType !== 'contract') {
       await assertCurrentReviewHead(input.workspace, input.ticketId, snapshot.headSha);
     }
-    const routed = await input.modelService.executeRoutedAgentTask(
+    const routed = await input.modelService.executeRoutedPrePrReviewTask(
       input.workspace,
       {
         ...input.routing,
@@ -85,9 +85,8 @@ export async function runPrePrReviews(input: PrePrReviewInput): Promise<PrePrRev
         ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
         ...(input.signal === undefined ? {} : { signal: input.signal }),
         safety: reviewSafety,
-        reviewType,
-        reviewedSha: snapshot.headSha,
-      }
+      },
+      { reviewType, reviewedSha: snapshot.headSha }
     );
     results.push(axisResult(reviewType, snapshot.headSha, routed));
     await assertCurrentReviewHead(input.workspace, input.ticketId, snapshot.headSha);
