@@ -892,12 +892,13 @@ function applyReviewResult(
     return malformedReviewResult(result, reviewType);
   }
   if (direct?.success === true) reports.push(direct.data);
-  const stdoutReport = parseReviewJson(result.stdout);
-  if (stdoutReport !== undefined) reports.push(stdoutReport);
-  const summaryReport = result.evidence?.summary === undefined
-    ? undefined
-    : parseReviewJson(result.evidence.summary);
-  if (summaryReport !== undefined) reports.push(summaryReport);
+  const stdoutChannel = parseReviewChannel(result.stdout, result.evidence?.outputFormat);
+  const summaryChannel = parseReviewSummary(result.evidence?.summary);
+  if (stdoutChannel.malformed || summaryChannel.malformed) {
+    return malformedReviewResult(result, reviewType);
+  }
+  if (stdoutChannel.report !== undefined) reports.push(stdoutChannel.report);
+  if (summaryChannel.report !== undefined) reports.push(summaryChannel.report);
   const report = reports[0];
   if (
     report === undefined ||
@@ -930,6 +931,44 @@ function malformedReviewResult(
     reviewResult: undefined,
     reviewFindings: undefined,
   };
+}
+
+type ParsedReviewChannel = {
+  report?: ReturnType<typeof reviewOutputSchema.parse>;
+  malformed: boolean;
+};
+
+function parseReviewChannel(value: string, format: 'json' | 'jsonl' | undefined): ParsedReviewChannel {
+  const output = redactSensitiveText(value).trim();
+  if (output.length === 0) return { malformed: false };
+  if (format === 'jsonl') {
+    const lines = output.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+    const values: unknown[] = [];
+    try {
+      for (const line of lines) values.push(JSON.parse(line) as unknown);
+    } catch {
+      return { malformed: true };
+    }
+    if (values.length === 1) {
+      const report = reviewOutputSchema.safeParse(values[0]);
+      return report.success ? { report: report.data, malformed: false } : { malformed: false };
+    }
+    return { malformed: false };
+  }
+  try {
+    const report = reviewOutputSchema.safeParse(JSON.parse(output) as unknown);
+    return report.success ? { report: report.data, malformed: false } : { malformed: false };
+  } catch {
+    return { malformed: true };
+  }
+}
+
+function parseReviewSummary(value: string | undefined): ParsedReviewChannel {
+  if (value === undefined || value.trim().length === 0) return { malformed: false };
+  const report = parseReviewJson(value);
+  return report === undefined
+    ? { malformed: true }
+    : { report, malformed: false };
 }
 
 /*

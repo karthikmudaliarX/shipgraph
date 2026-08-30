@@ -117,6 +117,26 @@ function reviewAdapter(results: readonly string[]): ReviewAdapter {
           reviewFindings: [],
         } satisfies AgentExecutionResult;
       }
+      if (output === 'malformed-channel') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: 'not structured output',
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          evidence: {
+            outputFormat: 'json',
+            eventCount: 1,
+            eventTypes: ['review'],
+            summary: JSON.stringify({ result: 'PASS', findings: [] }),
+          },
+          reviewResult: 'PASS',
+          reviewFindings: [],
+        } satisfies AgentExecutionResult;
+      }
       return {
         outcome: 'SUCCEEDED',
         timedOut: false,
@@ -330,6 +350,21 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
 
   it('fails closed when valid report channels disagree', async () => {
     harness = await createHarness(['cross-channel-conflict', JSON.stringify({ result: 'PASS', findings: [] })]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(false);
+    expect(result.contract.run.status).toBe('NEEDS_HUMAN');
+    expect(result.contract.run.failureCategory).toBe('malformed_output');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('fails closed on malformed non-empty provider output', async () => {
+    harness = await createHarness(['malformed-channel', JSON.stringify({ result: 'PASS', findings: [] })]);
     const result = await runPrePrReviews({
       ticketId: 'REV-001',
       modelService: harness.modelService,
