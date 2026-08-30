@@ -26,9 +26,12 @@ import {
   MAX_AGENT_TIMEOUT_MS,
   agentExecutionResultSchema,
   agentRunRecordSchema,
+  reviewReportSchema,
+  reviewTypeSchema,
   type AgentFailureCategory,
   type AgentRunRecord,
   type AgentRunState,
+  type ReviewType,
 } from '../domain/agent-run.js';
 import { TicketState, type TicketStateValue } from '../core/state-machine/state.js';
 import { EventType } from '../events/event.js';
@@ -88,6 +91,9 @@ export type AgentTaskInput = {
   provider?: AgentProvider;
   /** Concrete MODEL-001 identity when this run is selected by the router. */
   modelProviderId?: ModelProviderId;
+  /** KAR-9 review provenance; both fields are required for review runs. */
+  reviewType?: ReviewType;
+  reviewedSha?: string;
   /** Existing CREATED run to execute after MODEL-001 binds its route. */
   runId?: string;
   timeoutMs?: number;
@@ -125,7 +131,13 @@ export async function prepareAgentTaskRun(
   input: AgentTaskPreparationInput
 ): Promise<AgentTaskResult> {
   const normalized = validateTaskInput(options, input);
-  const workspace = await getVerifiedExecutionWorkspace(options, input.ticketId, normalized.task);
+  const workspace = await getVerifiedExecutionWorkspace(
+    options,
+    input.ticketId,
+    normalized.task,
+    false,
+    normalized.reviewedSha
+  );
   const now = options.now ?? (() => new Date().toISOString());
   const createEventId = options.createEventId ?? randomUUID;
   const createRunId = options.createRunId ?? randomUUID;
@@ -191,7 +203,13 @@ export async function executeAgentTask(
   const normalized = validateTaskInput(options, input);
   let workspace: Awaited<ReturnType<typeof getVerifiedExecutionWorkspace>>;
   try {
-    workspace = await getVerifiedExecutionWorkspace(options, input.ticketId, normalized.task);
+    workspace = await getVerifiedExecutionWorkspace(
+      options,
+      input.ticketId,
+      normalized.task,
+      false,
+      normalized.reviewedSha
+    );
   } catch (error) {
     // A routed caller may have prepared and capacity-bound a CREATED run before
     // this final workspace proof. No adapter boundary has been reached here, so
@@ -279,7 +297,8 @@ export async function executeAgentTask(
       options,
       input.ticketId,
       normalized.task,
-      true
+      true,
+      normalized.reviewedSha
     );
     if (
       verifiedAgain.id !== started.workspaceId ||
@@ -349,6 +368,8 @@ export async function executeAgentTask(
       provider: started.provider as AgentProvider,
       model: started.model,
       instructions: normalized.instructions,
+      ...(normalized.reviewType === undefined ? {} : { reviewType: normalized.reviewType }),
+      ...(normalized.reviewedSha === undefined ? {} : { reviewedSha: normalized.reviewedSha }),
       timeoutMs: started.timeoutMs,
       maxOutputBytes: normalized.maxOutputBytes,
       ...(remainingTokenBudget(normalized.safety, durableUsage) === undefined
@@ -387,10 +408,13 @@ export async function executeAgentTask(
     };
   }
 
-  const normalizedResult = applySafetyResult(
-    normalizeAdapterResult(adapterResult, normalized.maxOutputBytes),
-    normalized.safety,
-    durableUsage
+  const normalizedResult = applyReviewResult(
+    applySafetyResult(
+      normalizeAdapterResult(adapterResult, normalized.maxOutputBytes),
+      normalized.safety,
+      durableUsage
+    ),
+    normalized.reviewType
   );
   // Capacity ownership depends only on the normalized process-group proof.
   // Outcome quality, timeout and bounded-output evidence affect the run result,
@@ -497,6 +521,8 @@ function validateTaskInput(
   timeoutMs: number;
   maxOutputBytes: number;
   modelProviderId?: ModelProviderId;
+  reviewType?: ReviewType;
+  reviewedSha?: string;
   safety: AgentSafetyPolicy;
 } {
   if (!agentProviderSchema.safeParse(options.adapter.provider).success) {
@@ -519,6 +545,18 @@ function validateTaskInput(
     );
   }
   const task = modelTaskTypeSchema.parse(input.task ?? 'implementation');
+  const reviewType = input.reviewType === undefined
+    ? undefined
+    : reviewTypeSchema.parse(input.reviewType);
+  if (reviewType !== undefined && task !== 'review') {
+    throw new Error('KAR-9 review provenance requires a review task');
+  }
+  if (reviewType !== undefined && input.reviewedSha === undefined) {
+    throw new Error('KAR-9 review provenance requires the exact reviewed SHA');
+  }
+  if (input.reviewedSha !== undefined && !/^[0-9a-f]{40}$|^[0-9a-f]{64}$/u.test(input.reviewedSha)) {
+    throw new Error('KAR-9 reviewed SHA must be a full Git commit SHA');
+  }
   if (!options.adapter.capabilities.includes(MODEL_TASK_TO_AGENT_CAPABILITY[task])) {
     throw new Error(
       `AGENT-001 adapter for ${options.adapter.provider} does not support MODEL task ${task}`
@@ -551,6 +589,8 @@ function validateTaskInput(
     timeoutMs,
     maxOutputBytes,
     ...(modelProviderId === undefined ? {} : { modelProviderId }),
+    ...(reviewType === undefined ? {} : { reviewType }),
+    ...(input.reviewedSha === undefined ? {} : { reviewedSha: input.reviewedSha }),
     safety: safetyPolicyWithTicketRisk(
       options,
       input.ticketId,
@@ -787,16 +827,103 @@ function safetyLimitedResult(result: AgentExecutionResult, reason: string): Agen
   };
 }
 
+/** Require a machine-readable PASS/FAIL report for a KAR-9 review run. */
+function applyReviewResult(
+  result: AgentExecutionResult,
+  reviewType: ReviewType | undefined
+): AgentExecutionResult {
+  if (reviewType === undefined || result.outcome !== 'SUCCEEDED') return result;
+
+  const direct = result.reviewResult === undefined
+    ? undefined
+    : reviewReportSchema.safeParse({
+        result: result.reviewResult,
+        findings: result.reviewFindings ?? [],
+      });
+  const report = direct?.success === true
+    ? direct.data
+    : parseReviewReport(result.stdout);
+  if (report === undefined) {
+    return {
+      ...result,
+      outcome: 'NEEDS_HUMAN',
+      timedOut: false,
+      cancelled: false,
+      failureCategory: 'malformed_output',
+      failureReason: `The ${reviewType} reviewer did not return a supported PASS/FAIL report`,
+      reviewResult: undefined,
+      reviewFindings: undefined,
+    };
+  }
+  return {
+    ...result,
+    reviewResult: report.result,
+    reviewFindings: report.findings,
+  };
+}
+
+function parseReviewReport(stdout: string): ReturnType<typeof reviewReportSchema.parse> | undefined {
+  const output = redactSensitiveText(stdout).trim();
+  if (output.length === 0) return undefined;
+  const candidates: unknown[] = [];
+  try {
+    candidates.push(JSON.parse(output) as unknown);
+  } catch {
+    for (const line of output.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean)) {
+      try {
+        candidates.push(JSON.parse(line) as unknown);
+      } catch {
+        // A provider's structured event may still carry the report as text.
+      }
+    }
+  }
+  for (const candidate of candidates) {
+    const report = findReviewReport(candidate, 0);
+    if (report !== undefined) return report;
+  }
+  return undefined;
+}
+
+function findReviewReport(value: unknown, depth: number): ReturnType<typeof reviewReportSchema.parse> | undefined {
+  if (depth > 4 || value === null || value === undefined) return undefined;
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text.startsWith('{') && !text.startsWith('[')) return undefined;
+    try {
+      return findReviewReport(JSON.parse(text) as unknown, depth + 1);
+    } catch {
+      return undefined;
+    }
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const report = findReviewReport(entry, depth + 1);
+      if (report !== undefined) return report;
+    }
+    return undefined;
+  }
+  if (typeof value !== 'object') return undefined;
+  const direct = reviewReportSchema.safeParse(value);
+  if (direct.success) return direct.data;
+  for (const entry of Object.values(value)) {
+    const report = findReviewReport(entry, depth + 1);
+    if (report !== undefined) return report;
+  }
+  return undefined;
+}
+
 async function getVerifiedExecutionWorkspace(
   options: AgentExecutionServiceOptions,
   ticketId: string,
   task: ModelTaskType,
-  afterStart = false
+  afterStart = false,
+  expectedHeadSha?: string
 ): Promise<WorkspaceRecord> {
   const workspace = await getVerifiedWorkspaceForExecution(
     options,
     ticketId,
-    task === 'implementation' ? 'ready' : 'changed'
+    task === 'implementation' ? 'ready' : 'changed',
+    expectedHeadSha
   );
   const ticket = createTicketRepository(options.db).findById(ticketId);
   if (!ticket || ticket.projectId !== workspace.projectId) {
@@ -838,6 +965,8 @@ function buildAgentRun(
     task: ModelTaskType;
     timeoutMs: number;
     modelProviderId?: ModelProviderId;
+    reviewType?: ReviewType;
+    reviewedSha?: string;
     safety: AgentSafetyPolicy;
   },
   runId: string,
@@ -856,6 +985,8 @@ function buildAgentRun(
     ...(normalized.modelProviderId === undefined
       ? {}
       : { modelProviderId: normalized.modelProviderId }),
+    ...(normalized.reviewType === undefined ? {} : { reviewType: normalized.reviewType }),
+    ...(normalized.reviewedSha === undefined ? {} : { reviewedSha: normalized.reviewedSha }),
     task: normalized.task,
     model: normalized.model,
     createdAt,
@@ -885,6 +1016,8 @@ function loadPreparedRun(
     task: ModelTaskType;
     timeoutMs: number;
     modelProviderId?: ModelProviderId;
+    reviewType?: ReviewType;
+    reviewedSha?: string;
     safety: AgentSafetyPolicy;
   }
 ): AgentRunRecord {
@@ -912,6 +1045,8 @@ function assertPreparedRunMatchesRequest(
     task: ModelTaskType;
     timeoutMs: number;
     modelProviderId?: ModelProviderId;
+    reviewType?: ReviewType;
+    reviewedSha?: string;
     safety: AgentSafetyPolicy;
   }
 ): void {
@@ -933,6 +1068,9 @@ function assertPreparedRunMatchesRequest(
   }
   if (run.task !== normalized.task) {
     throw new Error(`Prepared agent run ${run.id} does not match the selected MODEL task`);
+  }
+  if (run.reviewType !== normalized.reviewType || run.reviewedSha !== normalized.reviewedSha) {
+    throw new Error(`Prepared agent run ${run.id} does not match the KAR-9 review provenance`);
   }
   if (run.instructionsSha256 !== instructionHash || run.timeoutMs !== normalized.timeoutMs) {
     throw new Error(`Prepared agent run ${run.id} does not match the execution request`);
@@ -1019,6 +1157,8 @@ function persistCreatedRun(
         task: run.task,
         model: run.model,
         createdAt: run.createdAt,
+        ...(run.reviewType === undefined ? {} : { reviewType: run.reviewType }),
+        ...(run.reviewedSha === undefined ? {} : { reviewedSha: run.reviewedSha }),
         safetyPolicySha256: run.safetyPolicySha256,
         timeoutMs: run.timeoutMs,
         instructionsSha256: run.instructionsSha256,
@@ -1103,6 +1243,8 @@ function finalizeRun(
       stdoutTruncated: result.stdoutTruncated,
       stderrTruncated: result.stderrTruncated,
       evidence: result.evidence ?? null,
+      ...(result.reviewResult === undefined ? {} : { reviewResult: result.reviewResult }),
+      ...(result.reviewFindings === undefined ? {} : { reviewFindings: result.reviewFindings }),
     };
     const updated = repository.updateStatus(
       run.id,
@@ -1135,6 +1277,10 @@ function finalizeRun(
         ...(durableUpdated.failureCategory === undefined ? {} : { failureCategory: durableUpdated.failureCategory }),
         ...(durableUpdated.failureReason === undefined ? {} : { failureReason: durableUpdated.failureReason }),
         ...(durableUpdated.evidence === undefined ? {} : { evidence: durableUpdated.evidence }),
+        ...(durableUpdated.reviewType === undefined ? {} : { reviewType: durableUpdated.reviewType }),
+        ...(durableUpdated.reviewedSha === undefined ? {} : { reviewedSha: durableUpdated.reviewedSha }),
+        ...(durableUpdated.reviewResult === undefined ? {} : { reviewResult: durableUpdated.reviewResult }),
+        ...(durableUpdated.reviewFindings === undefined ? {} : { reviewFindings: durableUpdated.reviewFindings }),
       },
     });
     // Release only when the adapter carried proof that its owned provider

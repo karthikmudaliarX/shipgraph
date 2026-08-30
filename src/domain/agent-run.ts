@@ -54,6 +54,22 @@ export type AgentFailureCategory = (typeof AGENT_FAILURE_CATEGORIES)[number];
 
 export const agentFailureCategorySchema = z.enum(AGENT_FAILURE_CATEGORIES);
 
+export const REVIEW_TYPES = ['contract', 'engineering'] as const;
+export type ReviewType = (typeof REVIEW_TYPES)[number];
+export const reviewTypeSchema = z.enum(REVIEW_TYPES);
+
+export const REVIEW_RESULTS = ['PASS', 'FAIL'] as const;
+export type ReviewResult = (typeof REVIEW_RESULTS)[number];
+export const reviewResultSchema = z.enum(REVIEW_RESULTS);
+
+/** The only structured reviewer finding shape persisted by KAR-9. */
+export const reviewReportSchema = z.object({
+  result: reviewResultSchema,
+  findings: z.array(z.string().min(1).max(2_048)).max(100),
+}).strict();
+
+export type ReviewReport = z.infer<typeof reviewReportSchema>;
+
 /**
  * Deliberately small, provider-neutral evidence. Raw provider event streams
  * remain bounded process output and are never persisted as arbitrary JSON.
@@ -96,6 +112,8 @@ export const agentExecutionResultSchema = z.object({
   stderrTruncated: z.boolean(),
   evidence: normalizedAgentEvidenceSchema.optional(),
   usage: agentExecutionUsageSchema.optional(),
+  reviewResult: reviewResultSchema.optional(),
+  reviewFindings: z.array(z.string().min(1).max(2_048)).max(100).optional(),
   failureCategory: agentFailureCategorySchema.optional(),
   failureReason: z.string().min(1).max(2_048).optional(),
 }).strict();
@@ -140,6 +158,12 @@ export const agentRunRecordSchema = z.object({
   instructionsSha256: z.string().regex(/^[0-9a-f]{64}$/),
   /** Canonical digest of the effective KAR-7 policy bound at preparation. */
   safetyPolicySha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  /** KAR-9 review axis, present only for a pre-PR review run. */
+  reviewType: reviewTypeSchema.optional(),
+  /** Exact local commit reviewed by a KAR-9 review run. */
+  reviewedSha: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/).optional(),
+  reviewResult: reviewResultSchema.optional(),
+  reviewFindings: z.array(z.string().min(1).max(2_048)).max(100).optional(),
   timeoutMs: z.number().int().positive().max(MAX_AGENT_TIMEOUT_MS),
 }).strict();
 

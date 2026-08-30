@@ -19,6 +19,8 @@ import {
   agentFailureCategorySchema,
   agentRunRecordSchema,
   normalizedAgentEvidenceSchema,
+  reviewResultSchema,
+  reviewTypeSchema,
   type AgentFailureCategory,
   type AgentRunRecord,
   type NormalizedAgentEvidence,
@@ -86,6 +88,10 @@ export type RunRecord = {
   evidence?: NormalizedAgentEvidence;
   instructionsSha256?: string;
   safetyPolicySha256?: string;
+  reviewType?: import('../domain/agent-run.js').ReviewType;
+  reviewedSha?: string;
+  reviewResult?: import('../domain/agent-run.js').ReviewResult;
+  reviewFindings?: readonly string[];
   timeoutMs?: number;
 };
 
@@ -106,6 +112,8 @@ export type RunUpdate = {
   stdoutTruncated?: boolean;
   stderrTruncated?: boolean;
   evidence?: NormalizedAgentEvidence | null;
+  reviewResult?: import('../domain/agent-run.js').ReviewResult | null;
+  reviewFindings?: readonly string[] | null;
 };
 
 export type WorkspaceStatus = 'CREATING' | 'READY' | 'REMOVED' | 'FAILED' | 'NEEDS_HUMAN';
@@ -540,12 +548,12 @@ export function createRunRepository(db: DbConnection): RunRepository {
             provider_session_id, provider_process_id, exit_code, termination_signal,
             timed_out, cancelled, failure_category, failure_reason, stdout, stderr,
             stdout_truncated, stderr_truncated, evidence_json, instructions_sha256, timeout_ms,
-            safety_policy_sha256
+            safety_policy_sha256, review_type, reviewed_sha, review_result, review_findings_json
           ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?
+            ?, ?, ?, ?, ?, ?
           )`
         ).run(
           run.id,
@@ -579,7 +587,11 @@ export function createRunRepository(db: DbConnection): RunRepository {
           run.evidence === undefined ? null : JSON.stringify(run.evidence),
           run.instructionsSha256 ?? null,
           run.timeoutMs ?? null,
-          run.safetyPolicySha256 ?? null
+          run.safetyPolicySha256 ?? null,
+          run.reviewType ?? null,
+          run.reviewedSha ?? null,
+          run.reviewResult ?? null,
+          run.reviewFindings === undefined ? null : JSON.stringify(run.reviewFindings)
         );
       } catch (error) {
         if (error instanceof Error && /UNIQUE constraint failed/.test(error.message)) {
@@ -644,6 +656,12 @@ export function createRunRepository(db: DbConnection): RunRepository {
       if (update.stderrTruncated !== undefined) add('stderr_truncated', update.stderrTruncated ? 1 : 0);
       if (update.evidence !== undefined) {
         add('evidence_json', update.evidence === null ? null : JSON.stringify(update.evidence));
+      }
+      if (update.reviewResult !== undefined) add('review_result', update.reviewResult);
+      if (update.reviewFindings !== undefined) {
+        add('review_findings_json', update.reviewFindings === null
+          ? null
+          : JSON.stringify(update.reviewFindings));
       }
       const conditions = ['id = ?'];
       values.push(id);
@@ -984,6 +1002,18 @@ function rowToRun(row: Record<string, unknown>): RunRecord {
     ...(row.safety_policy_sha256 === null || row.safety_policy_sha256 === undefined
       ? {}
       : { safetyPolicySha256: requiredString(row, 'safety_policy_sha256') }),
+    ...(row.review_type === null || row.review_type === undefined
+      ? {}
+      : { reviewType: reviewTypeSchema.parse(requiredString(row, 'review_type')) }),
+    ...(row.reviewed_sha === null || row.reviewed_sha === undefined
+      ? {}
+      : { reviewedSha: requiredString(row, 'reviewed_sha') }),
+    ...(row.review_result === null || row.review_result === undefined
+      ? {}
+      : { reviewResult: reviewResultSchema.parse(requiredString(row, 'review_result')) }),
+    ...(row.review_findings_json === null || row.review_findings_json === undefined
+      ? {}
+      : { reviewFindings: JSON.parse(requiredString(row, 'review_findings_json')) }),
     timeoutMs: requiredInteger(row, 'timeout_ms'),
   }) as AgentRunRecord;
   return durable;
