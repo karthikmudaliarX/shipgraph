@@ -904,11 +904,13 @@ function applyReviewResult(
     return malformedReviewResult(result, reviewType);
   }
   if (stdoutChannel.reports !== undefined) reports.push(...stdoutChannel.reports);
-  if (summaryChannel.reports !== undefined) reports.push(...summaryChannel.reports);
-  // evidence.summary is deliberately bounded and is not authoritative when
-  // the complete provider payload was retained in stdout.
+  // evidence.summary is deliberately bounded and is only a consistency check
+  // for an authoritative direct/stdout report, never the report source.
   if (summaryChannel.malformed && reports.length === 0) {
     return malformedReviewResult(result, reviewType);
+  }
+  if (summaryChannel.reports !== undefined && reports.length > 0) {
+    reports.push(...summaryChannel.reports);
   }
   const report = reports[0];
   if (
@@ -1010,6 +1012,7 @@ function isKnownProviderEnvelope(value: unknown): boolean {
 
 function parseProviderEnvelope(value: unknown): ParsedReviewChannel {
   if (!isKnownProviderEnvelope(value)) return { malformed: true };
+  if (hasProviderError(value)) return { malformed: true };
   const payloads = providerTextPayloads(value);
   if (payloads.length === 0) return { malformed: false };
   const reports: Array<ReturnType<typeof reviewOutputSchema.parse>> = [];
@@ -1025,7 +1028,7 @@ function providerTextPayloads(value: unknown): readonly string[] {
   if (!isKnownProviderEnvelope(value)) return [];
   const entry = value as Record<string, unknown>;
   const textKeys = ['text', 'summary', 'message', 'response', 'content'] as const;
-  const nestedKeys = ['part', 'data', 'payload', 'msg', 'content'] as const;
+  const nestedKeys = ['part', 'data', 'payload', 'msg', 'message', 'content'] as const;
   const payloads: string[] = [];
   for (const key of textKeys) {
     if (typeof entry[key] === 'string' && entry[key].trim().length > 0) payloads.push(entry[key]);
@@ -1044,6 +1047,12 @@ function providerTextPayloads(value: unknown): readonly string[] {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasProviderError(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  const error = value.error;
+  return (typeof error === 'string' && error.length > 0) || isObject(error);
 }
 
 function parseReviewSummary(value: string | undefined): ParsedReviewChannel {

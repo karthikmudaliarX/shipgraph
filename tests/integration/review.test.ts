@@ -123,7 +123,7 @@ function reviewAdapter(results: readonly string[]): ReviewAdapter {
           timedOut: false,
           cancelled: false,
           processGroupStopped: true,
-          stdout: JSON.stringify({ type: 'text', text: VALID_REVIEW_REPORT }),
+          stdout: JSON.stringify({ type: 'text', message: { content: VALID_REVIEW_REPORT } }),
           stderr: '',
           stdoutTruncated: false,
           stderrTruncated: false,
@@ -191,6 +191,40 @@ function reviewAdapter(results: readonly string[]): ReviewAdapter {
           stderrTruncated: false,
           reviewResult: 'PASS',
           reviewFindings: [],
+        } satisfies AgentExecutionResult;
+      }
+      if (output === 'error-envelope') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: JSON.stringify({
+            type: 'text',
+            text: VALID_REVIEW_REPORT,
+            error: { message: 'provider error' },
+          }),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        } satisfies AgentExecutionResult;
+      }
+      if (output === 'non-report-envelope') {
+        return {
+          outcome: 'SUCCEEDED',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: JSON.stringify({ type: 'status', state: 'complete' }),
+          stderr: '',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          evidence: {
+            outputFormat: 'json',
+            eventCount: 1,
+            eventTypes: ['status'],
+            summary: VALID_REVIEW_REPORT,
+          },
         } satisfies AgentExecutionResult;
       }
       if (output === 'cross-channel-conflict') {
@@ -427,6 +461,21 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
     expect(result.engineering.passed).toBe(true);
   });
 
+  it('does not accept bounded evidence.summary as the only review report', async () => {
+    harness = await createHarness(['non-report-envelope', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(false);
+    expect(result.contract.run.status).toBe('NEEDS_HUMAN');
+    expect(result.contract.run.failureCategory).toBe('malformed_output');
+    expect(result.engineering.passed).toBe(true);
+  });
+
   it('parses a long valid embedded report from stdout instead of bounded evidence.summary', async () => {
     harness = await createHarness(['long-envelope', VALID_REVIEW_REPORT]);
     const result = await runPrePrReviews({
@@ -458,6 +507,21 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
 
   it('fails closed when an embedded envelope report conflicts with direct report fields', async () => {
     harness = await createHarness(['envelope-direct-conflict', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+
+    expect(result.contract.passed).toBe(false);
+    expect(result.contract.run.status).toBe('NEEDS_HUMAN');
+    expect(result.contract.run.failureCategory).toBe('malformed_output');
+    expect(result.engineering.passed).toBe(true);
+  });
+
+  it('fails closed when a provider error accompanies an embedded report', async () => {
+    harness = await createHarness(['error-envelope', VALID_REVIEW_REPORT]);
     const result = await runPrePrReviews({
       ticketId: 'REV-001',
       modelService: harness.modelService,
