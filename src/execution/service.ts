@@ -897,8 +897,8 @@ function applyReviewResult(
   if (stdoutChannel.malformed || summaryChannel.malformed) {
     return malformedReviewResult(result, reviewType);
   }
-  if (stdoutChannel.report !== undefined) reports.push(stdoutChannel.report);
-  if (summaryChannel.report !== undefined) reports.push(summaryChannel.report);
+  if (stdoutChannel.reports !== undefined) reports.push(...stdoutChannel.reports);
+  if (summaryChannel.reports !== undefined) reports.push(...summaryChannel.reports);
   const report = reports[0];
   if (
     report === undefined ||
@@ -934,7 +934,7 @@ function malformedReviewResult(
 }
 
 type ParsedReviewChannel = {
-  report?: ReturnType<typeof reviewOutputSchema.parse>;
+  reports?: readonly ReturnType<typeof reviewOutputSchema.parse>[];
   malformed: boolean;
 };
 
@@ -949,18 +949,50 @@ function parseReviewChannel(value: string, format: 'json' | 'jsonl' | undefined)
     } catch {
       return { malformed: true };
     }
-    if (values.length === 1) {
-      const report = reviewOutputSchema.safeParse(values[0]);
-      return report.success ? { report: report.data, malformed: false } : { malformed: false };
+    const reports: Array<ReturnType<typeof reviewOutputSchema.parse>> = [];
+    for (const entry of values) {
+      const report = reviewOutputSchema.safeParse(entry);
+      if (report.success) {
+        reports.push(report.data);
+      } else if (!isKnownProviderEnvelope(entry)) {
+        return { malformed: true };
+      }
     }
-    return { malformed: false };
+    return { reports, malformed: false };
   }
   try {
-    const report = reviewOutputSchema.safeParse(JSON.parse(output) as unknown);
-    return report.success ? { report: report.data, malformed: false } : { malformed: false };
+    const parsed: unknown = JSON.parse(output);
+    const report = reviewOutputSchema.safeParse(parsed);
+    if (report.success) return { reports: [report.data], malformed: false };
+    return isKnownProviderEnvelope(parsed) ? { malformed: false } : { malformed: true };
   } catch {
     return { malformed: true };
   }
+}
+
+function isKnownProviderEnvelope(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const entry = value as Record<string, unknown>;
+  if ('findings' in entry) return false;
+  return [
+    'type',
+    'event',
+    'eventType',
+    'event_type',
+    'sessionID',
+    'sessionId',
+    'session_id',
+    'text',
+    'summary',
+    'message',
+    'response',
+    'content',
+    'part',
+    'data',
+    'payload',
+    'msg',
+    'error',
+  ].some((key) => key in entry);
 }
 
 function parseReviewSummary(value: string | undefined): ParsedReviewChannel {
@@ -968,7 +1000,7 @@ function parseReviewSummary(value: string | undefined): ParsedReviewChannel {
   const report = parseReviewJson(value);
   return report === undefined
     ? { malformed: true }
-    : { report, malformed: false };
+    : { reports: [report], malformed: false };
 }
 
 /*

@@ -123,7 +123,7 @@ function reviewAdapter(results: readonly string[]): ReviewAdapter {
           timedOut: false,
           cancelled: false,
           processGroupStopped: true,
-          stdout: 'not structured output',
+          stdout: JSON.stringify({ unexpected: 'value' }),
           stderr: '',
           stdoutTruncated: false,
           stderrTruncated: false,
