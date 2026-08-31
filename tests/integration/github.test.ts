@@ -411,4 +411,15 @@ describe('KAR-8 GitHub handoff', () => {
     })).rejects.toThrow(/fetch|push remote/);
     expect(harness.host.calls).toEqual([]);
   });
+
+  it('fails closed for a non-GitHub transport disguised with a GitHub hostname', async () => {
+    harness = await createHarness();
+    harness.remote.pushUrls = ['file://github.com/owner/github-001.git'];
+    await expect(createGitHubPullRequest({
+      ticketId: 'GH-001',
+      gitHost: harness.host,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, gitRunner: harness.gitRunner },
+    })).rejects.toThrow(/remotes do not match GitHub/);
+    expect(harness.host.calls).toEqual([]);
+  });
 });

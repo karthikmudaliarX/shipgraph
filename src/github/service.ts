@@ -277,6 +277,7 @@ function parseRemoteRepository(value: string): string | undefined {
     } catch {
       return undefined;
     }
+    if (url.protocol !== 'https:' && url.protocol !== 'ssh:') return undefined;
     host = url.hostname;
     path = url.pathname.slice(1);
   }
