@@ -336,9 +336,10 @@ function safetyStatusFor(
   if (ticketStatus === TicketState.NEEDS_HUMAN) {
     return { status: 'blocked', runIds: [], reason: 'Ticket has an unresolved NEEDS_HUMAN safety condition' };
   }
-  const currentRepairEvents = events.filter((event) =>
-    event.type === EventType.REPAIR_ATTEMPT_RECORDED &&
-    (event.payload.candidateSha === sha || event.payload.resultingSha === sha)
+  const currentRepairEvents = events.filter(
+    (event): event is Extract<ShipgraphEvent, { type: typeof EventType.REPAIR_ATTEMPT_RECORDED }> =>
+      event.type === EventType.REPAIR_ATTEMPT_RECORDED &&
+      (event.payload.candidateSha === sha || event.payload.resultingSha === sha)
   );
   const latestRepairEvent = currentRepairEvents.at(-1);
   if (latestRepairEvent?.payload.outcome === 'NEEDS_HUMAN') {
