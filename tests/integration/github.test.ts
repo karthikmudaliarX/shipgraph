@@ -228,6 +228,7 @@ function addRun(
   timestamp: string,
   provenance?: { contractDigest: string; contractSource: string; contractRevision: string },
   idSuffix = 'main',
+  modelId = 'opencode/model',
 ): string {
   const id = `${task}-${reviewType ?? idSuffix}`;
   runs.create({
@@ -242,7 +243,7 @@ function addRun(
     provider: 'opencode',
     modelProviderId: 'opencode-go',
     task,
-    model: 'opencode/model',
+    model: modelId,
     createdAt: timestamp,
     startedAt: timestamp,
     updatedAt: timestamp,
@@ -277,7 +278,7 @@ function addRun(
       provider: 'opencode',
       modelProviderId: 'opencode-go',
       task,
-      model: 'opencode/model',
+      model: modelId,
       createdAt: timestamp,
       timeoutMs: 1_000,
       instructionsSha256: '2'.repeat(64),
@@ -294,7 +295,11 @@ function addRun(
   return id;
 }
 
-function addReceiptRuns(harness: Harness, count: number): void {
+function addReceiptRuns(
+  harness: Harness,
+  count: number,
+  modelForIndex: (index: number) => string = () => 'opencode/model'
+): void {
   const runs = createRunRepository(harness.db);
   const events = createEventRepository(harness.db);
   const timestamp = new Date().toISOString();
@@ -309,7 +314,8 @@ function addReceiptRuns(harness: Harness, count: number): void {
       undefined,
       timestamp,
       undefined,
-      `receipt-${index}`
+      `receipt-${index}`,
+      modelForIndex(index)
     );
   }
 }
@@ -449,6 +455,21 @@ describe('KAR-8 GitHub handoff', () => {
     expect(result.receipt.usage.inputTokens).toEqual({ knownTotal: 11, unknownRuns: 3 });
     expect(result.receipt.usage.outputTokens).toEqual({ knownTotal: 7, unknownRuns: 3 });
     expect(result.receipt.usage.cost).toEqual({ knownTotal: 0.5, unknownRuns: 3 });
+  }, 20_000);
+
+  it('uses a bounded digest summary for a maximally varied provider/model history', async () => {
+    harness = await createHarness(100);
+    addReceiptRuns(harness, 400, (index) => `model-${'x'.repeat(240)}-${index}`);
+    const result = await createGitHubPullRequest({
+      ticketId: 'GH-001',
+      gitHost: harness.host,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, gitRunner: harness.gitRunner },
+    });
+    expect(result.receipt.repair).toMatchObject({
+      identityCount: 400,
+      identityDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    });
+    expect(JSON.stringify(result.receipt).length).toBeLessThan(60 * 1024);
   }, 20_000);
 
   it('fails closed before GitHub writes when readiness is unavailable', async () => {
