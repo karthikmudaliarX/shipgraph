@@ -541,6 +541,8 @@ function recordVerificationEvidence(
     redInfeasibilityReason?: string;
     exitCode?: number;
     candidateSha?: string;
+    resultingSha?: string;
+    outcome?: 'PASSED' | 'REPAIRED' | 'BLOCKED' | 'NEEDS_HUMAN';
   } = {}
 ): string {
   const sha = git(harness.workspacePath, 'rev-parse', 'HEAD');
@@ -571,10 +573,10 @@ function recordVerificationEvidence(
       ...(options.redInfeasibilityReason === undefined
         ? {}
         : { redInfeasibilityReason: options.redInfeasibilityReason }),
-      outcome: 'PASSED',
+      outcome: options.outcome ?? 'PASSED',
       ...(options.attempt === undefined || options.attempt === 0
         ? {}
-        : { resultingSha: sha }),
+        : { resultingSha: options.resultingSha ?? sha }),
     },
   });
   return eventId;
@@ -1159,6 +1161,42 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
       routing: routing(),
     });
     expect((await runPrePrReadiness(readinessInput(harness))).result).toBe('PASS');
+  });
+
+  it('fails readiness when a later repair attempt for the current SHA is blocked', async () => {
+    harness = await createHarness([VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
+    await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+    const currentSha = git(harness.workspacePath, 'rev-parse', 'HEAD');
+    const repairRunId = insertRepairRun(harness, 'SUCCEEDED');
+    recordVerificationEvidence(harness, {
+      attempt: 1,
+      repairRunId,
+      candidateSha: 'c'.repeat(40),
+      resultingSha: currentSha,
+      finalVerification: [{ command: 'pnpm test', sha: currentSha, exitCode: 0, stdout: '', stderr: '' }],
+    });
+    expect((await runPrePrReadiness(readinessInput(harness))).result).toBe('PASS');
+
+    recordVerificationEvidence(harness, {
+      attempt: 2,
+      candidateSha: currentSha,
+      blockers: [{
+        source: 'verification',
+        command: 'pnpm test',
+        expected: 'command exits with status 0',
+        actual: 'exit code 1',
+      }],
+      outcome: 'BLOCKED',
+      reason: 'later repair attempt failed',
+    });
+    const result = await runPrePrReadiness(readinessInput(harness));
+    expect(result.result).toBe('FAIL');
+    expect(result.reason).toContain('No KAR-10 final verification evidence');
   });
 
   it('invalidates readiness after the candidate SHA changes while retaining history', async () => {

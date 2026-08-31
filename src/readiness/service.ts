@@ -271,10 +271,9 @@ function currentRepairEvidence(
   );
   const occurred = repairEvents.some((event) => event.payload.attempt > 0);
   const event = [...repairEvents].reverse().find((candidate) => {
-    const payloadSha = candidate.payload.resultingSha ?? candidate.payload.candidateSha;
-    return payloadSha === sha && candidate.payload.outcome === 'PASSED';
+    return candidate.payload.candidateSha === sha || candidate.payload.resultingSha === sha;
   });
-  if (event === undefined) return undefined;
+  if (event === undefined || event.payload.outcome !== 'PASSED') return undefined;
   if (occurred && (event.payload.attempt === 0 || event.payload.resultingSha !== sha)) return undefined;
   return { event, occurred };
 }
