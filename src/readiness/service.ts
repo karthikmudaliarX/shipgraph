@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   createGitRunner,
   inspectWorktreeState,
@@ -6,6 +6,8 @@ import {
   resolveCommitSha,
 } from '../git/service.js';
 import { TicketState } from '../core/state-machine/state.js';
+import { loadBacklog } from '../backlog/schema.js';
+import { assertSafeBacklogPath } from '../utils/paths.js';
 import type { AgentRunRecord } from '../domain/agent-run.js';
 import type { ShipgraphEvent } from '../events/event.js';
 import { EventType } from '../events/event.js';
@@ -86,7 +88,7 @@ export async function runPrePrReadiness(
     setupReason = errorMessage(error);
   }
   try {
-    provenance = contractProvenance(input.workspace.db, ticket);
+    provenance = contractProvenance(input.workspace.projectDir, input.workspace.db, ticket);
   } catch (error) {
     setupReason = setupReason ?? errorMessage(error);
   }
@@ -161,7 +163,7 @@ export async function getCurrentPrePrReadinessEvidence(
   if (ticket === undefined || ticket.projectId !== projectId) return undefined;
   let provenance: TicketContractProvenance;
   try {
-    provenance = contractProvenance(workspace.db, ticket);
+    provenance = contractProvenance(workspace.projectDir, workspace.db, ticket);
   } catch {
     return undefined;
   }
@@ -212,16 +214,34 @@ async function currentCandidate(
 }
 
 function contractProvenance(
+  projectDir: string,
   db: WorkspaceServiceOptions['db'],
   ticket: TicketRecord
 ): TicketContractProvenance {
   const sync = db
-    .prepare('SELECT version, source_path FROM backlog_syncs WHERE project_id = ?')
-    .get(ticket.projectId) as { version: number; source_path: string } | undefined;
-  if (sync === undefined || sync.source_path.length === 0) {
+    .prepare('SELECT version, content_hash, source_path FROM backlog_syncs WHERE project_id = ?')
+    .get(ticket.projectId) as { version: number; content_hash: string; source_path: string } | undefined;
+  if (sync === undefined || sync.source_path.length === 0 || sync.content_hash.length === 0) {
     throw new Error('Authoritative backlog contract provenance is unavailable');
   }
-  return deriveTicketContractProvenance(ticket, sync.source_path, String(sync.version));
+  const validated = assertSafeBacklogPath(projectDir, sync.source_path);
+  const backlog = loadBacklog(projectDir, validated.path, validated.identity);
+  const currentHash = createHash('sha256')
+    .update(JSON.stringify(backlog))
+    .digest('hex');
+  if (backlog.version !== sync.version || currentHash !== sync.content_hash) {
+    throw new Error('Authoritative backlog contract changed since the last sync');
+  }
+  const definition = backlog.tickets.find((candidate) => candidate.id === ticket.id);
+  if (definition === undefined) {
+    throw new Error(`Authoritative backlog contract is missing ticket ${ticket.id}`);
+  }
+  const persisted = deriveTicketContractProvenance(ticket, sync.source_path, String(sync.version));
+  const authoritative = deriveTicketContractProvenance(definition, sync.source_path, String(sync.version));
+  if (persisted.contractDigest !== authoritative.contractDigest) {
+    throw new Error(`Persisted ticket ${ticket.id} does not match the authoritative backlog contract`);
+  }
+  return authoritative;
 }
 
 function readinessAssessment(
@@ -281,12 +301,18 @@ function verificationStatus(
 ): { passed: boolean; reason?: string } {
   if (commands.length === 0) return { passed: false, reason: 'No deterministic verification commands are configured' };
   if (observations === undefined) return { passed: false, reason: 'KAR-10 final verification evidence is missing' };
-  const current = observations.filter((observation) => observation.sha === sha);
-  const missing = commands.filter((command) => !current.some((observation) => observation.command === command));
+  if (new Set(commands).size !== commands.length || observations.length !== commands.length) {
+    return { passed: false, reason: 'Final verification does not contain exactly one observation per configured command' };
+  }
+  const unexpected = observations.find((observation) => observation.sha !== sha || !commands.includes(observation.command));
+  if (unexpected !== undefined) {
+    return { passed: false, reason: 'Final verification contains an observation for the wrong SHA or an unconfigured command' };
+  }
+  const missing = commands.filter((command) => !observations.some((observation) => observation.command === command));
   if (missing.length > 0) {
     return { passed: false, reason: `Final verification is missing configured command(s): ${missing.join(', ')}` };
   }
-  if (current.some((observation) => commands.includes(observation.command) && observation.exitCode !== 0)) {
+  if (observations.some((observation) => observation.exitCode !== 0)) {
     return { passed: false, reason: 'Final deterministic verification contains a failing result' };
   }
   return { passed: true };

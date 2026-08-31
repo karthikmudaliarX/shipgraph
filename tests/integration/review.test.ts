@@ -542,6 +542,7 @@ function recordVerificationEvidence(
     exitCode?: number;
     candidateSha?: string;
     resultingSha?: string;
+    finalVerification?: readonly Record<string, unknown>[];
     outcome?: 'PASSED' | 'REPAIRED' | 'BLOCKED' | 'NEEDS_HUMAN';
   } = {}
 ): string {
@@ -561,7 +562,7 @@ function recordVerificationEvidence(
       ...(options.repairRunId === undefined ? {} : { repairRunId: options.repairRunId }),
       blockers: options.blockers ?? [],
       targetedVerification: [],
-      finalVerification: [{
+      finalVerification: options.finalVerification ?? [{
         command: 'pnpm test',
         sha,
         exitCode: options.exitCode ?? 0,
@@ -1238,7 +1239,43 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
     );
     const result = await runPrePrReadiness(readinessInput(harness));
     expect(result.result).toBe('FAIL');
-    expect(result.reason).toContain('Current contract review evidence is missing');
+    expect(result.reason).toContain('does not match the authoritative backlog contract');
+  });
+
+  it('fails closed when the authoritative backlog source changed after sync', async () => {
+    harness = await createHarness([VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
+    await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+    recordVerificationEvidence(harness);
+    writeFileSync(join(harness.projectDir, 'shipgraph.backlog.yml'), stringify({
+      version: 1,
+      tickets: [{ ...ticket(), description: 'authoritative source changed' }],
+    }));
+
+    const result = await runPrePrReadiness(readinessInput(harness));
+    expect(result.result).toBe('FAIL');
+    expect(result.reason).toContain('changed since the last sync');
+  });
+
+  it('fails closed on duplicate final verification observations', async () => {
+    harness = await createHarness([VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
+    await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+    const sha = git(harness.workspacePath, 'rev-parse', 'HEAD');
+    const observation = { command: 'pnpm test', sha, exitCode: 0, stdout: '', stderr: '' };
+    recordVerificationEvidence(harness, { finalVerification: [observation, observation] });
+
+    const result = await runPrePrReadiness(readinessInput(harness));
+    expect(result.result).toBe('FAIL');
+    expect(result.reason).toContain('exactly one observation per configured command');
   });
 
   it('requires red-capable evidence or an explicit KAR-10 infeasibility reason for bug repairs', async () => {
