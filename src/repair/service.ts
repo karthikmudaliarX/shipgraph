@@ -207,7 +207,7 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
     }
     return needsHuman(input, evidenceSha, attemptsUsed, [], reason);
   }
-  if (attemptsUsed >= effectiveLimit) {
+  if (attemptsUsed > effectiveLimit) {
     const reason = `KAR-10 repair attempt limit exhausted: ${attemptsUsed} logical attempts already consumed; effective limit is ${effectiveLimit}`;
     return needsHuman(input, headSha, attemptsUsed, [], reason);
   }
@@ -301,6 +301,11 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
     };
     recordAttempt(input, evidence);
     return { status: 'PASSED', headSha, attempts: attemptsUsed, reviews };
+  }
+
+  if (attemptsUsed >= effectiveLimit) {
+    const reason = `KAR-10 repair attempt limit exhausted: ${attemptsUsed} logical attempts already consumed; effective limit is ${effectiveLimit}`;
+    return needsHuman(input, headSha, attemptsUsed, blockers, reason);
   }
 
   for (let attempt = attemptsUsed + 1; attempt <= effectiveLimit; attempt += 1) {

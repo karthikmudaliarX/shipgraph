@@ -284,6 +284,14 @@ describe('KAR-10 bounded pre-PR repair', () => {
       .toBe(true);
   });
 
+  it('accepts a passing candidate when no repair iterations are authorized', async () => {
+    value = await harness([PASS, PASS], 0);
+    const result = await runPrePrRepair(input(value, sequenceRunner([0])));
+
+    expect(result).toMatchObject({ status: 'PASSED', attempts: 0 });
+    expect(value.adapter.requests.some((request) => request.reviewType === undefined)).toBe(false);
+  });
+
   it('resumes a pre-launch interruption left in REPAIRING without creating another lifecycle', async () => {
     value = await harness([PASS, PASS]);
     const ticket = createTicketRepository(value.db).findById('REP-001');
