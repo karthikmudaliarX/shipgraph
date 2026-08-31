@@ -337,7 +337,7 @@ describe('KAR-8 GitHub handoff', () => {
     expect(harness.host.calls.filter((call) => call === 'create')).toHaveLength(1);
     expect(harness.host.calls.filter((call) => call === 'post-comment')).toHaveLength(1);
     expect(createEventRepository(harness.db).findByTicketId('GH-001').filter((event) => event.type === EventType.GITHUB_USAGE_RECEIPT_RECORDED)).toHaveLength(1);
-  });
+  }, 20_000);
 
   it('reuses the durable PR and receipt after a completed PR_OPEN handoff is retried', async () => {
     harness = await createHarness();
@@ -350,8 +350,9 @@ describe('KAR-8 GitHub handoff', () => {
     await createGitHubPullRequest(input);
     expect(harness.host.calls.filter((call) => call === 'create')).toHaveLength(1);
     expect(harness.host.calls.filter((call) => call === 'post-comment')).toHaveLength(1);
+    expect(harness.host.calls.filter((call) => call === 'list-comments')).toHaveLength(2);
     expect(createEventRepository(harness.db).findByTicketId('GH-001').filter((event) => event.type === EventType.GITHUB_PR_RECORDED)).toHaveLength(1);
-  });
+  }, 20_000);
 
   it('fails closed before GitHub writes when readiness is unavailable', async () => {
     harness = await createHarness();

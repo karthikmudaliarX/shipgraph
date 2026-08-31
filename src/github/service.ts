@@ -112,7 +112,7 @@ export async function createGitHubPullRequest(
   let readiness = await assertCurrentReadyCandidate(workspace, input.ticketId, verifiedWorkspace, runner);
   // Build the compact local receipt before publishing the branch. Missing or
   // ambiguous execution telemetry must not leave a remote handoff behind.
-  const receipt = buildUsageReceipt(workspace, projectId, input.ticketId, verifiedWorkspace, readiness);
+  buildUsageReceipt(workspace, projectId, input.ticketId, verifiedWorkspace, readiness);
   let remoteSha = await resolveRemoteBranchSha(
     runner,
     verifiedWorkspace.sourceRepositoryPath,
@@ -149,6 +149,7 @@ export async function createGitHubPullRequest(
   if (readiness.readySha !== remoteSha) {
     throw new Error('KAR-8 fail closed: readiness changed after branch publication');
   }
+  const receipt = buildUsageReceipt(workspace, projectId, input.ticketId, verifiedWorkspace, readiness);
 
   const prInput = {
     repository,
@@ -431,17 +432,24 @@ async function ensureUsageReceipt(
   const matching = prior.filter((event) =>
     event.payload.prNumber === pullRequest.number &&
     event.payload.submittedHeadSha === readiness.readySha &&
-    event.payload.contractDigest === readiness.contractDigest
+    event.payload.contractDigest === readiness.contractDigest &&
+    event.payload.contractRevision === receipt.contractRevision &&
+    event.payload.executionRunId === receipt.executionRunId
   );
   if (prior.some((event) => !matching.includes(event))) {
     throw new Error('KAR-8 fail closed: durable usage receipt evidence conflicts with the current submission');
   }
   if (matching.length > 1) throw new Error('KAR-8 fail closed: duplicate usage receipt evidence exists');
-  if (matching.length === 1) return matching[0];
-
   const body = usageReceiptBody(receipt);
   const comments = await adapter.listComments({ repository: project.repository, number: pullRequest.number });
   const current = findCurrentReceipt(comments, receipt);
+  if (matching.length === 1) {
+    const persisted = matching[0];
+    if (current === undefined || current.id !== persisted.payload.commentId) {
+      throw new Error('KAR-8 fail closed: durable receipt evidence is not confirmed by the current GitHub marker');
+    }
+    return persisted;
+  }
   const comment = current ?? await adapter.postComment({
     repository: project.repository,
     number: pullRequest.number,
@@ -465,6 +473,7 @@ async function ensureUsageReceipt(
       commentId: comment.id,
       ...(comment.url === undefined ? {} : { commentUrl: comment.url }),
       contractDigest: receipt.contractDigest,
+      contractRevision: receipt.contractRevision,
       executionRunId: receipt.executionRunId,
       recordedAt: workspace.now?.() ?? new Date().toISOString(),
     },
@@ -602,8 +611,9 @@ function isFallbackRun(run: RunRecord, runs: readonly RunRecord[]): boolean {
   const position = sameAxis.indexOf(run);
   if (position <= 0) return false;
   return sameAxis.slice(0, position).some((candidate) =>
-    candidate.failureReason !== undefined &&
-    /fallback provider|next fallback|could not be reserved before/iu.test(candidate.failureReason)
+    candidate.status === 'NEEDS_HUMAN' &&
+    candidate.failureCategory === 'persistence_error' &&
+    candidate.failureReason === 'Selected provider could not be reserved before the next fallback was prepared'
   );
 }
 

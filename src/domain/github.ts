@@ -74,6 +74,7 @@ export const githubUsageReceiptEvidenceSchema = z.object({
   commentId: identitySchema,
   commentUrl: z.string().url().max(2_048).optional(),
   contractDigest: z.string().regex(/^[0-9a-f]{64}$/),
+  contractRevision: identitySchema,
   executionRunId: identitySchema,
   recordedAt: timestampSchema,
 }).strict();
