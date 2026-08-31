@@ -203,7 +203,10 @@ export async function getCurrentPrePrReadinessEvidence(
       event.payload.contractRevision === provenance.contractRevision
     );
   const event = events.at(-1);
-  if (event === undefined) return undefined;
+  if (
+    event === undefined ||
+    !passReferencesMatch(event.payload, candidate.sha, provenance, eventsForAssessment, runsForAssessment)
+  ) return undefined;
   return {
     ...event.payload,
     eventId: event.id,
@@ -515,6 +518,7 @@ function redEvidenceStatus(
       const index = remaining.findIndex((evidence) =>
         evidence.command === blocker.command &&
         evidence.before.command === blocker.command &&
+        evidence.before.sha === repair.event.payload.candidateSha &&
         evidence.before.sha !== sha &&
         evidence.before.exitCode !== 0 &&
         evidence.after !== undefined &&
