@@ -315,10 +315,6 @@ function currentReviewRuns(
 }
 
 function reviewStatusFor(runs: readonly AgentRunRecord[]): { reason?: string } {
-  const failed = runs.find((run) => run.reviewResult === 'FAIL');
-  if (failed !== undefined) {
-    return { reason: `Current ${failed.reviewType} review is FAIL` };
-  }
   const latest = new Map<string, AgentRunRecord>();
   for (const run of runs) {
     if (run.reviewType !== undefined) latest.set(run.reviewType, run);

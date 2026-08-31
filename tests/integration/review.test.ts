@@ -1140,6 +1140,27 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
     expect(result.reason).toContain('contract review is FAIL');
   });
 
+  it('allows a later current exact-SHA PASS to supersede an earlier FAIL', async () => {
+    const failedReview = JSON.stringify({ result: 'FAIL', findings: ['needs repair'] });
+    harness = await createHarness([failedReview, failedReview, VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
+    await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+    recordVerificationEvidence(harness);
+    expect((await runPrePrReadiness(readinessInput(harness))).result).toBe('FAIL');
+
+    await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+    expect((await runPrePrReadiness(readinessInput(harness))).result).toBe('PASS');
+  });
+
   it('invalidates readiness after the candidate SHA changes while retaining history', async () => {
     harness = await createHarness([VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
     await runPrePrReviews({
