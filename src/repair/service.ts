@@ -959,6 +959,7 @@ async function validateRepairBoundary(
   }
   const changed = await runner(record.worktreePath, [
     'diff',
+    '--no-renames',
     '--name-only',
     '-z',
     candidateSha,

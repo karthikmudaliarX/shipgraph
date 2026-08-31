@@ -49,7 +49,9 @@ export const repairAttemptEvidenceSchema = z.object({
   candidateSha: shaSchema,
   resultingSha: shaSchema.optional(),
   repairRunId: z.string().min(1).max(256).optional(),
-  blockers: z.array(repairBlockerSchema).max(202),
+  // A verification command and each review finding may be retained as a
+  // separate durable blocker. The producer bounds each source at 100.
+  blockers: z.array(repairBlockerSchema).max(302),
   targetedVerification: z.array(repairVerificationObservationSchema).max(100),
   finalVerification: z.array(repairVerificationObservationSchema).max(100).optional(),
   reviews: repairReviewEvidenceSchema.optional(),

@@ -24,6 +24,7 @@ import {
   runPrePrRepair,
   type RepairVerificationRunner,
 } from '../../src/repair/service.js';
+import { repairAttemptEvidenceSchema } from '../../src/domain/repair.js';
 import { runPrePrReviews } from '../../src/review/service.js';
 import { createWorkspace } from '../../src/workspace/service.js';
 
@@ -615,6 +616,55 @@ describe('KAR-10 bounded pre-PR repair', () => {
     expect(result.status).toBe('NEEDS_HUMAN');
     expect(result.reason).toContain('outside the authorized scope');
   }, 15_000);
+
+  it('rejects a repair that renames an out-of-scope path into an allowed path', async () => {
+    value = await harness(
+      [JSON.stringify({ result: 'FAIL', findings: ['rename boundary blocker'] }), PASS],
+      1,
+      async (request) => {
+        git(request.workspacePath, 'rm', 'README.md');
+        git(request.workspacePath, 'mv', 'OUTSIDE.md', 'README.md');
+        git(request.workspacePath, 'commit', '-m', 'rename outside path into scope');
+        return success('{}');
+      }
+    );
+    writeFileSync(join(value.workspacePath, 'OUTSIDE.md'), '# outside baseline\n');
+    git(value.workspacePath, 'add', '.');
+    git(value.workspacePath, 'commit', '-m', 'add outside baseline');
+    const result = await runPrePrRepair(input(value, sequenceRunner([0])));
+    expect(result.status).toBe('NEEDS_HUMAN');
+    expect(result.reason).toContain('outside the authorized scope');
+    expect(result.reason).toContain('OUTSIDE.md');
+  }, 15_000);
+
+  it('accepts the full bounded blocker combination without truncation', () => {
+    const blockers = [
+      ...Array.from({ length: 100 }, (_, index) => ({
+        source: 'verification' as const,
+        command: `verify-${index}`,
+        expected: 'command exits with status 0',
+        actual: 'expected failure',
+      })),
+      ...Array.from({ length: 100 }, (_, index) => ({
+        source: 'contract_review' as const,
+        findings: [`contract blocker ${index}`],
+      })),
+      ...Array.from({ length: 100 }, (_, index) => ({
+        source: 'engineering_review' as const,
+        findings: [`engineering blocker ${index}`],
+      })),
+    ];
+    expect(blockers).toHaveLength(300);
+    expect(() => repairAttemptEvidenceSchema.parse({
+      ticketId: 'REP-001',
+      attempt: 1,
+      candidateSha: 'a'.repeat(40),
+      blockers,
+      targetedVerification: [],
+      redCapableEvidence: [],
+      outcome: 'BLOCKED',
+    })).not.toThrow();
+  });
 
   it('honors the canonical directory glob form in ticket path scope', async () => {
     value = await harness(
