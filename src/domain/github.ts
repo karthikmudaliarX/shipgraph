@@ -33,15 +33,9 @@ const providerModelSchema = z.object({
   modelId: identitySchema,
 }).strict();
 
-const providerModelSummarySchema = z.object({
-  identityCount: z.number().int().nonnegative(),
-  identityDigest: z.string().regex(/^[0-9a-f]{64}$/),
-}).strict();
-
-const providerModelSectionSchema = z.union([
-  z.array(providerModelSchema),
-  providerModelSummarySchema,
-]);
+// One implementation plus two review axes per initial/repair cycle plus the
+// repair runs, with at most four current MODEL-001 providers per route.
+const MAX_PROVIDER_MODEL_IDENTITIES = (1 + (2 * (100 + 1)) + 100) * 4;
 
 const usageMetricSchema = z.object({
   knownTotal: unknownNumberSchema,
@@ -72,10 +66,10 @@ export const githubUsageReceiptSchema = z.object({
   contractRevision: identitySchema,
   executionRunId: identitySchema,
   routingMode: z.union([modelRoutingModeSchema, z.literal('unknown')]),
-  implementation: providerModelSectionSchema,
-  review: providerModelSectionSchema,
-  repair: providerModelSectionSchema,
-  fallback: providerModelSectionSchema,
+  implementation: z.array(providerModelSchema).max(MAX_PROVIDER_MODEL_IDENTITIES),
+  review: z.array(providerModelSchema).max(MAX_PROVIDER_MODEL_IDENTITIES),
+  repair: z.array(providerModelSchema).max(MAX_PROVIDER_MODEL_IDENTITIES),
+  fallback: z.array(providerModelSchema).max(MAX_PROVIDER_MODEL_IDENTITIES),
   usage: usageSummarySchema,
   providerHealth: z.array(providerHealthSchema).max(32),
 }).strict();

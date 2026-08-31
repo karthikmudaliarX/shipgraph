@@ -457,7 +457,7 @@ describe('KAR-8 GitHub handoff', () => {
     expect(result.receipt.usage.cost).toEqual({ knownTotal: 0.5, unknownRuns: 3 });
   }, 20_000);
 
-  it('uses a bounded digest summary for a maximally varied provider/model history', async () => {
+  it('retains every distinct provider/model identity for a maximally varied history', async () => {
     harness = await createHarness(100);
     addReceiptRuns(harness, 400, (index) => `model-${'x'.repeat(240)}-${index}`);
     const result = await createGitHubPullRequest({
@@ -465,11 +465,11 @@ describe('KAR-8 GitHub handoff', () => {
       gitHost: harness.host,
       workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, gitRunner: harness.gitRunner },
     });
-    expect(result.receipt.repair).toMatchObject({
-      identityCount: 400,
-      identityDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    expect(result.receipt.repair).toHaveLength(400);
+    expect(result.receipt.repair[0]).toEqual({
+      providerId: 'opencode-go',
+      modelId: expect.stringContaining('model-'),
     });
-    expect(JSON.stringify(result.receipt).length).toBeLessThan(60 * 1024);
   }, 20_000);
 
   it('fails closed before GitHub writes when readiness is unavailable', async () => {

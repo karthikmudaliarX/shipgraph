@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import type {
   GitHostAdapter,
   GitHostComment,
@@ -41,7 +41,6 @@ import type { WorkspaceServiceOptions } from '../workspace/service.js';
 import { getCurrentProjectId, getVerifiedWorkspaceForExecution } from '../workspace/service.js';
 
 const RECEIPT_MARKER_PATTERN = /<!-- shipgraph-usage-receipt:v1\n([\s\S]*?)\n-->/gu;
-const MAX_USAGE_RECEIPT_BODY_BYTES = 60 * 1024;
 
 export type GitHubPullRequestInput = {
   ticketId: string;
@@ -511,7 +510,7 @@ function findCurrentReceipt(comments: readonly GitHostComment[], expected: GitHu
 }
 
 function usageReceiptBody(receipt: GitHubUsageReceipt): string {
-  const body = [
+  return [
     'ShipGraph usage receipt',
     `Ticket: ${receipt.ticketId}`,
     `Submitted SHA: ${receipt.headSha}`,
@@ -521,23 +520,6 @@ function usageReceiptBody(receipt: GitHubUsageReceipt): string {
     JSON.stringify(receipt),
     '-->',
   ].join('\n');
-  if (Buffer.byteLength(body, 'utf8') > MAX_USAGE_RECEIPT_BODY_BYTES) {
-    throw new Error('KAR-8 fail closed: usage receipt exceeds the GitHub comment boundary');
-  }
-  return body;
-}
-
-function receiptBodyBytes(receipt: GitHubUsageReceipt): number {
-  return Buffer.byteLength([
-    'ShipGraph usage receipt',
-    `Ticket: ${receipt.ticketId}`,
-    `Submitted SHA: ${receipt.headSha}`,
-    `Execution run: ${receipt.executionRunId}`,
-    `Routing mode: ${receipt.routingMode}`,
-    '<!-- shipgraph-usage-receipt:v1',
-    JSON.stringify(receipt),
-    '-->',
-  ].join('\n'), 'utf8');
 }
 
 function buildUsageReceipt(
@@ -603,7 +585,7 @@ function buildUsageReceipt(
     usage: summarizeUsage(runs, usageEntries),
     providerHealth: health,
   });
-  return compactUsageReceipt(receipt);
+  return receipt;
 }
 
 function providerModel(run: RunRecord): { providerId: string; modelId: string } {
@@ -623,33 +605,6 @@ function distinctProviderModels(runs: readonly RunRecord[]): Array<{ providerId:
     compareStableStrings(left.providerId, right.providerId) ||
     compareStableStrings(left.modelId, right.modelId)
   );
-}
-
-function compactUsageReceipt(receipt: GitHubUsageReceipt): GitHubUsageReceipt {
-  if (receiptBodyBytes(receipt) <= MAX_USAGE_RECEIPT_BODY_BYTES) return receipt;
-  const compacted = githubUsageReceiptSchema.parse({
-    ...receipt,
-    implementation: compactProviderModelSection(receipt.implementation),
-    review: compactProviderModelSection(receipt.review),
-    repair: compactProviderModelSection(receipt.repair),
-    fallback: compactProviderModelSection(receipt.fallback),
-  });
-  if (receiptBodyBytes(compacted) > MAX_USAGE_RECEIPT_BODY_BYTES) {
-    throw new Error('KAR-8 fail closed: usage receipt exceeds the GitHub comment boundary');
-  }
-  return compacted;
-}
-
-function compactProviderModelSection(
-  section: GitHubUsageReceipt['implementation']
-): GitHubUsageReceipt['implementation'] {
-  if (!Array.isArray(section)) return section;
-  return {
-    identityCount: section.length,
-    identityDigest: createHash('sha256')
-      .update(JSON.stringify(section))
-      .digest('hex'),
-  };
 }
 
 function summarizeUsage(
