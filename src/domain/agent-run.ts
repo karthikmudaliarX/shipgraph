@@ -170,6 +170,10 @@ export const agentRunRecordSchema = z.object({
   reviewType: reviewTypeSchema.optional(),
   /** Exact local commit reviewed by a KAR-9 review run. */
   reviewedSha: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/).optional(),
+  /** KAR-11 contract provenance bound to a newly produced KAR-9 review. */
+  reviewContractDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  reviewContractSource: z.string().min(1).max(4_096).optional(),
+  reviewContractRevision: z.string().min(1).max(256).optional(),
   reviewResult: reviewResultSchema.optional(),
   reviewFindings: z.array(z.string().min(1).max(2_048)).max(100).optional(),
   timeoutMs: z.number().int().positive().max(MAX_AGENT_TIMEOUT_MS),

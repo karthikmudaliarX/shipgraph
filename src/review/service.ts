@@ -26,6 +26,10 @@ import { redactSensitiveText } from '../adapters/agent/safety.js';
 import { ModelRoutingService, type RoutedAgentTaskResult } from '../model/service.js';
 import type { AgentSafetyPolicy } from '../execution/service.js';
 import { ShipgraphError } from '../utils/errors.js';
+import {
+  deriveTicketContractProvenance,
+  type TicketContractProvenance,
+} from '../domain/ticket.js';
 
 const REVIEW_DIFF_LIMIT_BYTES = 32 * 1024;
 const FULL_SHA_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/u;
@@ -53,6 +57,7 @@ export type PrePrReviewAxisResult = {
 
 export type PrePrReviewResult = {
   reviewedSha: string;
+  contractProvenance?: TicketContractProvenance;
   contract: PrePrReviewAxisResult;
   engineering: PrePrReviewAxisResult;
   passed: boolean;
@@ -93,9 +98,15 @@ export async function runPrePrReviews(input: PrePrReviewInput): Promise<PrePrRev
         instructions: reviewInstruction,
         ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
         ...(input.signal === undefined ? {} : { signal: input.signal }),
-        safety: reviewSafety,
+      safety: reviewSafety,
       },
-      { reviewType, reviewedSha: snapshot.headSha }
+      {
+        reviewType,
+        reviewedSha: snapshot.headSha,
+        reviewContractDigest: snapshot.contractProvenance.contractDigest,
+        reviewContractSource: snapshot.contractProvenance.contractSource,
+        reviewContractRevision: snapshot.contractProvenance.contractRevision,
+      }
     );
     results.push(axisResult(reviewType, snapshot.headSha, routed));
     await assertCurrentReviewHead(input.workspace, input.ticketId, snapshot.headSha);
@@ -108,6 +119,7 @@ export async function runPrePrReviews(input: PrePrReviewInput): Promise<PrePrRev
   }
   return {
     reviewedSha: snapshot.headSha,
+    contractProvenance: snapshot.contractProvenance,
     contract,
     engineering,
     passed: contract.passed && engineering.passed,
@@ -176,6 +188,9 @@ export async function listCurrentPrePrReviewEvidence(
       run.task === 'review' &&
       run.reviewType !== undefined &&
       run.reviewedSha === snapshot.headSha &&
+      run.reviewContractDigest === snapshot.contractProvenance.contractDigest &&
+      run.reviewContractSource === snapshot.contractProvenance.contractSource &&
+      run.reviewContractRevision === snapshot.contractProvenance.contractRevision &&
       run.status === 'SUCCEEDED' &&
       run.reviewResult !== undefined
     )
@@ -195,6 +210,7 @@ async function readReviewSnapshot(
   diff: string;
   diffTruncated: boolean;
   contract: Record<string, unknown>;
+  contractProvenance: TicketContractProvenance;
 }> {
   const workspace = await getVerifiedWorkspaceForExecution(options, ticketId, 'changed');
   const runner = options.gitRunner ?? createGitRunner();
@@ -236,6 +252,17 @@ async function readReviewSnapshot(
     agent: ticket.agent,
     release: ticket.release,
   } satisfies Record<string, unknown>;
+  const sync = options.db
+    .prepare('SELECT version, source_path FROM backlog_syncs WHERE project_id = ?')
+    .get(workspace.projectId) as { version: number; source_path: string } | undefined;
+  if (sync === undefined || sync.source_path.length === 0) {
+    throw new Error(`Ticket ${ticketId} has no authoritative backlog contract provenance`);
+  }
+  const contractProvenance = deriveTicketContractProvenance(
+    ticket,
+    sync.source_path,
+    String(sync.version)
+  );
   return {
     workspace,
     baseSha: workspace.baseSha,
@@ -243,6 +270,7 @@ async function readReviewSnapshot(
     diff: boundedDiff.value,
     diffTruncated: boundedDiff.truncated,
     contract,
+    contractProvenance,
   };
 }
 
@@ -287,6 +315,7 @@ function reviewInstructions(
     `Review axis: ${reviewType}`,
     `Base commit SHA: ${snapshot.baseSha}`,
     `Head commit SHA: ${snapshot.headSha}`,
+    `Ticket contract provenance: ${JSON.stringify(snapshot.contractProvenance)}`,
     `Ticket contract: ${JSON.stringify(snapshot.contract)}`,
     `Diff from base to head:\n${diff}${truncation}`,
   ].filter((line) => line.length > 0).join('\n\n');

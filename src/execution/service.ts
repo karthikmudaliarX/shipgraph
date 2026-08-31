@@ -121,6 +121,9 @@ export type SelectedAgentTaskInput = Omit<AgentTaskInput, 'model' | 'provider' |
 export type PrePrReviewProvenance = {
   reviewType: ReviewType;
   reviewedSha: string;
+  reviewContractDigest?: string;
+  reviewContractSource?: string;
+  reviewContractRevision?: string;
 };
 
 type ExecutionTaskInput = AgentTaskInput & Partial<PrePrReviewProvenance>;
@@ -488,6 +491,9 @@ function withoutReviewProvenance<T extends AgentTaskInput>(input: T): T {
   const genericInput = { ...input } as T & Partial<PrePrReviewProvenance>;
   delete genericInput.reviewType;
   delete genericInput.reviewedSha;
+  delete genericInput.reviewContractDigest;
+  delete genericInput.reviewContractSource;
+  delete genericInput.reviewContractRevision;
   return genericInput;
 }
 
@@ -566,6 +572,9 @@ function validateTaskInput(
   modelProviderId?: ModelProviderId;
   reviewType?: ReviewType;
   reviewedSha?: string;
+  reviewContractDigest?: string;
+  reviewContractSource?: string;
+  reviewContractRevision?: string;
   safety: AgentSafetyPolicy;
 } {
   if (!agentProviderSchema.safeParse(options.adapter.provider).success) {
@@ -603,6 +612,17 @@ function validateTaskInput(
   if (input.reviewedSha !== undefined && !/^[0-9a-f]{40}$|^[0-9a-f]{64}$/u.test(input.reviewedSha)) {
     throw new Error('KAR-9 reviewed SHA must be a full Git commit SHA');
   }
+  const reviewContractFields = [
+    input.reviewContractDigest,
+    input.reviewContractSource,
+    input.reviewContractRevision,
+  ];
+  if (reviewContractFields.some((field) => field !== undefined) && reviewContractFields.some((field) => field === undefined)) {
+    throw new Error('KAR-11 review provenance requires digest, source, and revision together');
+  }
+  if (input.reviewContractDigest !== undefined && !/^[0-9a-f]{64}$/u.test(input.reviewContractDigest)) {
+    throw new Error('KAR-11 contract digest must be a SHA-256 hex digest');
+  }
   if (!options.adapter.capabilities.includes(MODEL_TASK_TO_AGENT_CAPABILITY[task])) {
     throw new Error(
       `AGENT-001 adapter for ${options.adapter.provider} does not support MODEL task ${task}`
@@ -637,6 +657,9 @@ function validateTaskInput(
     ...(modelProviderId === undefined ? {} : { modelProviderId }),
     ...(reviewType === undefined ? {} : { reviewType }),
     ...(input.reviewedSha === undefined ? {} : { reviewedSha: input.reviewedSha }),
+    ...(input.reviewContractDigest === undefined ? {} : { reviewContractDigest: input.reviewContractDigest }),
+    ...(input.reviewContractSource === undefined ? {} : { reviewContractSource: input.reviewContractSource }),
+    ...(input.reviewContractRevision === undefined ? {} : { reviewContractRevision: input.reviewContractRevision }),
     safety: safetyPolicyWithTicketRisk(
       options,
       input.ticketId,
@@ -1188,6 +1211,9 @@ function buildAgentRun(
     modelProviderId?: ModelProviderId;
     reviewType?: ReviewType;
     reviewedSha?: string;
+    reviewContractDigest?: string;
+    reviewContractSource?: string;
+    reviewContractRevision?: string;
     safety: AgentSafetyPolicy;
   },
   runId: string,
@@ -1208,6 +1234,9 @@ function buildAgentRun(
       : { modelProviderId: normalized.modelProviderId }),
     ...(normalized.reviewType === undefined ? {} : { reviewType: normalized.reviewType }),
     ...(normalized.reviewedSha === undefined ? {} : { reviewedSha: normalized.reviewedSha }),
+    ...(normalized.reviewContractDigest === undefined ? {} : { reviewContractDigest: normalized.reviewContractDigest }),
+    ...(normalized.reviewContractSource === undefined ? {} : { reviewContractSource: normalized.reviewContractSource }),
+    ...(normalized.reviewContractRevision === undefined ? {} : { reviewContractRevision: normalized.reviewContractRevision }),
     task: normalized.task,
     model: normalized.model,
     createdAt,
@@ -1239,6 +1268,9 @@ function loadPreparedRun(
     modelProviderId?: ModelProviderId;
     reviewType?: ReviewType;
     reviewedSha?: string;
+    reviewContractDigest?: string;
+    reviewContractSource?: string;
+    reviewContractRevision?: string;
     safety: AgentSafetyPolicy;
   }
 ): AgentRunRecord {
@@ -1268,6 +1300,9 @@ function assertPreparedRunMatchesRequest(
     modelProviderId?: ModelProviderId;
     reviewType?: ReviewType;
     reviewedSha?: string;
+    reviewContractDigest?: string;
+    reviewContractSource?: string;
+    reviewContractRevision?: string;
     safety: AgentSafetyPolicy;
   }
 ): void {
@@ -1292,6 +1327,13 @@ function assertPreparedRunMatchesRequest(
   }
   if (run.reviewType !== normalized.reviewType || run.reviewedSha !== normalized.reviewedSha) {
     throw new Error(`Prepared agent run ${run.id} does not match the KAR-9 review provenance`);
+  }
+  if (
+    run.reviewContractDigest !== normalized.reviewContractDigest ||
+    run.reviewContractSource !== normalized.reviewContractSource ||
+    run.reviewContractRevision !== normalized.reviewContractRevision
+  ) {
+    throw new Error(`Prepared agent run ${run.id} does not match the ticket contract provenance`);
   }
   if (run.instructionsSha256 !== instructionHash || run.timeoutMs !== normalized.timeoutMs) {
     throw new Error(`Prepared agent run ${run.id} does not match the execution request`);
@@ -1380,6 +1422,9 @@ function persistCreatedRun(
         createdAt: run.createdAt,
         ...(run.reviewType === undefined ? {} : { reviewType: run.reviewType }),
         ...(run.reviewedSha === undefined ? {} : { reviewedSha: run.reviewedSha }),
+        ...(run.reviewContractDigest === undefined ? {} : { reviewContractDigest: run.reviewContractDigest }),
+        ...(run.reviewContractSource === undefined ? {} : { reviewContractSource: run.reviewContractSource }),
+        ...(run.reviewContractRevision === undefined ? {} : { reviewContractRevision: run.reviewContractRevision }),
         safetyPolicySha256: run.safetyPolicySha256,
         timeoutMs: run.timeoutMs,
         instructionsSha256: run.instructionsSha256,
@@ -1500,6 +1545,9 @@ function finalizeRun(
         ...(durableUpdated.evidence === undefined ? {} : { evidence: durableUpdated.evidence }),
         ...(durableUpdated.reviewType === undefined ? {} : { reviewType: durableUpdated.reviewType }),
         ...(durableUpdated.reviewedSha === undefined ? {} : { reviewedSha: durableUpdated.reviewedSha }),
+        ...(durableUpdated.reviewContractDigest === undefined ? {} : { reviewContractDigest: durableUpdated.reviewContractDigest }),
+        ...(durableUpdated.reviewContractSource === undefined ? {} : { reviewContractSource: durableUpdated.reviewContractSource }),
+        ...(durableUpdated.reviewContractRevision === undefined ? {} : { reviewContractRevision: durableUpdated.reviewContractRevision }),
         ...(durableUpdated.reviewResult === undefined ? {} : { reviewResult: durableUpdated.reviewResult }),
         ...(durableUpdated.reviewFindings === undefined ? {} : { reviewFindings: durableUpdated.reviewFindings }),
       },

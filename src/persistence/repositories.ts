@@ -90,6 +90,9 @@ export type RunRecord = {
   safetyPolicySha256?: string;
   reviewType?: import('../domain/agent-run.js').ReviewType;
   reviewedSha?: string;
+  reviewContractDigest?: string;
+  reviewContractSource?: string;
+  reviewContractRevision?: string;
   reviewResult?: import('../domain/agent-run.js').ReviewResult;
   reviewFindings?: readonly string[];
   timeoutMs?: number;
@@ -548,12 +551,13 @@ export function createRunRepository(db: DbConnection): RunRepository {
             provider_session_id, provider_process_id, exit_code, termination_signal,
             timed_out, cancelled, failure_category, failure_reason, stdout, stderr,
             stdout_truncated, stderr_truncated, evidence_json, instructions_sha256, timeout_ms,
-            safety_policy_sha256, review_type, reviewed_sha, review_result, review_findings_json
+            safety_policy_sha256, review_type, reviewed_sha, review_result, review_findings_json,
+            review_contract_digest, review_contract_source, review_contract_revision
           ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?
           )`
         ).run(
           run.id,
@@ -591,7 +595,10 @@ export function createRunRepository(db: DbConnection): RunRepository {
           run.reviewType ?? null,
           run.reviewedSha ?? null,
           run.reviewResult ?? null,
-          run.reviewFindings === undefined ? null : JSON.stringify(run.reviewFindings)
+          run.reviewFindings === undefined ? null : JSON.stringify(run.reviewFindings),
+          run.reviewContractDigest ?? null,
+          run.reviewContractSource ?? null,
+          run.reviewContractRevision ?? null
         );
       } catch (error) {
         if (error instanceof Error && /UNIQUE constraint failed/.test(error.message)) {
@@ -1008,6 +1015,15 @@ function rowToRun(row: Record<string, unknown>): RunRecord {
     ...(row.reviewed_sha === null || row.reviewed_sha === undefined
       ? {}
       : { reviewedSha: requiredString(row, 'reviewed_sha') }),
+    ...(row.review_contract_digest === null || row.review_contract_digest === undefined
+      ? {}
+      : { reviewContractDigest: requiredString(row, 'review_contract_digest') }),
+    ...(row.review_contract_source === null || row.review_contract_source === undefined
+      ? {}
+      : { reviewContractSource: requiredString(row, 'review_contract_source') }),
+    ...(row.review_contract_revision === null || row.review_contract_revision === undefined
+      ? {}
+      : { reviewContractRevision: requiredString(row, 'review_contract_revision') }),
     ...(row.review_result === null || row.review_result === undefined
       ? {}
       : { reviewResult: reviewResultSchema.parse(requiredString(row, 'review_result')) }),
