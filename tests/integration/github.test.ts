@@ -40,7 +40,7 @@ type Harness = {
   db: DbConnection;
   gitRunner: GitRunner;
   host: FakeGitHub;
-  remote: { sha?: string };
+  remote: { sha?: string; pushUrls?: readonly string[] };
 };
 
 class FakeGitHub implements GitHostAdapter {
@@ -99,11 +99,18 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 }
 
-function makeGitRunner(projectDir: string, branch: string, remote: { sha?: string }): GitRunner {
+function makeGitRunner(
+  projectDir: string,
+  branch: string,
+  remote: { sha?: string; pushUrls?: readonly string[] }
+): GitRunner {
   const real = createGitRunner();
   return async (cwd, args): Promise<GitCommandResult> => {
     if (cwd === projectDir && args[0] === 'remote' && args[1] === 'get-url') {
-      return { exitCode: 0, stdout: 'git@github.com:owner/github-001.git\n', stderr: '' };
+      const urls = args.includes('--push')
+        ? (remote.pushUrls ?? ['git@github.com:owner/github-001.git'])
+        : ['git@github.com:owner/github-001.git'];
+      return { exitCode: 0, stdout: `${urls.join('\n')}\n`, stderr: '' };
     }
     if (cwd === projectDir && args[0] === 'ls-remote') {
       return {
@@ -332,6 +339,20 @@ describe('KAR-8 GitHub handoff', () => {
     expect(createEventRepository(harness.db).findByTicketId('GH-001').filter((event) => event.type === EventType.GITHUB_USAGE_RECEIPT_RECORDED)).toHaveLength(1);
   });
 
+  it('reuses the durable PR and receipt after a completed PR_OPEN handoff is retried', async () => {
+    harness = await createHarness();
+    const input = {
+      ticketId: 'GH-001',
+      gitHost: harness.host,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, gitRunner: harness.gitRunner },
+    } as const;
+    await createGitHubPullRequest(input);
+    await createGitHubPullRequest(input);
+    expect(harness.host.calls.filter((call) => call === 'create')).toHaveLength(1);
+    expect(harness.host.calls.filter((call) => call === 'post-comment')).toHaveLength(1);
+    expect(createEventRepository(harness.db).findByTicketId('GH-001').filter((event) => event.type === EventType.GITHUB_PR_RECORDED)).toHaveLength(1);
+  });
+
   it('fails closed before GitHub writes when readiness is unavailable', async () => {
     harness = await createHarness();
     persistTicketTransition(harness.db, { ticketId: 'GH-001', projectId: harness.workspace.projectId, next: TicketState.NEEDS_HUMAN });
@@ -339,8 +360,8 @@ describe('KAR-8 GitHub handoff', () => {
       ticketId: 'GH-001',
       gitHost: harness.host,
       workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, gitRunner: harness.gitRunner },
-    })).rejects.toThrow(/Readiness/);
-    expect(harness.host.calls).toEqual(['probe']);
+    })).rejects.toThrow(/Readiness|NEEDS_HUMAN/);
+    expect(harness.host.calls).toEqual([]);
     expect(harness.host.pullRequest).toBeUndefined();
   });
 
@@ -374,5 +395,19 @@ describe('KAR-8 GitHub handoff', () => {
     })).rejects.toThrow(/CLOSED/);
     expect(harness.host.calls).toEqual(['probe', 'find']);
     expect(harness.host.calls).not.toContain('create');
+  });
+
+  it('fails closed when the push remote exposes more than one destination', async () => {
+    harness = await createHarness();
+    harness.remote.pushUrls = [
+      'git@github.com:owner/github-001.git',
+      'git@github.com:other/not-authorized.git',
+    ];
+    await expect(createGitHubPullRequest({
+      ticketId: 'GH-001',
+      gitHost: harness.host,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, gitRunner: harness.gitRunner },
+    })).rejects.toThrow(/fetch|push remote/);
+    expect(harness.host.calls).toEqual([]);
   });
 });

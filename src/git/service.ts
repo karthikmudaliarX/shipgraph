@@ -236,6 +236,7 @@ export async function resolveGitRemoteUrl(
   const result = await runGit(runner, repoPath, [
     'remote',
     'get-url',
+    '--all',
     ...(push ? ['--push'] : []),
     remote,
   ]);

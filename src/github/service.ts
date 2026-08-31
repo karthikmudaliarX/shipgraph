@@ -78,6 +78,9 @@ export async function createGitHubPullRequest(
   if (project === undefined || ticket === undefined || ticket.projectId !== projectId) {
     throw new Error(`KAR-8 fail closed: ticket ${input.ticketId} is not in the current project`);
   }
+  if (ticket.status !== TicketState.VERIFYING && ticket.status !== TicketState.PR_OPEN) {
+    throw new Error(`KAR-8 fail closed: ticket must be VERIFYING or PR_OPEN, not ${ticket.status}`);
+  }
 
   const verifiedWorkspace = await getVerifiedWorkspaceForExecution(
     workspace,
@@ -95,6 +98,9 @@ export async function createGitHubPullRequest(
     input.remote ?? 'origin',
     true
   ));
+  const githubProject = project.repository === repository
+    ? project
+    : { ...project, repository };
   const adapter = input.gitHost ?? new GitHubAdapter();
   if (adapter.type !== 'github') throw new Error('KAR-8 fail closed: only GitHub is supported by GH-001');
   const probe = await adapter.probe();
@@ -104,6 +110,9 @@ export async function createGitHubPullRequest(
   }
 
   let readiness = await assertCurrentReadyCandidate(workspace, input.ticketId, verifiedWorkspace, runner);
+  // Build the compact local receipt before publishing the branch. Missing or
+  // ambiguous execution telemetry must not leave a remote handoff behind.
+  const receipt = buildUsageReceipt(workspace, projectId, input.ticketId, verifiedWorkspace, readiness);
   let remoteSha = await resolveRemoteBranchSha(
     runner,
     verifiedWorkspace.sourceRepositoryPath,
@@ -143,7 +152,7 @@ export async function createGitHubPullRequest(
 
   const prInput = {
     repository,
-    baseBranch: project.defaultBranch,
+    baseBranch: githubProject.defaultBranch,
     headBranch: verifiedWorkspace.branchName,
     title: pullRequestTitle(ticket.id, ticket.title),
     body: pullRequestBody(ticket.id, readiness),
@@ -151,17 +160,16 @@ export async function createGitHubPullRequest(
   const pullRequest = await findOrCreatePullRequest(adapter, prInput, readiness.readySha);
   const prEvidenceEvent = persistPrEvidence(
     workspace,
-    project,
+    githubProject,
     input.ticketId,
     pullRequest,
     readiness,
     verifiedWorkspace
   );
 
-  const receipt = buildUsageReceipt(workspace, projectId, input.ticketId, verifiedWorkspace, readiness);
   const receiptEvidenceEvent = await ensureUsageReceipt(
     workspace,
-    project,
+    githubProject,
     input.ticketId,
     pullRequest,
     receipt,
@@ -196,7 +204,12 @@ async function assertCurrentReadyCandidate(
   expectedWorkspace: WorkspaceRecord,
   runner: GitRunner
 ): Promise<VerifiedReadiness> {
-  const readiness = await getCurrentPrePrReadinessEvidence(workspace, ticketId);
+  const currentTicket = createTicketRepository(workspace.db).findById(ticketId);
+  const readiness = await getCurrentPrePrReadinessEvidence(
+    workspace,
+    ticketId,
+    { allowPrOpen: currentTicket?.status === TicketState.PR_OPEN }
+  );
   if (readiness === undefined || readiness.result !== 'PASS' || readiness.readySha === undefined) {
     throw new Error('KAR-8 fail closed: current exact-SHA Pre-PR Readiness PASS is unavailable');
   }
@@ -545,7 +558,7 @@ function buildUsageReceipt(
     };
   });
   const decisions = modelRepository.listRoutingDecisions(projectId);
-  const routingMode = routingModeFor(runs, usageEntries, decisions);
+  const routingMode = routingModeFor(usageEntries, decisions);
   const receipt = githubUsageReceiptSchema.parse({
     version: 1,
     ticketId,
@@ -586,11 +599,15 @@ function isFallbackRun(run: RunRecord, runs: readonly RunRecord[]): boolean {
     candidate.task === run.task &&
     (run.task !== 'review' || candidate.reviewType === run.reviewType)
   );
-  return sameAxis.indexOf(run) > 0;
+  const position = sameAxis.indexOf(run);
+  if (position <= 0) return false;
+  return sameAxis.slice(0, position).some((candidate) =>
+    candidate.failureReason !== undefined &&
+    /fallback provider|next fallback|could not be reserved before/iu.test(candidate.failureReason)
+  );
 }
 
 function routingModeFor(
-  runs: readonly RunRecord[],
   usageEntries: ReturnType<ReturnType<typeof createModelRepository>['listUsage']>,
   decisions: ReturnType<ReturnType<typeof createModelRepository>['listRoutingDecisions']>
 ): ModelRoutingMode | 'unknown' {
@@ -602,16 +619,5 @@ function routingModeFor(
   const durableDecisions = decisions.filter((decision) => decisionIds.has(decision.id));
   const durableModes = new Set(durableDecisions.map((decision) => decision.mode));
   if (durableModes.size === 1) return durableDecisions[0].mode;
-  if (durableModes.size > 1) return 'unknown';
-  for (const run of runs) {
-    const matches = decisions.filter((candidate) =>
-      candidate.task === run.task &&
-      candidate.modelId === run.model &&
-      (run.modelProviderId === undefined || candidate.providerId === run.modelProviderId)
-    );
-    const modes = new Set(matches.map((candidate) => candidate.mode));
-    if (modes.size === 1) return matches[0].mode;
-    if (modes.size > 1) return 'unknown';
-  }
   return 'unknown';
 }
