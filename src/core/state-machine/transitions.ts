@@ -20,7 +20,12 @@ const allowedTransitions: Record<TicketStateValue, readonly TicketStateValue[]> 
   [TicketState.ELIGIBLE]: [TicketState.PLANNING, TicketState.PAUSED, TicketState.CANCELLED],
   [TicketState.PLANNING]: [TicketState.IMPLEMENTING, TicketState.PAUSED, TicketState.CANCELLED],
   [TicketState.IMPLEMENTING]: [TicketState.VERIFYING, TicketState.PAUSED, TicketState.FAILED],
-  [TicketState.VERIFYING]: [TicketState.PR_OPEN, TicketState.REPAIRING, TicketState.FAILED],
+  [TicketState.VERIFYING]: [
+    TicketState.PR_OPEN,
+    TicketState.REPAIRING,
+    TicketState.FAILED,
+    TicketState.NEEDS_HUMAN,
+  ],
   [TicketState.PR_OPEN]: [TicketState.CI_WAIT, TicketState.NEEDS_HUMAN],
   [TicketState.CI_WAIT]: [TicketState.REVIEWING, TicketState.REPAIRING, TicketState.FAILED],
   [TicketState.REVIEWING]: [
@@ -29,7 +34,7 @@ const allowedTransitions: Record<TicketStateValue, readonly TicketStateValue[]> 
     TicketState.NEEDS_HUMAN,
   ],
   [TicketState.CHANGES_REQUIRED]: [TicketState.REPAIRING, TicketState.NEEDS_HUMAN],
-  [TicketState.REPAIRING]: [TicketState.VERIFYING, TicketState.FAILED],
+  [TicketState.REPAIRING]: [TicketState.VERIFYING, TicketState.FAILED, TicketState.NEEDS_HUMAN],
   [TicketState.RELEASE_READY]: [
     TicketState.AWAITING_APPROVAL,
     TicketState.MERGING,
