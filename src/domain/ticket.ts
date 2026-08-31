@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
   ALL_TICKET_STATES,
@@ -125,6 +126,59 @@ export type TicketAgentConfig = z.infer<typeof ticketAgentConfigSchema>;
 export type TicketReleaseConfig = z.infer<typeof ticketReleaseConfigSchema>;
 export type TicketDefinition = z.infer<typeof ticketDefinitionSchema>;
 export type TicketContract = z.infer<typeof ticketContractSchema>;
+
+export type TicketContractProvenance = {
+  contractDigest: string;
+  contractSource: string;
+  contractRevision: string;
+};
+
+/**
+ * Derive provenance from the existing v1 backlog contract. Runtime state is
+ * intentionally excluded so a status transition cannot change the digest.
+ */
+export function deriveTicketContractProvenance(
+  ticket: Pick<
+    TicketDefinition,
+    | 'id'
+    | 'title'
+    | 'description'
+    | 'priority'
+    | 'dependsOn'
+    | 'scope'
+    | 'acceptanceCriteria'
+    | 'verification'
+    | 'risk'
+    | 'agent'
+    | 'release'
+  >,
+  contractSource: string,
+  contractRevision: string
+): TicketContractProvenance {
+  if (contractSource.length === 0 || contractRevision.length === 0) {
+    throw new Error('Ticket contract provenance requires a source and revision');
+  }
+  const canonicalContract = {
+    id: ticket.id,
+    title: ticket.title,
+    description: ticket.description,
+    priority: ticket.priority,
+    dependsOn: [...ticket.dependsOn],
+    scope: ticket.scope,
+    acceptanceCriteria: [...ticket.acceptanceCriteria],
+    verification: ticket.verification,
+    risk: ticket.risk,
+    agent: ticket.agent,
+    release: ticket.release,
+  };
+  return {
+    contractDigest: createHash('sha256')
+      .update(JSON.stringify(canonicalContract))
+      .digest('hex'),
+    contractSource,
+    contractRevision,
+  };
+}
 
 export function validateTicket(value: unknown): TicketContract {
   return ticketContractSchema.parse(value);

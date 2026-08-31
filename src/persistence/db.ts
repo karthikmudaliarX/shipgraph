@@ -492,6 +492,18 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE runs ADD COLUMN review_findings_json TEXT;
     `,
   },
+  {
+    version: 17,
+    name: 'persist_review_contract_provenance',
+    up: `
+      -- KAR-11 requires newly produced KAR-9 reviews to identify the exact
+      -- ticket contract they evaluated. Older review rows remain historical
+      -- evidence but cannot satisfy the readiness gate without these fields.
+      ALTER TABLE runs ADD COLUMN review_contract_digest TEXT;
+      ALTER TABLE runs ADD COLUMN review_contract_source TEXT;
+      ALTER TABLE runs ADD COLUMN review_contract_revision TEXT;
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {

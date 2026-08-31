@@ -11,6 +11,7 @@ import {
 } from '../domain/agent-run.js';
 import { modelProviderIdSchema, modelTaskTypeSchema } from '../domain/model-provider.js';
 import { repairAttemptEvidenceSchema } from '../domain/repair.js';
+import { readinessEvidenceSchema } from '../domain/readiness.js';
 
 /** Core event types for the append-only audit log. */
 export const EVENT_TYPES = [
@@ -26,6 +27,7 @@ export const EVENT_TYPES = [
   'workspace.failed',
   'run.state_changed',
   'repair.attempt_recorded',
+  'pre_pr_readiness.recorded',
 ] as const;
 
 export const EventType = {
@@ -41,6 +43,7 @@ export const EventType = {
   WORKSPACE_FAILED: EVENT_TYPES[9],
   RUN_STATE_CHANGED: EVENT_TYPES[10],
   REPAIR_ATTEMPT_RECORDED: EVENT_TYPES[11],
+  PRE_PR_READINESS_RECORDED: EVENT_TYPES[12],
 } as const;
 
 export type EventTypeValue = (typeof EVENT_TYPES)[number];
@@ -96,6 +99,9 @@ export const runCreatedPayloadSchema = z.object({
   safetyPolicySha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   reviewType: reviewTypeSchema.optional(),
   reviewedSha: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/).optional(),
+  reviewContractDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  reviewContractSource: z.string().min(1).max(4_096).optional(),
+  reviewContractRevision: z.string().min(1).max(256).optional(),
 }).strict();
 
 export const runCompletedPayloadSchema = z.object({
@@ -114,6 +120,9 @@ export const runCompletedPayloadSchema = z.object({
   evidence: normalizedAgentEvidenceSchema.optional(),
   reviewType: reviewTypeSchema.optional(),
   reviewedSha: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/).optional(),
+  reviewContractDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  reviewContractSource: z.string().min(1).max(4_096).optional(),
+  reviewContractRevision: z.string().min(1).max(256).optional(),
   reviewResult: reviewResultSchema.optional(),
   reviewFindings: z.array(z.string().min(1).max(2_048)).max(100).optional(),
 }).strict();
@@ -236,6 +245,12 @@ const eventUnionSchema = z.discriminatedUnion('type', [
     type: z.literal(EventType.REPAIR_ATTEMPT_RECORDED),
     payload: repairAttemptEvidenceSchema,
   }).strict(),
+  z.object({
+    ...baseEnvelopeShape,
+    ticketId: identitySchema,
+    type: z.literal(EventType.PRE_PR_READINESS_RECORDED),
+    payload: readinessEvidenceSchema,
+  }).strict(),
 ]);
 
 /** Runtime-typed event union with duplicated envelope identities kept consistent. */
@@ -304,6 +319,7 @@ export type WorkspaceReadyPayload = z.infer<typeof workspaceReadyPayloadSchema>;
 export type WorkspaceRemovedPayload = z.infer<typeof workspaceRemovedPayloadSchema>;
 export type WorkspaceFailedPayload = z.infer<typeof workspaceFailedPayloadSchema>;
 export type RepairAttemptRecordedPayload = z.infer<typeof repairAttemptEvidenceSchema>;
+export type PrePrReadinessRecordedPayload = z.infer<typeof readinessEvidenceSchema>;
 
 export function isValidStateValue(value: string): value is TicketStateValue {
   return ticketStateSchema.safeParse(value).success;
