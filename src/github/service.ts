@@ -12,7 +12,7 @@ import {
   type GitHubUsageReceipt,
   type GitHubUsageReceiptEvidence,
 } from '../domain/github.js';
-import { UNKNOWN, type ModelRoutingMode } from '../domain/model-provider.js';
+import { UNKNOWN, type ModelRoutingMode, type UsageLedgerRecord } from '../domain/model-provider.js';
 import { EventType, type ShipgraphEvent } from '../events/event.js';
 import {
   createGitRunner,
@@ -36,6 +36,7 @@ import {
   type WorkspaceRecord,
 } from '../persistence/repositories.js';
 import { persistTicketTransition } from '../persistence/ticket-state-store.js';
+import { compareStableStrings } from '../utils/sorting.js';
 import type { WorkspaceServiceOptions } from '../workspace/service.js';
 import { getCurrentProjectId, getVerifiedWorkspaceForExecution } from '../workspace/service.js';
 
@@ -577,21 +578,11 @@ function buildUsageReceipt(
     contractRevision: readiness.contractRevision,
     executionRunId,
     routingMode,
-    implementation: receiptRuns.implementation.map(providerModel),
-    review: receiptRuns.review.map(providerModel),
-    repair: receiptRuns.repair.map(providerModel),
-    fallback: fallbackRuns.map(providerModel),
-    usage: runs.map((run) => {
-      const entry = usageEntries.find((candidate) => candidate.runId === run.id);
-      return {
-        runId: run.id,
-        providerId: run.modelProviderId ?? run.provider ?? UNKNOWN,
-        modelId: run.model ?? UNKNOWN,
-        inputTokens: entry?.inputTokens ?? UNKNOWN,
-        outputTokens: entry?.outputTokens ?? UNKNOWN,
-        cost: entry?.cost ?? UNKNOWN,
-      };
-    }),
+    implementation: distinctProviderModels(receiptRuns.implementation),
+    review: distinctProviderModels(receiptRuns.review),
+    repair: distinctProviderModels(receiptRuns.repair),
+    fallback: distinctProviderModels(fallbackRuns),
+    usage: summarizeUsage(runs, usageEntries),
     providerHealth: health,
   });
   return receipt;
@@ -601,6 +592,58 @@ function providerModel(run: RunRecord): { providerId: string; modelId: string } 
   return {
     providerId: run.modelProviderId ?? run.provider ?? UNKNOWN,
     modelId: run.model ?? UNKNOWN,
+  };
+}
+
+function distinctProviderModels(runs: readonly RunRecord[]): Array<{ providerId: string; modelId: string }> {
+  const identities = new Map<string, { providerId: string; modelId: string }>();
+  for (const run of runs) {
+    const identity = providerModel(run);
+    identities.set(JSON.stringify([identity.providerId, identity.modelId]), identity);
+  }
+  return [...identities.values()].sort((left, right) =>
+    compareStableStrings(left.providerId, right.providerId) ||
+    compareStableStrings(left.modelId, right.modelId)
+  );
+}
+
+function summarizeUsage(
+  runs: readonly RunRecord[],
+  usageEntries: readonly UsageLedgerRecord[]
+): {
+  runCount: number;
+  measuredRunCount: number;
+  unknownRunCount: number;
+  inputTokens: { knownTotal: number | typeof UNKNOWN; unknownRuns: number };
+  outputTokens: { knownTotal: number | typeof UNKNOWN; unknownRuns: number };
+  cost: { knownTotal: number | typeof UNKNOWN; unknownRuns: number };
+} {
+  const entries = new Map(usageEntries.map((entry) => [entry.runId, entry]));
+  const values = runs.map((run) => entries.get(run.id));
+  const measuredRunCount = values.filter((entry) =>
+    entry !== undefined &&
+    typeof entry.inputTokens === 'number' &&
+    typeof entry.outputTokens === 'number' &&
+    typeof entry.cost === 'number'
+  ).length;
+  const summarize = (metric: 'inputTokens' | 'outputTokens' | 'cost') => {
+    const knownValues = values
+      .map((entry) => entry?.[metric])
+      .filter((value): value is number => typeof value === 'number');
+    return {
+      knownTotal: knownValues.length === 0
+        ? UNKNOWN
+        : knownValues.reduce((total, value) => total + value, 0),
+      unknownRuns: values.length - knownValues.length,
+    };
+  };
+  return {
+    runCount: runs.length,
+    measuredRunCount,
+    unknownRunCount: runs.length - measuredRunCount,
+    inputTokens: summarize('inputTokens'),
+    outputTokens: summarize('outputTokens'),
+    cost: summarize('cost'),
   };
 }
 

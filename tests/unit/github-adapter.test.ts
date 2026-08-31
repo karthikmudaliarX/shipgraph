@@ -27,7 +27,7 @@ const pullRequest = {
 };
 
 describe('GitHub git-host adapter', () => {
-  it('uses the current gh CLI JSON and authenticated write contracts', async () => {
+  it('scopes the auth probe to github.com and uses current gh CLI contracts', async () => {
     const scriptedCalls = scripted([
       { command: 'gh', exitCode: 0, stdout: 'logged in\n', stderr: '' },
       { command: 'gh', exitCode: 0, stdout: JSON.stringify([pullRequest]), stderr: '' },
@@ -52,7 +52,7 @@ describe('GitHub git-host adapter', () => {
       .resolves.toMatchObject({ id: '11', body: 'receipt' });
 
     expect(scriptedCalls.calls).toEqual([
-      ['auth', 'status', '--active'],
+      ['auth', 'status', '--active', '--hostname', 'github.com'],
       [
         'pr', 'list', '--repo', 'owner/repo', '--head', 'shipgraph/kar-8', '--state', 'all', '--limit', '100',
         '--json', 'number,url,baseRefName,headRefName,headRefOid,state,headRepository',

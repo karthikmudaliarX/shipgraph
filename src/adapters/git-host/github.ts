@@ -25,7 +25,7 @@ export class GitHubAdapter implements GitHostAdapter {
   }
 
   public async probe(): Promise<GitHostProbeResult> {
-    const result = await this.runner.run(this.executable, ['auth', 'status', '--active']);
+    const result = await this.runner.run(this.executable, ['auth', 'status', '--active', '--hostname', 'github.com']);
     if (result.exitCode !== 0) {
       return {
         available: false,

@@ -12,6 +12,7 @@ import { createGitRunner, type GitCommandResult, type GitRunner } from '../../sr
 import { TicketState } from '../../src/core/state-machine/state.js';
 import { persistTicketTransition } from '../../src/persistence/ticket-state-store.js';
 import { createDatabase, migrate, type DbConnection } from '../../src/persistence/db.js';
+import { createModelRepository } from '../../src/persistence/model-repositories.js';
 import {
   createEventRepository,
   createRunRepository,
@@ -127,7 +128,7 @@ function makeGitRunner(
   };
 }
 
-async function createHarness(): Promise<Harness> {
+async function createHarness(maxRepairIterations = CONFIG.execution.maxRepairIterations): Promise<Harness> {
   const projectDir = mkdtempSync(join(tmpdir(), 'shipgraph-github-src-'));
   git(projectDir, 'init', '-b', 'main');
   git(projectDir, 'config', 'user.email', 'shipgraph-github@example.com');
@@ -136,7 +137,12 @@ async function createHarness(): Promise<Harness> {
   writeFileSync(join(projectDir, 'README.md'), '# source\n');
   git(projectDir, 'add', 'README.md');
   git(projectDir, 'commit', '-m', 'initial');
-  initProject(projectDir, { config: CONFIG });
+  initProject(projectDir, {
+    config: {
+      ...CONFIG,
+      execution: { ...CONFIG.execution, maxRepairIterations },
+    },
+  });
   const backlogPath = join(projectDir, 'shipgraph.backlog.yml');
   writeFileSync(backlogPath, stringify({
     version: 1,
@@ -215,14 +221,15 @@ function addRun(
   runs: ReturnType<typeof createRunRepository>,
   events: ReturnType<typeof createEventRepository>,
   workspace: WorkspaceRecord,
-  task: 'implementation' | 'review',
+  task: 'implementation' | 'review' | 'repair',
   head: string,
   policySha: string,
   reviewType: 'contract' | 'engineering' | undefined,
   timestamp: string,
   provenance?: { contractDigest: string; contractSource: string; contractRevision: string },
-): void {
-  const id = `${task}-${reviewType ?? 'main'}`;
+  idSuffix = 'main',
+): string {
+  const id = `${task}-${reviewType ?? idSuffix}`;
   runs.create({
     id,
     ticketId: workspace.ticketId,
@@ -284,6 +291,27 @@ function addRun(
       }),
     },
   });
+  return id;
+}
+
+function addReceiptRuns(harness: Harness, count: number): void {
+  const runs = createRunRepository(harness.db);
+  const events = createEventRepository(harness.db);
+  const timestamp = new Date().toISOString();
+  for (let index = 0; index < count; index += 1) {
+    addRun(
+      runs,
+      events,
+      harness.workspace,
+      'repair',
+      harness.host.headSha,
+      '1'.repeat(64),
+      undefined,
+      timestamp,
+      undefined,
+      `receipt-${index}`
+    );
+  }
 }
 
 function cleanup(harness: Harness | undefined): void {
@@ -316,7 +344,7 @@ describe('KAR-8 GitHub handoff', () => {
     const events = createEventRepository(harness.db).findByTicketId('GH-001');
     expect(events.filter((event) => event.type === EventType.GITHUB_PR_RECORDED)).toHaveLength(1);
     expect(events.filter((event) => event.type === EventType.GITHUB_USAGE_RECEIPT_RECORDED)).toHaveLength(1);
-    expect(harness.host.comments[0]?.body).toContain('"inputTokens":"unknown"');
+    expect(harness.host.comments[0]?.body).toContain('"knownTotal":"unknown"');
   });
 
   it('recovers a lost receipt response without creating a duplicate PR or comment', async () => {
@@ -347,11 +375,80 @@ describe('KAR-8 GitHub handoff', () => {
       workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, gitRunner: harness.gitRunner },
     } as const;
     await createGitHubPullRequest(input);
+    const firstReceipt = harness.host.comments[0]?.body;
     await createGitHubPullRequest(input);
     expect(harness.host.calls.filter((call) => call === 'create')).toHaveLength(1);
     expect(harness.host.calls.filter((call) => call === 'post-comment')).toHaveLength(1);
     expect(harness.host.calls.filter((call) => call === 'list-comments')).toHaveLength(2);
+    expect(harness.host.comments[0]?.body).toBe(firstReceipt);
     expect(createEventRepository(harness.db).findByTicketId('GH-001').filter((event) => event.type === EventType.GITHUB_PR_RECORDED)).toHaveLength(1);
+  }, 20_000);
+
+  it('builds a compact receipt with more than 32 durable repair runs', async () => {
+    harness = await createHarness(100);
+    addReceiptRuns(harness, 33);
+    const result = await createGitHubPullRequest({
+      ticketId: 'GH-001',
+      gitHost: harness.host,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, gitRunner: harness.gitRunner },
+    });
+    expect(result.receipt.repair).toEqual([{ providerId: 'opencode-go', modelId: 'opencode/model' }]);
+    expect(result.receipt.usage.runCount).toBe(36);
+  }, 20_000);
+
+  it('builds a compact receipt with more than 64 relevant durable runs', async () => {
+    harness = await createHarness(100);
+    addReceiptRuns(harness, 70);
+    const result = await createGitHubPullRequest({
+      ticketId: 'GH-001',
+      gitHost: harness.host,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, gitRunner: harness.gitRunner },
+    });
+    expect(result.receipt.usage.runCount).toBe(73);
+    expect(result.receipt.usage.unknownRunCount).toBe(73);
+  }, 20_000);
+
+  it('keeps measured usage and unknown telemetry truthful in the compact receipt', async () => {
+    harness = await createHarness(100);
+    const runId = addRun(
+      createRunRepository(harness.db),
+      createEventRepository(harness.db),
+      harness.workspace,
+      'repair',
+      harness.host.headSha,
+      '1'.repeat(64),
+      undefined,
+      new Date().toISOString(),
+      undefined,
+      'measured'
+    );
+    createModelRepository(harness.db).appendUsage({
+      id: 'usage-measured',
+      projectId: harness.workspace.projectId,
+      runId,
+      providerId: 'opencode-go',
+      modelId: 'opencode/model',
+      task: 'repair',
+      retryCount: 0,
+      elapsedMs: 1,
+      outcome: 'succeeded',
+      outcomeQuality: 'good',
+      inputTokens: 11,
+      outputTokens: 7,
+      cost: 0.5,
+      quotaRemaining: 'unknown',
+      recordedAt: new Date().toISOString(),
+    });
+    const result = await createGitHubPullRequest({
+      ticketId: 'GH-001',
+      gitHost: harness.host,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, gitRunner: harness.gitRunner },
+    });
+    expect(result.receipt.usage.measuredRunCount).toBe(1);
+    expect(result.receipt.usage.unknownRunCount).toBe(3);
+    expect(result.receipt.usage.inputTokens).toEqual({ knownTotal: 11, unknownRuns: 3 });
+    expect(result.receipt.usage.outputTokens).toEqual({ knownTotal: 7, unknownRuns: 3 });
+    expect(result.receipt.usage.cost).toEqual({ knownTotal: 0.5, unknownRuns: 3 });
   }, 20_000);
 
   it('fails closed before GitHub writes when readiness is unavailable', async () => {

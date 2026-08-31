@@ -33,13 +33,18 @@ const providerModelSchema = z.object({
   modelId: identitySchema,
 }).strict();
 
-const usageSchema = z.object({
-  runId: identitySchema,
-  providerId: identitySchema,
-  modelId: identitySchema,
-  inputTokens: unknownNumberSchema,
-  outputTokens: unknownNumberSchema,
-  cost: unknownNumberSchema,
+const usageMetricSchema = z.object({
+  knownTotal: unknownNumberSchema,
+  unknownRuns: z.number().int().nonnegative(),
+}).strict();
+
+const usageSummarySchema = z.object({
+  runCount: z.number().int().nonnegative(),
+  measuredRunCount: z.number().int().nonnegative(),
+  unknownRunCount: z.number().int().nonnegative(),
+  inputTokens: usageMetricSchema,
+  outputTokens: usageMetricSchema,
+  cost: usageMetricSchema,
 }).strict();
 
 const providerHealthSchema = z.object({
@@ -57,11 +62,11 @@ export const githubUsageReceiptSchema = z.object({
   contractRevision: identitySchema,
   executionRunId: identitySchema,
   routingMode: z.union([modelRoutingModeSchema, z.literal('unknown')]),
-  implementation: z.array(providerModelSchema).max(32),
-  review: z.array(providerModelSchema).max(32),
-  repair: z.array(providerModelSchema).max(32),
-  fallback: z.array(providerModelSchema).max(32),
-  usage: z.array(usageSchema).max(64),
+  implementation: z.array(providerModelSchema),
+  review: z.array(providerModelSchema),
+  repair: z.array(providerModelSchema),
+  fallback: z.array(providerModelSchema),
+  usage: usageSummarySchema,
   providerHealth: z.array(providerHealthSchema).max(32),
 }).strict();
 export type GitHubUsageReceipt = z.infer<typeof githubUsageReceiptSchema>;
