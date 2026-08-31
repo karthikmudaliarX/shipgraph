@@ -97,7 +97,7 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
   if (project === undefined) throw new Error(`Project ${projectId} is missing`);
 
   const configuredLimit = project.config.execution.maxRepairIterations;
-  const repairLimit = Math.min(configuredLimit, input.safety?.maxAttempts ?? configuredLimit);
+  const effectiveLimit = Math.min(configuredLimit, input.safety?.maxAttempts ?? configuredLimit);
   const repairEvents = createEventRepository(input.workspace.db)
     .findByTicketId(input.ticketId)
     .filter((event) => event.type === EventType.REPAIR_ATTEMPT_RECORDED);
@@ -105,8 +105,11 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
     .reduce((maximum, event) => Math.max(maximum, event.payload.attempt), 0);
   const runRepository = createRunRepository(input.workspace.db);
   const repairRuns = runRepository.findByTicketId(input.ticketId).filter((run) => run.task === 'repair');
-  const attemptsUsed = Math.max(evidencedAttempts, repairRuns.length);
+  // A logical attempt can own multiple provider runs while MODEL-001 falls
+  // back. Only KAR-10 evidence counts completed logical attempts.
+  const attemptsUsed = evidencedAttempts;
   if (ticket.status === TicketState.REPAIRING) {
+    const interruptedAttempt = attemptsUsed + 1;
     const activeRun = runRepository.findActiveByTicket(projectId, input.ticketId);
     if (activeRun !== undefined) {
       const reason = `Active repair run ${activeRun.id} requires explicit AGENT-001 recovery before KAR-10 can resume`;
@@ -118,11 +121,11 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
           next: TicketState.NEEDS_HUMAN,
           reason,
         });
-        return { status: 'NEEDS_HUMAN', attempts: attemptsUsed, reason };
+        return { status: 'NEEDS_HUMAN', attempts: interruptedAttempt, reason };
       }
       const evidence: RepairAttemptEvidence = {
         ticketId: input.ticketId,
-        attempt: attemptsUsed,
+        attempt: interruptedAttempt,
         candidateSha: evidenceSha,
         blockers: [],
         targetedVerification: [],
@@ -133,7 +136,7 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
         repairRunId: activeRun.id,
       };
       recordAttemptAndTransition(input, evidence, TicketState.NEEDS_HUMAN, reason);
-      return { status: 'NEEDS_HUMAN', headSha: evidenceSha, attempts: attemptsUsed, reason };
+      return { status: 'NEEDS_HUMAN', headSha: evidenceSha, attempts: interruptedAttempt, reason };
     }
     const evidencedRunIds = new Set(repairEvents.map((event) => event.runId).filter((id) => id !== undefined));
     const terminalWithoutEvidence = [...repairRuns].reverse()
@@ -159,7 +162,7 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
       }
       const evidence: RepairAttemptEvidence = {
         ticketId: input.ticketId,
-        attempt: attemptsUsed,
+        attempt: interruptedAttempt,
         candidateSha: terminalWithoutEvidence.baseSha,
         ...(resultingSha === undefined ? {} : { resultingSha }),
         blockers: [],
@@ -174,7 +177,7 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
       return {
         status: 'NEEDS_HUMAN',
         ...(resultingSha === undefined ? {} : { headSha: resultingSha }),
-        attempts: attemptsUsed,
+        attempts: interruptedAttempt,
         reason,
       };
     }
@@ -200,15 +203,19 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
         next: TicketState.NEEDS_HUMAN,
         reason,
       });
-      return { status: 'NEEDS_HUMAN', attempts: 0, reason };
+      return { status: 'NEEDS_HUMAN', attempts: attemptsUsed, reason };
     }
-    return needsHuman(input, evidenceSha, 0, [], reason);
+    return needsHuman(input, evidenceSha, attemptsUsed, [], reason);
+  }
+  if (attemptsUsed >= effectiveLimit) {
+    const reason = `KAR-10 repair attempt limit exhausted: ${attemptsUsed} logical attempts already consumed; effective limit is ${effectiveLimit}`;
+    return needsHuman(input, headSha, attemptsUsed, [], reason);
   }
   if (ticket.verification.commands.length === 0) {
     return needsHuman(
       input,
       headSha,
-      0,
+      attemptsUsed,
       [],
       'KAR-10 cannot run deterministic verification because the ticket has no verification commands'
     );
@@ -217,7 +224,7 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
     return needsHuman(
       input,
       headSha,
-      0,
+      attemptsUsed,
       [],
       'KAR-10 cannot durably record more than 100 deterministic verification commands'
     );
@@ -227,7 +234,7 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
     return needsHuman(
       input,
       headSha,
-      0,
+      attemptsUsed,
       [],
       'KAR-10 cannot durably record a verification command longer than 4096 characters'
     );
@@ -241,7 +248,7 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
     return needsHuman(
       input,
       headSha,
-      0,
+      attemptsUsed,
       [],
       'KAR-10 deterministic verification timeout exceeds the authorized KAR-7 ceiling'
     );
@@ -258,23 +265,23 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
       input.signal
     );
   } catch (error) {
-    return needsHuman(input, headSha, 0, [], failureMessage(error));
+    return needsHuman(input, headSha, attemptsUsed, [], failureMessage(error));
   }
   let reviews: PrePrReviewResult;
   try {
     reviews = await currentOrFreshReviews(input, headSha, `initial-${headSha}`);
   } catch (error) {
-    return needsHuman(input, headSha, 0, verificationBlockers(verification), failureMessage(error));
+    return needsHuman(input, headSha, attemptsUsed, verificationBlockers(verification), failureMessage(error));
   }
   let blockers = collectBlockers(verification, reviews);
   if (!hasAuthoritativeReviewResults(reviews)) {
-    return needsHuman(input, headSha, 0, blockers, 'KAR-9 did not produce two authoritative review reports');
+    return needsHuman(input, headSha, attemptsUsed, blockers, 'KAR-9 did not produce two authoritative review reports');
   }
   if (!reviews.passed && blockers.length === 0) {
     return needsHuman(
       input,
       headSha,
-      0,
+      attemptsUsed,
       blockers,
       'KAR-9 returned FAIL without concrete findings, so no bounded repair can be attempted'
     );
@@ -296,7 +303,7 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
     return { status: 'PASSED', headSha, attempts: attemptsUsed, reviews };
   }
 
-  for (let attempt = attemptsUsed + 1; attempt <= repairLimit; attempt += 1) {
+  for (let attempt = attemptsUsed + 1; attempt <= effectiveLimit; attempt += 1) {
     let repairSafety: AgentSafetyPolicy;
     try {
       repairSafety = remainingStageSafety(input, 1);
@@ -341,7 +348,7 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
           ...(input.signal === undefined ? {} : { signal: input.signal }),
           safety: {
             ...repairSafety,
-            maxAttempts: repairLimit,
+            maxAttempts: effectiveLimit,
             attempt,
             maxTimeoutMs: input.safety?.maxTimeoutMs ?? timeoutMs,
           },
@@ -373,7 +380,7 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
           )) ?? reason;
         }
       }
-      const terminal = routed.run.status === 'NEEDS_HUMAN' || attempt === repairLimit;
+      const terminal = routed.run.status === 'NEEDS_HUMAN' || attempt === effectiveLimit;
       const evidence: RepairAttemptEvidence = {
         ticketId: input.ticketId,
         attempt,
@@ -533,7 +540,7 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
         ...blockers.filter((blocker) => blocker.source !== 'verification'),
         ...targetedBlockers,
       ];
-      if (attempt === repairLimit) break;
+      if (attempt === effectiveLimit) break;
       continue;
     }
 
@@ -568,7 +575,7 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
       });
       verification = finalVerification;
       blockers = finalBlockers;
-      if (attempt === repairLimit) break;
+      if (attempt === effectiveLimit) break;
       continue;
     }
     try {
@@ -633,9 +640,9 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
   return needsHuman(
     input,
     headSha,
-    repairLimit,
+    effectiveLimit,
     blockers,
-    `KAR-10 repair attempt limit exhausted (${repairLimit})`
+    `KAR-10 repair attempt limit exhausted: ${effectiveLimit} logical attempts consumed; effective limit is ${effectiveLimit}`
   );
 }
 

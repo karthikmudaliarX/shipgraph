@@ -527,6 +527,169 @@ describe('KAR-10 bounded pre-PR repair', () => {
     expect(value.adapter.requests.some((request) => request.reviewType === undefined)).toBe(false);
   });
 
+  it('counts one logical repair attempt across provider fallback runs', async () => {
+    const reports = [
+      JSON.stringify({ result: 'FAIL', findings: ['initial blocker'] }),
+      PASS,
+      PASS,
+      PASS,
+    ];
+    let repairCalls = 0;
+    value = await harness(reports, 2, async (request) => {
+      repairCalls += 1;
+      if (repairCalls === 1) {
+        return {
+          outcome: 'NEEDS_HUMAN',
+          timedOut: false,
+          cancelled: false,
+          processGroupStopped: true,
+          stdout: '',
+          stderr: 'fallback provider failed',
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          failureCategory: 'non_zero_exit',
+          failureReason: 'fallback provider failed',
+        };
+      }
+      writeFileSync(join(request.workspacePath, 'README.md'), '# repaired fallback\n');
+      git(request.workspacePath, 'add', '.');
+      git(request.workspacePath, 'commit', '-m', 'repair after provider fallback');
+      return success('{}');
+    });
+    const primaryRequests: AgentExecutionRequest[] = [];
+    let probeCount = 0;
+    const primaryAdapter = {
+      provider: 'acp' as const,
+      capabilities: ['execute', 'review', 'repair'] as const,
+      supportsTokenLimit: true,
+      supportsCostLimit: true,
+      reportsUsage: true,
+      probe: () => ({ available: true, version: 'primary-test' }),
+      execute: async (request: AgentExecutionRequest): Promise<AgentExecutionResult> => {
+        primaryRequests.push(request);
+        if (request.reviewType !== undefined) return success(reports.shift() ?? PASS);
+        throw new Error('the abandoned primary repair run must not launch');
+      },
+    } satisfies AgentExecutionAdapter;
+    registerModelProviderAdapter(primaryAdapter, 'grok');
+    const primaryMetadata: ModelProviderAdapter = {
+      providerId: 'grok',
+      family: 'xai',
+      displayName: 'Grok',
+      probe: async () => {
+        probeCount += 1;
+        return probeCount >= 6
+          ? {
+              availability: 'unavailable',
+              auth: 'unknown',
+              capabilities: [],
+              reason: 'primary binding became unavailable',
+            }
+          : {
+              availability: 'available',
+              auth: 'authenticated',
+              capabilities: ['implementation', 'review', 'repair'],
+            };
+      },
+      discoverModels: async () => ({
+        status: 'known',
+        models: [{ modelId: 'grok/repairer', capabilities: ['implementation', 'review', 'repair'] }],
+      }),
+    };
+    const fallbackMetadata: ModelProviderAdapter = {
+      providerId: 'opencode-go',
+      family: 'opencode',
+      displayName: 'OpenCode Go',
+      probe: async () => ({
+        availability: 'available',
+        auth: 'authenticated',
+        capabilities: ['implementation', 'review', 'repair'],
+      }),
+      discoverModels: async () => ({
+        status: 'known',
+        models: [{ modelId: 'opencode/fallback-repairer', capabilities: ['implementation', 'review', 'repair'] }],
+      }),
+    };
+    const ticket = createTicketRepository(value.db).findById('REP-001');
+    if (ticket === undefined) throw new Error('missing test ticket');
+    let clock = 0;
+    value.modelService = new ModelRoutingService({
+      db: value.db,
+      projectId: ticket.projectId,
+      adapters: [primaryMetadata, fallbackMetadata],
+      executionAdapters: [
+        { modelProviderId: 'grok', adapter: primaryAdapter },
+        { modelProviderId: 'opencode-go', adapter: value.adapter },
+      ],
+      staleAfterMs: 0,
+      now: () => new Date(++clock * 1_000).toISOString(),
+    });
+
+    const first = await runPrePrRepair({
+      ...input(value, sequenceRunner([1])),
+      safety: { maxAttempts: 2 },
+    });
+    expect(first).toMatchObject({ status: 'NEEDS_HUMAN', attempts: 1 });
+    expect(primaryRequests.some((request) => request.reviewType === undefined)).toBe(false);
+    const repairRunsAfterFallback = value.db.prepare(
+      "SELECT provider, status FROM runs WHERE ticket_id = ? AND task = 'repair' ORDER BY started_at, id"
+    ).all('REP-001') as Array<{ provider: string; status: string }>;
+    expect(repairRunsAfterFallback).toHaveLength(2);
+    expect(repairRunsAfterFallback.map((run) => run.provider)).toEqual(
+      expect.arrayContaining(['acp', 'opencode'])
+    );
+
+    value.db.prepare("UPDATE tickets SET status = 'VERIFYING' WHERE id = ?").run('REP-001');
+    const second = await runPrePrRepair({
+      ...input(value, sequenceRunner([0, 0, 0])),
+      safety: { maxAttempts: 2 },
+    });
+    expect(second).toMatchObject({ status: 'PASSED', attempts: 2 });
+    expect(value.adapter.requests.filter((request) => request.reviewType === undefined)).toHaveLength(2);
+    const repairRuns = value.db.prepare(
+      "SELECT provider FROM runs WHERE ticket_id = ? AND task = 'repair' ORDER BY started_at, id"
+    ).all('REP-001') as Array<{ provider: string }>;
+    expect(repairRuns).toHaveLength(3);
+  }, 30_000);
+
+  it('keeps consumed repair attempts monotonic under a stricter new ceiling', async () => {
+    value = await harness([PASS, PASS], 2);
+    const candidateSha = git(value.workspacePath, 'rev-parse', 'HEAD');
+    const ticket = createTicketRepository(value.db).findById('REP-001');
+    if (ticket === undefined) throw new Error('missing test ticket');
+    createEventRepository(value.db).append({
+      id: randomUUID(),
+      timestamp: new Date().toISOString(),
+      projectId: ticket.projectId,
+      ticketId: ticket.id,
+      type: EventType.REPAIR_ATTEMPT_RECORDED,
+      payload: {
+        ticketId: ticket.id,
+        attempt: 2,
+        candidateSha,
+        blockers: [{ source: 'contract_review', findings: ['prior blocker'] }],
+        targetedVerification: [],
+        redCapableEvidence: [],
+        redInfeasibilityReason: 'prior bounded attempt evidence',
+        outcome: 'BLOCKED',
+        reason: 'prior logical repair attempt 2',
+      },
+    });
+
+    const result = await runPrePrRepair({
+      ...input(value, sequenceRunner([0])),
+      safety: { maxAttempts: 1 },
+    });
+    expect(result).toMatchObject({ status: 'NEEDS_HUMAN', attempts: 2 });
+    expect(result.reason).toContain('2 logical attempts already consumed');
+    expect(result.reason).toContain('effective limit is 1');
+    expect(value.adapter.requests).toHaveLength(0);
+    const repairEvents = createEventRepository(value.db).findByTicketId(ticket.id)
+      .filter((event) => event.type === EventType.REPAIR_ATTEMPT_RECORDED);
+    expect(repairEvents.at(-1)?.payload.attempt).toBe(2);
+    expect(repairEvents.at(-1)?.payload.reason).toContain('effective limit is 1');
+  });
+
   it('fails closed with durable evidence when a KAR-7 scope-growth gate stops execution', async () => {
     value = await harness([PASS, PASS]);
     const result = await runPrePrRepair({
