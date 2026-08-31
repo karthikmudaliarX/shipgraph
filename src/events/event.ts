@@ -12,6 +12,10 @@ import {
 import { modelProviderIdSchema, modelTaskTypeSchema } from '../domain/model-provider.js';
 import { repairAttemptEvidenceSchema } from '../domain/repair.js';
 import { readinessEvidenceSchema } from '../domain/readiness.js';
+import {
+  githubPrEvidenceSchema,
+  githubUsageReceiptEvidenceSchema,
+} from '../domain/github.js';
 
 /** Core event types for the append-only audit log. */
 export const EVENT_TYPES = [
@@ -28,6 +32,8 @@ export const EVENT_TYPES = [
   'run.state_changed',
   'repair.attempt_recorded',
   'pre_pr_readiness.recorded',
+  'github.pr_recorded',
+  'github.usage_receipt_recorded',
 ] as const;
 
 export const EventType = {
@@ -44,6 +50,8 @@ export const EventType = {
   RUN_STATE_CHANGED: EVENT_TYPES[10],
   REPAIR_ATTEMPT_RECORDED: EVENT_TYPES[11],
   PRE_PR_READINESS_RECORDED: EVENT_TYPES[12],
+  GITHUB_PR_RECORDED: EVENT_TYPES[13],
+  GITHUB_USAGE_RECEIPT_RECORDED: EVENT_TYPES[14],
 } as const;
 
 export type EventTypeValue = (typeof EVENT_TYPES)[number];
@@ -251,6 +259,18 @@ const eventUnionSchema = z.discriminatedUnion('type', [
     type: z.literal(EventType.PRE_PR_READINESS_RECORDED),
     payload: readinessEvidenceSchema,
   }).strict(),
+  z.object({
+    ...baseEnvelopeShape,
+    ticketId: identitySchema,
+    type: z.literal(EventType.GITHUB_PR_RECORDED),
+    payload: githubPrEvidenceSchema,
+  }).strict(),
+  z.object({
+    ...baseEnvelopeShape,
+    ticketId: identitySchema,
+    type: z.literal(EventType.GITHUB_USAGE_RECEIPT_RECORDED),
+    payload: githubUsageReceiptEvidenceSchema,
+  }).strict(),
 ]);
 
 /** Runtime-typed event union with duplicated envelope identities kept consistent. */
@@ -320,6 +340,8 @@ export type WorkspaceRemovedPayload = z.infer<typeof workspaceRemovedPayloadSche
 export type WorkspaceFailedPayload = z.infer<typeof workspaceFailedPayloadSchema>;
 export type RepairAttemptRecordedPayload = z.infer<typeof repairAttemptEvidenceSchema>;
 export type PrePrReadinessRecordedPayload = z.infer<typeof readinessEvidenceSchema>;
+export type GithubPrRecordedPayload = z.infer<typeof githubPrEvidenceSchema>;
+export type GithubUsageReceiptRecordedPayload = z.infer<typeof githubUsageReceiptEvidenceSchema>;
 
 export function isValidStateValue(value: string): value is TicketStateValue {
   return ticketStateSchema.safeParse(value).success;

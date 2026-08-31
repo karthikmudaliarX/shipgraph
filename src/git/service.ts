@@ -226,6 +226,83 @@ export async function resolveCommitSha(
   return /^[0-9a-f]{40}$|^[0-9a-f]{64}$/i.test(sha) ? sha : undefined;
 }
 
+/** Resolve a configured remote URL without invoking a shell. */
+export async function resolveGitRemoteUrl(
+  runner: GitRunner,
+  repoPath: string,
+  remote = 'origin',
+  push = false
+): Promise<string> {
+  const result = await runGit(runner, repoPath, [
+    'remote',
+    'get-url',
+    ...(push ? ['--push'] : []),
+    remote,
+  ]);
+  const url = result.stdout.trim();
+  if (result.exitCode !== 0 || url.length === 0 || url.includes('\n')) {
+    throw new Error(`Could not resolve Git ${push ? 'push' : 'fetch'} remote ${remote}`);
+  }
+  return url;
+}
+
+/** Return the exact remote branch object name, or undefined when absent. */
+export async function resolveRemoteBranchSha(
+  runner: GitRunner,
+  repoPath: string,
+  remote: string,
+  branchName: string
+): Promise<string | undefined> {
+  if (!(await isBranchNameValid(runner, repoPath, branchName))) {
+    throw new Error(`Invalid branch name: ${branchName}`);
+  }
+  const result = await runGit(runner, repoPath, [
+    'ls-remote',
+    '--heads',
+    remote,
+    `refs/heads/${branchName}`,
+  ]);
+  if (result.exitCode !== 0) {
+    throw new Error(`Could not inspect remote branch ${branchName}: ${result.stderr.trim() || result.stdout.trim()}`);
+  }
+  const lines = result.stdout.trim() === '' ? [] : result.stdout.trim().split(/\r?\n/u);
+  if (lines.length === 0) return undefined;
+  if (lines.length !== 1) throw new Error(`Remote branch ${branchName} returned an ambiguous ref result`);
+  const [sha, ref] = lines[0].trim().split(/\s+/u);
+  if (
+    ref !== `refs/heads/${branchName}` ||
+    sha === undefined ||
+    !/^[0-9a-f]{40}$|^[0-9a-f]{64}$/u.test(sha)
+  ) {
+    throw new Error(`Remote branch ${branchName} returned an unsupported ref result`);
+  }
+  return sha;
+}
+
+/** Push one exact commit to one branch; force updates are intentionally impossible. */
+export async function pushExactCommit(
+  runner: GitRunner,
+  repoPath: string,
+  remote: string,
+  commitSha: string,
+  branchName: string
+): Promise<void> {
+  if (!/^[0-9a-f]{40}$|^[0-9a-f]{64}$/u.test(commitSha)) {
+    throw new Error(`Cannot push an invalid commit SHA: ${commitSha}`);
+  }
+  if (!(await isBranchNameValid(runner, repoPath, branchName))) {
+    throw new Error(`Invalid branch name: ${branchName}`);
+  }
+  const result = await runGit(runner, repoPath, [
+    'push',
+    remote,
+    `${commitSha}:refs/heads/${branchName}`,
+  ]);
+  if (result.exitCode !== 0) {
+    throw new Error(`Exact branch push failed: ${result.stderr.trim() || result.stdout.trim()}`);
+  }
+}
+
 /** Prove that a live worktree commit descends from the recorded base commit. */
 export async function isCommitAncestor(
   runner: GitRunner,
