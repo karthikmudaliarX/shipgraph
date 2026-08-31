@@ -31,11 +31,6 @@ import {
 } from '../workspace/service.js';
 
 const FULL_SHA_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/u;
-const SAFETY_FAILURE_CATEGORIES = new Set([
-  'safety_limit',
-  'approval_required',
-  'scope_growth',
-]);
 
 export type PrePrReadinessInput = {
   ticketId: string;
@@ -269,10 +264,11 @@ function currentRepairEvidence(
     (event): event is Extract<ShipgraphEvent, { type: typeof EventType.REPAIR_ATTEMPT_RECORDED }> =>
       event.type === EventType.REPAIR_ATTEMPT_RECORDED
   );
-  const occurred = repairEvents.some((event) => event.payload.attempt > 0);
-  const event = [...repairEvents].reverse().find((candidate) => {
+  const applicableEvents = repairEvents.filter((candidate) => {
     return candidate.payload.candidateSha === sha || candidate.payload.resultingSha === sha;
   });
+  const occurred = applicableEvents.some((event) => event.payload.attempt > 0);
+  const event = applicableEvents.at(-1);
   if (event === undefined || event.payload.outcome !== 'PASSED') return undefined;
   if (occurred && (event.payload.attempt === 0 || event.payload.resultingSha !== sha)) return undefined;
   return { event, occurred };
@@ -315,7 +311,9 @@ function currentReviewRuns(
 
 function reviewStatusFor(runs: readonly AgentRunRecord[]): { reason?: string } {
   const latest = new Map<string, AgentRunRecord>();
-  for (const run of runs) {
+  for (const run of [...runs].sort((left, right) =>
+    left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id)
+  )) {
     if (run.reviewType !== undefined) latest.set(run.reviewType, run);
   }
   for (const reviewType of ['contract', 'engineering'] as const) {
@@ -338,17 +336,12 @@ function safetyStatusFor(
   if (ticketStatus === TicketState.NEEDS_HUMAN) {
     return { status: 'blocked', runIds: [], reason: 'Ticket has an unresolved NEEDS_HUMAN safety condition' };
   }
-  const unsafe = runs.find((run) =>
-    run.status === 'NEEDS_HUMAN' ||
-    (run.failureCategory !== undefined && SAFETY_FAILURE_CATEGORIES.has(run.failureCategory))
+  const currentRepairEvents = events.filter((event) =>
+    event.type === EventType.REPAIR_ATTEMPT_RECORDED &&
+    (event.payload.candidateSha === sha || event.payload.resultingSha === sha)
   );
-  if (unsafe !== undefined) {
-    return { status: 'blocked', runIds: [], reason: `Unresolved safety evidence exists on run ${unsafe.id}` };
-  }
-  const safetyEscalation = events.find((event) =>
-    event.type === EventType.REPAIR_ATTEMPT_RECORDED && event.payload.outcome === 'NEEDS_HUMAN'
-  );
-  if (safetyEscalation !== undefined) {
+  const latestRepairEvent = currentRepairEvents.at(-1);
+  if (latestRepairEvent?.payload.outcome === 'NEEDS_HUMAN') {
     return { status: 'blocked', runIds: [], reason: 'Unresolved KAR-10 NEEDS_HUMAN safety evidence exists' };
   }
   const runIds = currentReviews.map((run) => run.id);

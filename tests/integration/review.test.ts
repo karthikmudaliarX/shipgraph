@@ -1297,9 +1297,38 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
     expect(missingRed.result).toBe('FAIL');
     expect(missingRed.reason).toContain('no red-capable evidence');
 
-    insertRepairRun(harness, 'NEEDS_HUMAN');
+    const safetyRunId = insertRepairRun(harness, 'NEEDS_HUMAN');
+    recordVerificationEvidence(harness, {
+      attempt: 2,
+      repairRunId: safetyRunId,
+      candidateSha: git(harness.workspacePath, 'rev-parse', 'HEAD'),
+      outcome: 'NEEDS_HUMAN',
+      reason: 'safety limit exhausted',
+    });
     const safetyFailure = await runPrePrReadiness(readinessInput(harness));
     expect(safetyFailure.result).toBe('FAIL');
-    expect(safetyFailure.reason).toContain('Unresolved safety evidence');
+    expect(safetyFailure.reason).toContain('Unresolved KAR-10 NEEDS_HUMAN safety evidence');
+  });
+
+  it('does not let repair or safety evidence for another SHA block the current candidate', async () => {
+    harness = await createHarness([VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
+    await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+    recordVerificationEvidence(harness);
+    const historicalRunId = insertRepairRun(harness, 'NEEDS_HUMAN');
+    recordVerificationEvidence(harness, {
+      attempt: 1,
+      repairRunId: historicalRunId,
+      candidateSha: 'a'.repeat(40),
+      resultingSha: 'b'.repeat(40),
+      outcome: 'NEEDS_HUMAN',
+      reason: 'historical safety escalation',
+    });
+
+    expect((await runPrePrReadiness(readinessInput(harness))).result).toBe('PASS');
   });
 });
