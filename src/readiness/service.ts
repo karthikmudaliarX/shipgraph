@@ -58,6 +58,7 @@ type Candidate = {
 type CurrentRepairEvidence = {
   event: Extract<ShipgraphEvent, { type: typeof EventType.REPAIR_ATTEMPT_RECORDED }>;
   occurred: boolean;
+  repairEvidence?: Extract<ShipgraphEvent, { type: typeof EventType.REPAIR_ATTEMPT_RECORDED }>;
 };
 
 type ReadinessAssessment = {
@@ -126,7 +127,9 @@ export async function runPrePrReadiness(
     ...(repair === undefined ? {} : { verificationEventId: repair.event.id }),
     ...(contractReview === undefined ? {} : { contractReviewRunId: contractReview.id }),
     ...(engineeringReview === undefined ? {} : { engineeringReviewRunId: engineeringReview.id }),
-    ...(repair?.occurred === true ? { repairEvidenceEventId: repair.event.id } : {}),
+    ...(repair?.occurred === true && repair.repairEvidence !== undefined
+      ? { repairEvidenceEventId: repair.repairEvidence.id }
+      : {}),
     repairOccurred: repair?.occurred === true,
     redEvidenceStatus: redStatus.status,
     ...(redStatus.infeasibilityReason === undefined
@@ -138,6 +141,33 @@ export async function runPrePrReadiness(
   });
   if (result === 'PASS' && !passReferencesMatch(evidence, candidate.sha, provenance, events, runs)) {
     throw new Error('KAR-11 PASS evidence references are not current durable records');
+  }
+  if (result === 'PASS') {
+    let boundaryReason: string | undefined;
+    try {
+      const boundaryCandidate = await currentCandidate(input.workspace, input.ticketId);
+      if (boundaryCandidate.sha !== candidate.sha) {
+        boundaryReason = `candidate HEAD changed from ${candidate.sha} to ${boundaryCandidate.sha} before PASS exposure`;
+      }
+    } catch (error) {
+      boundaryReason = `candidate became unclean or unverifiable before PASS exposure: ${errorMessage(error)}`;
+    }
+    if (boundaryReason !== undefined) {
+      const failureEvidence = readinessEvidenceSchema.parse({
+        ticketId: input.ticketId,
+        readySha: candidate.sha,
+        result: 'FAIL',
+        ...provenance,
+        reason: boundaryReason,
+      });
+      appendReadinessEvidence(input.workspace, projectId, input.ticketId, failureEvidence);
+      return {
+        result: 'FAIL',
+        readySha: candidate.sha,
+        reason: failureEvidence.reason,
+        evidence: failureEvidence,
+      };
+    }
   }
   appendReadinessEvidence(input.workspace, projectId, input.ticketId, evidence);
   return {
@@ -207,6 +237,12 @@ export async function getCurrentPrePrReadinessEvidence(
     event === undefined ||
     !passReferencesMatch(event.payload, candidate.sha, provenance, eventsForAssessment, runsForAssessment)
   ) return undefined;
+  try {
+    const boundaryCandidate = await currentCandidate(workspace, ticketId);
+    if (boundaryCandidate.sha !== candidate.sha) return undefined;
+  } catch {
+    return undefined;
+  }
   return {
     ...event.payload,
     eventId: event.id,
@@ -310,11 +346,21 @@ function currentRepairEvidence(
   const applicableEvents = repairEvents.filter((candidate) => {
     return candidate.payload.candidateSha === sha || candidate.payload.resultingSha === sha;
   });
-  const occurred = applicableEvents.some((event) => event.payload.attempt > 0);
   const event = applicableEvents.at(-1);
   if (event === undefined || event.payload.outcome !== 'PASSED') return undefined;
-  if (occurred && (event.payload.attempt === 0 || event.payload.resultingSha !== sha)) return undefined;
-  return { event, occurred };
+  const repairEvidence = applicableEvents
+    .filter((candidate) =>
+      candidate.payload.outcome === 'PASSED' &&
+      candidate.payload.attempt > 0 &&
+      candidate.payload.candidateSha !== sha &&
+      candidate.payload.resultingSha === sha
+    )
+    .at(-1);
+  return {
+    event,
+    occurred: repairEvidence !== undefined,
+    ...(repairEvidence === undefined ? {} : { repairEvidence }),
+  };
 }
 
 function verificationStatus(
@@ -420,7 +466,7 @@ function safetyStatusFor(
     return { status: 'unknown', runIds, reason: 'Current review evidence does not prove KAR-7 policy satisfaction' };
   }
   if (repair?.occurred === true) {
-    const repairRunId = repair.event.payload.repairRunId;
+    const repairRunId = (repair.repairEvidence ?? repair.event).payload.repairRunId;
     const repairRun = repairRunId === undefined
       ? undefined
       : runs.find((run) => run.id === repairRunId && run.task === 'repair' && run.status === 'SUCCEEDED');
@@ -490,7 +536,13 @@ function passReferencesMatch(
     verification.payload.finalVerification === undefined
   ) return false;
   if (evidence.repairOccurred) {
-    return evidence.repairEvidenceEventId === verification.id;
+    if (evidence.repairEvidenceEventId === undefined) return false;
+    const repairEvidence = events.find((event) => event.id === evidence.repairEvidenceEventId);
+    return repairEvidence?.type === EventType.REPAIR_ATTEMPT_RECORDED &&
+      repairEvidence.payload.outcome === 'PASSED' &&
+      repairEvidence.payload.attempt > 0 &&
+      repairEvidence.payload.candidateSha !== sha &&
+      repairEvidence.payload.resultingSha === sha;
   }
   return evidence.repairEvidenceEventId === undefined;
 }
@@ -504,11 +556,12 @@ function redEvidenceStatus(
   reason?: string;
 } {
   if (repair?.occurred !== true) return { status: 'not_applicable' };
-  const blockers = repair.event.payload.blockers;
+  const repairEvent = repair.repairEvidence ?? repair.event;
+  const blockers = repairEvent.payload.blockers;
   const bugRepair = blockers.some((blocker) => blocker.source === 'verification');
   if (!bugRepair) return { status: 'not_applicable' };
-  const redEvidence = repair.event.payload.redCapableEvidence;
-  if (repair.event.payload.redInfeasibilityReason !== undefined && redEvidence.length > 0) {
+  const redEvidence = repairEvent.payload.redCapableEvidence;
+  if (repairEvent.payload.redInfeasibilityReason !== undefined && redEvidence.length > 0) {
     return { status: 'missing', reason: 'Bug repair has contradictory red-capable and infeasibility evidence' };
   }
   if (redEvidence.length > 0) {
@@ -518,7 +571,7 @@ function redEvidenceStatus(
       const index = remaining.findIndex((evidence) =>
         evidence.command === blocker.command &&
         evidence.before.command === blocker.command &&
-        evidence.before.sha === repair.event.payload.candidateSha &&
+        evidence.before.sha === repairEvent.payload.candidateSha &&
         evidence.before.sha !== sha &&
         evidence.before.exitCode !== 0 &&
         evidence.after !== undefined &&
@@ -542,10 +595,10 @@ function redEvidenceStatus(
     }
     return { status: 'present' };
   }
-  if (repair.event.payload.redInfeasibilityReason !== undefined) {
+  if (repairEvent.payload.redInfeasibilityReason !== undefined) {
     return {
       status: 'infeasible',
-      infeasibilityReason: repair.event.payload.redInfeasibilityReason,
+      infeasibilityReason: repairEvent.payload.redInfeasibilityReason,
     };
   }
   return { status: 'missing', reason: 'Bug repair has no red-capable evidence or explicit infeasibility reason' };

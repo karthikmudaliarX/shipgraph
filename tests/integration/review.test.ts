@@ -8,6 +8,7 @@ import { stringify } from 'yaml';
 import { initProject } from '../../src/cli/init.js';
 import { syncBacklogProject } from '../../src/cli/backlog.js';
 import { createWorkspace } from '../../src/workspace/service.js';
+import { createGitRunner, type GitRunner } from '../../src/git/service.js';
 import { TicketState } from '../../src/core/state-machine/state.js';
 import { persistTicketTransition } from '../../src/persistence/ticket-state-store.js';
 import { openAndMigrate, type DbConnection } from '../../src/persistence/db.js';
@@ -520,14 +521,28 @@ function routing() {
   };
 }
 
-function readinessInput(harness: Harness) {
+function readinessInput(harness: Harness, gitRunner?: GitRunner) {
   return {
     ticketId: 'REV-001',
     workspace: {
       db: harness.db,
       projectDir: harness.projectDir,
       worktreeRoot: harness.worktreeRoot,
+      ...(gitRunner === undefined ? {} : { gitRunner }),
     },
+  };
+}
+
+function mutateAfterFirstCleanProof(harness: Harness, mutation: () => void): GitRunner {
+  const runner = createGitRunner();
+  let mutated = false;
+  return async (cwd, args) => {
+    const result = await runner(cwd, args);
+    if (!mutated && cwd === harness.workspacePath && args.join('\0') === 'clean\0-ndx') {
+      mutated = true;
+      mutation();
+    }
+    return result;
   };
 }
 
@@ -544,6 +559,7 @@ function recordVerificationEvidence(
     resultingSha?: string;
     finalVerification?: readonly Record<string, unknown>[];
     outcome?: 'PASSED' | 'REPAIRED' | 'BLOCKED' | 'NEEDS_HUMAN';
+    omitResultingSha?: boolean;
   } = {}
 ): string {
   const sha = git(harness.workspacePath, 'rev-parse', 'HEAD');
@@ -575,7 +591,7 @@ function recordVerificationEvidence(
         ? {}
         : { redInfeasibilityReason: options.redInfeasibilityReason }),
       outcome: options.outcome ?? 'PASSED',
-      ...(options.attempt === undefined || options.attempt === 0
+      ...(options.attempt === undefined || options.attempt === 0 || options.omitResultingSha === true
         ? {}
         : { resultingSha: options.resultingSha ?? sha }),
     },
@@ -1142,6 +1158,116 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
       { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
       'REV-001'
     )).toMatchObject({ result: 'PASS', readySha: result.readySha });
+  });
+
+  it('accepts a no-repair replay after a historical repair of the current SHA', async () => {
+    harness = await createHarness([VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
+    await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+    const currentSha = git(harness.workspacePath, 'rev-parse', 'HEAD');
+    const historicalRepairRunId = insertRepairRun(harness, 'SUCCEEDED');
+    const repairBlocker = {
+      source: 'verification',
+      command: 'pnpm test',
+      expected: 'command exits with status 0',
+      actual: 'exit code 1',
+    };
+    const historicalRepairEventId = recordVerificationEvidence(harness, {
+      attempt: 1,
+      repairRunId: historicalRepairRunId,
+      candidateSha: 'c'.repeat(40),
+      resultingSha: currentSha,
+      blockers: [repairBlocker],
+      redInfeasibilityReason: 'the same deterministic pre-fix reproducer was unavailable',
+    });
+    const replayEventId = recordVerificationEvidence(harness, {
+      attempt: 1,
+      candidateSha: currentSha,
+      omitResultingSha: true,
+    });
+
+    const result = await runPrePrReadiness(readinessInput(harness));
+
+    expect(result.result).toBe('PASS');
+    expect(result.evidence).toMatchObject({
+      verificationEventId: replayEventId,
+      repairEvidenceEventId: historicalRepairEventId,
+      repairOccurred: true,
+      redEvidenceStatus: 'infeasible',
+      redInfeasibilityReason: 'the same deterministic pre-fix reproducer was unavailable',
+    });
+    expect(await getCurrentPrePrReadinessEvidence(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      'REV-001'
+    )).toMatchObject({ result: 'PASS', readySha: currentSha });
+  });
+
+  it('does not expose a stale PASS when HEAD changes at the readiness boundary', async () => {
+    harness = await createHarness([VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
+    await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+    recordVerificationEvidence(harness);
+
+    const result = await runPrePrReadiness(readinessInput(harness, mutateAfterFirstCleanProof(
+      harness,
+      () => git(harness.workspacePath, 'commit', '--allow-empty', '-m', 'boundary HEAD mutation')
+    )));
+
+    expect(result.result).toBe('FAIL');
+    expect(result.reason).toContain('candidate HEAD changed');
+    expect(createEventRepository(harness.db).findByTicketId('REV-001').at(-1)).toMatchObject({
+      type: EventType.PRE_PR_READINESS_RECORDED,
+      payload: { result: 'FAIL' },
+    });
+  });
+
+  it('does not expose a stale PASS when the worktree becomes dirty at the readiness boundary', async () => {
+    harness = await createHarness([VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
+    await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+    recordVerificationEvidence(harness);
+
+    const result = await runPrePrReadiness(readinessInput(harness, mutateAfterFirstCleanProof(
+      harness,
+      () => writeFileSync(join(harness.workspacePath, 'README.md'), '# dirty at boundary\n')
+    )));
+
+    expect(result.result).toBe('FAIL');
+    expect(result.reason).toContain('became unclean or unverifiable');
+  });
+
+  it('returns no current readiness evidence when the candidate mutates before lookup returns', async () => {
+    harness = await createHarness([VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
+    await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+    recordVerificationEvidence(harness);
+    expect((await runPrePrReadiness(readinessInput(harness))).result).toBe('PASS');
+
+    const current = await getCurrentPrePrReadinessEvidence(
+      { ...readinessInput(harness).workspace, gitRunner: mutateAfterFirstCleanProof(
+        harness,
+        () => git(harness.workspacePath, 'commit', '--allow-empty', '-m', 'lookup HEAD mutation')
+      ) },
+      'REV-001'
+    );
+
+    expect(current).toBeUndefined();
   });
 
   it('fails readiness when verification evidence is missing or failing', async () => {
