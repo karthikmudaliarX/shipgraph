@@ -1164,6 +1164,37 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
     expect((await runPrePrReadiness(readinessInput(harness))).result).toBe('PASS');
   });
 
+  it('rejects a newer failed review attempt instead of using an older PASS', async () => {
+    harness = await createHarness([VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
+    await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+    recordVerificationEvidence(harness);
+    const currentReview = createRunRepository(harness.db)
+      .findByTicketId('REV-001')
+      .find((run) => run.task === 'review' && run.reviewType === 'contract');
+    expect(currentReview).toBeDefined();
+    if (currentReview === undefined) throw new Error('current contract review run is missing');
+    const later = new Date(Date.now() + 1_000).toISOString();
+    createRunRepository(harness.db).create({
+      ...currentReview,
+      id: randomUUID(),
+      status: 'FAILED',
+      startedAt: later,
+      createdAt: later,
+      updatedAt: later,
+      completedAt: later,
+      failureCategory: 'adapter_error',
+    });
+
+    const result = await runPrePrReadiness(readinessInput(harness));
+    expect(result.result).toBe('FAIL');
+    expect(result.reason).toContain('Current contract review run is FAILED');
+  });
+
   it('fails readiness when a later repair attempt for the current SHA is blocked', async () => {
     harness = await createHarness([VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
     await runPrePrReviews({
@@ -1259,6 +1290,7 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
     const result = await runPrePrReadiness(readinessInput(harness));
     expect(result.result).toBe('FAIL');
     expect(result.reason).toContain('changed since the last sync');
+    expect(result.evidence?.result).toBe('FAIL');
   });
 
   it('fails closed on duplicate final verification observations', async () => {
@@ -1308,6 +1340,38 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
       redCapableEvidence: [red],
     });
     expect((await runPrePrReadiness(readinessInput(harness))).result).toBe('PASS');
+  });
+
+  it('rejects bug repair evidence without the same-command green after result', async () => {
+    harness = await createHarness([VALID_REVIEW_REPORT, VALID_REVIEW_REPORT]);
+    await runPrePrReviews({
+      ticketId: 'REV-001',
+      modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+    const currentSha = git(harness.workspacePath, 'rev-parse', 'HEAD');
+    recordVerificationEvidence(harness, {
+      attempt: 1,
+      repairRunId: insertRepairRun(harness, 'SUCCEEDED'),
+      candidateSha: 'c'.repeat(40),
+      blockers: [{
+        source: 'verification',
+        command: 'pnpm test',
+        expected: 'command exits with status 0',
+        actual: 'exit code 1',
+      }],
+      redCapableEvidence: [{
+        command: 'pnpm test',
+        expectedSymptom: 'exit code 1',
+        before: { command: 'pnpm test', sha: 'c'.repeat(40), exitCode: 1, stdout: '', stderr: '' },
+      }],
+      resultingSha: currentSha,
+    });
+
+    const result = await runPrePrReadiness(readinessInput(harness));
+    expect(result.result).toBe('FAIL');
+    expect(result.reason).toContain('no red-capable evidence with a valid before/after reproducer');
   });
 
   it('fails closed on unresolved safety evidence and missing bug red proof', async () => {

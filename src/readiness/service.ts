@@ -8,7 +8,6 @@ import {
 import { TicketState } from '../core/state-machine/state.js';
 import { loadBacklog } from '../backlog/schema.js';
 import { assertSafeBacklogPath } from '../utils/paths.js';
-import type { AgentRunRecord } from '../domain/agent-run.js';
 import type { ShipgraphEvent } from '../events/event.js';
 import { EventType } from '../events/event.js';
 import {
@@ -64,7 +63,7 @@ type CurrentRepairEvidence = {
 type ReadinessAssessment = {
   failures: readonly string[];
   repair: CurrentRepairEvidence | undefined;
-  currentReviews: readonly AgentRunRecord[];
+  currentReviews: readonly RunRecord[];
   safetyStatus: ReturnType<typeof safetyStatusFor>;
   redStatus: ReturnType<typeof redEvidenceStatus>;
 };
@@ -94,10 +93,19 @@ export async function runPrePrReadiness(
   }
 
   if (candidate === undefined || provenance === undefined) {
+    const evidence = readinessEvidenceSchema.parse({
+      ticketId: input.ticketId,
+      result: 'FAIL',
+      ...(candidate === undefined ? {} : { readySha: candidate.sha }),
+      ...(provenance ?? {}),
+      reason: setupReason ?? 'KAR-11 could not establish the current candidate and contract provenance',
+    });
+    appendReadinessEvidence(input.workspace, projectId, input.ticketId, evidence);
     return {
       result: 'FAIL',
       ...(candidate === undefined ? {} : { readySha: candidate.sha }),
-      ...(setupReason === undefined ? {} : { reason: setupReason }),
+      reason: evidence.reason,
+      evidence,
     };
   }
 
@@ -107,8 +115,8 @@ export async function runPrePrReadiness(
   const { repair, currentReviews, safetyStatus, redStatus } = assessment;
   const failures = assessment.failures;
   const result = failures.length === 0 ? 'PASS' : 'FAIL';
-  const contractReview = currentReviews.find((run) => run.reviewType === 'contract');
-  const engineeringReview = currentReviews.find((run) => run.reviewType === 'engineering');
+  const contractReview = latestReviewRun(currentReviews, 'contract');
+  const engineeringReview = latestReviewRun(currentReviews, 'engineering');
   const safetyRunIds = safetyStatus.runIds;
   const evidence = readinessEvidenceSchema.parse({
     ticketId: input.ticketId,
@@ -128,23 +136,32 @@ export async function runPrePrReadiness(
     safetyRunIds,
     ...(failures.length === 0 ? {} : { reason: failures.join('; ') }),
   });
-  const stored = createEventRepository(input.workspace.db).append({
-    id: input.workspace.createEventId?.() ?? randomUUID(),
-    timestamp: input.workspace.now?.() ?? new Date().toISOString(),
-    projectId,
-    ticketId: input.ticketId,
-    type: EventType.PRE_PR_READINESS_RECORDED,
-    payload: evidence,
-  });
-  if (stored.type !== EventType.PRE_PR_READINESS_RECORDED) {
-    throw new Error('KAR-11 readiness evidence was recorded with the wrong event type');
-  }
+  appendReadinessEvidence(input.workspace, projectId, input.ticketId, evidence);
   return {
     result,
     readySha: candidate.sha,
     ...(failures.length === 0 ? {} : { reason: failures.join('; ') }),
     evidence,
   };
+}
+
+function appendReadinessEvidence(
+  workspace: WorkspaceServiceOptions,
+  projectId: string,
+  ticketId: string,
+  evidence: ReadinessEvidence
+): void {
+  const stored = createEventRepository(workspace.db).append({
+    id: workspace.createEventId?.() ?? randomUUID(),
+    timestamp: workspace.now?.() ?? new Date().toISOString(),
+    projectId,
+    ticketId,
+    type: EventType.PRE_PR_READINESS_RECORDED,
+    payload: evidence,
+  });
+  if (stored.type !== EventType.PRE_PR_READINESS_RECORDED) {
+    throw new Error('KAR-11 readiness evidence was recorded with the wrong event type');
+  }
 }
 
 /** Return a PASS record only when it matches the current clean HEAD and contract. */
@@ -258,7 +275,7 @@ function readinessAssessment(
   const currentReviews = currentReviewRuns(runs, sha, provenance);
   const reviewStatus = reviewStatusFor(currentReviews);
   const safetyStatus = safetyStatusFor(ticket.status, runs, currentReviews, repair, events, sha);
-  const redStatus = redEvidenceStatus(repair);
+  const redStatus = redEvidenceStatus(repair, sha);
   return {
     repair,
     currentReviews,
@@ -322,39 +339,44 @@ function currentReviewRuns(
   runs: readonly RunRecord[],
   sha: string,
   provenance: TicketContractProvenance
-): AgentRunRecord[] {
-  return runs.filter((run): run is AgentRunRecord =>
+): RunRecord[] {
+  return runs.filter((run) =>
     run.task === 'review' &&
-    run.status === 'SUCCEEDED' &&
     run.reviewType !== undefined &&
     run.reviewedSha === sha &&
     run.reviewContractDigest === provenance.contractDigest &&
     run.reviewContractSource === provenance.contractSource &&
-    run.reviewContractRevision === provenance.contractRevision &&
-    run.reviewResult !== undefined
-  ) as AgentRunRecord[];
+    run.reviewContractRevision === provenance.contractRevision
+  );
 }
 
-function reviewStatusFor(runs: readonly AgentRunRecord[]): { reason?: string } {
-  const latest = new Map<string, AgentRunRecord>();
-  for (const run of [...runs].sort((left, right) =>
-    left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id)
-  )) {
-    if (run.reviewType !== undefined) latest.set(run.reviewType, run);
-  }
+function reviewStatusFor(runs: readonly RunRecord[]): { reason?: string } {
   for (const reviewType of ['contract', 'engineering'] as const) {
-    const run = latest.get(reviewType);
+    const run = latestReviewRun(runs, reviewType);
     if (run === undefined) return { reason: `Current ${reviewType} review evidence is missing` };
+    if (run.status !== 'SUCCEEDED' || run.reviewResult === undefined) {
+      return { reason: `Current ${reviewType} review run is ${run.status} without a successful report` };
+    }
     if (run.reviewResult !== 'PASS') return { reason: `Current ${reviewType} review is ${run.reviewResult}` };
     if ((run.reviewFindings?.length ?? 0) > 0) return { reason: `Current ${reviewType} review has contradictory findings` };
   }
   return {};
 }
 
+function latestReviewRun(
+  runs: readonly RunRecord[],
+  reviewType: 'contract' | 'engineering'
+): RunRecord | undefined {
+  return [...runs]
+    .filter((run) => run.reviewType === reviewType)
+    .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id))
+    .at(-1);
+}
+
 function safetyStatusFor(
   ticketStatus: string,
   runs: readonly RunRecord[],
-  currentReviews: readonly AgentRunRecord[],
+  currentReviews: readonly RunRecord[],
   repair: CurrentRepairEvidence | undefined,
   events: readonly ShipgraphEvent[],
   sha: string
@@ -389,7 +411,8 @@ function safetyStatusFor(
 }
 
 function redEvidenceStatus(
-  repair: CurrentRepairEvidence | undefined
+  repair: CurrentRepairEvidence | undefined,
+  sha: string
 ): {
   status: 'not_applicable' | 'present' | 'infeasible' | 'missing';
   infeasibilityReason?: string;
@@ -399,7 +422,40 @@ function redEvidenceStatus(
   const blockers = repair.event.payload.blockers;
   const bugRepair = blockers.some((blocker) => blocker.source === 'verification');
   if (!bugRepair) return { status: 'not_applicable' };
-  if (repair.event.payload.redCapableEvidence.length > 0) return { status: 'present' };
+  const redEvidence = repair.event.payload.redCapableEvidence;
+  if (repair.event.payload.redInfeasibilityReason !== undefined && redEvidence.length > 0) {
+    return { status: 'missing', reason: 'Bug repair has contradictory red-capable and infeasibility evidence' };
+  }
+  if (redEvidence.length > 0) {
+    const remaining = [...redEvidence];
+    for (const blocker of blockers) {
+      if (blocker.source !== 'verification') continue;
+      const index = remaining.findIndex((evidence) =>
+        evidence.command === blocker.command &&
+        evidence.before.command === blocker.command &&
+        evidence.before.sha !== sha &&
+        evidence.before.exitCode !== 0 &&
+        evidence.after !== undefined &&
+        evidence.after.command === blocker.command &&
+        evidence.after.sha === sha &&
+        evidence.after.exitCode === 0
+      );
+      if (index < 0) {
+        return {
+          status: 'missing',
+          reason: 'Bug repair has no red-capable evidence with a valid before/after reproducer or explicit infeasibility reason',
+        };
+      }
+      remaining.splice(index, 1);
+    }
+    if (remaining.length > 0) {
+      return {
+        status: 'missing',
+        reason: 'Bug repair contains unrelated or invalid red-capable evidence',
+      };
+    }
+    return { status: 'present' };
+  }
   if (repair.event.payload.redInfeasibilityReason !== undefined) {
     return {
       status: 'infeasible',
