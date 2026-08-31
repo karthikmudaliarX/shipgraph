@@ -115,8 +115,8 @@ export async function runPrePrReadiness(
   const { repair, currentReviews, safetyStatus, redStatus } = assessment;
   const failures = assessment.failures;
   const result = failures.length === 0 ? 'PASS' : 'FAIL';
-  const contractReview = latestReviewRun(currentReviews, 'contract');
-  const engineeringReview = latestReviewRun(currentReviews, 'engineering');
+  const contractReview = latestReviewRun(currentReviews, 'contract', events).run;
+  const engineeringReview = latestReviewRun(currentReviews, 'engineering', events).run;
   const safetyRunIds = safetyStatus.runIds;
   const evidence = readinessEvidenceSchema.parse({
     ticketId: input.ticketId,
@@ -136,6 +136,9 @@ export async function runPrePrReadiness(
     safetyRunIds,
     ...(failures.length === 0 ? {} : { reason: failures.join('; ') }),
   });
+  if (result === 'PASS' && !passReferencesMatch(evidence, candidate.sha, provenance, events, runs)) {
+    throw new Error('KAR-11 PASS evidence references are not current durable records');
+  }
   appendReadinessEvidence(input.workspace, projectId, input.ticketId, evidence);
   return {
     result,
@@ -273,7 +276,7 @@ function readinessAssessment(
     ? { passed: false, reason: 'No KAR-10 final verification evidence applies to the current SHA' }
     : verificationStatus(ticket.verification.commands, repair.event.payload.finalVerification, sha);
   const currentReviews = currentReviewRuns(runs, sha, provenance);
-  const reviewStatus = reviewStatusFor(currentReviews);
+  const reviewStatus = reviewStatusFor(currentReviews, events);
   const safetyStatus = safetyStatusFor(ticket.status, runs, currentReviews, repair, events, sha);
   const redStatus = redEvidenceStatus(repair, sha);
   return {
@@ -350,9 +353,11 @@ function currentReviewRuns(
   );
 }
 
-function reviewStatusFor(runs: readonly RunRecord[]): { reason?: string } {
+function reviewStatusFor(runs: readonly RunRecord[], events: readonly ShipgraphEvent[]): { reason?: string } {
   for (const reviewType of ['contract', 'engineering'] as const) {
-    const run = latestReviewRun(runs, reviewType);
+    const selection = latestReviewRun(runs, reviewType, events);
+    if (!selection.orderingKnown) return { reason: `Current ${reviewType} review ordering evidence is missing` };
+    const run = selection.run;
     if (run === undefined) return { reason: `Current ${reviewType} review evidence is missing` };
     if (run.status !== 'SUCCEEDED' || run.reviewResult === undefined) {
       return { reason: `Current ${reviewType} review run is ${run.status} without a successful report` };
@@ -365,12 +370,26 @@ function reviewStatusFor(runs: readonly RunRecord[]): { reason?: string } {
 
 function latestReviewRun(
   runs: readonly RunRecord[],
-  reviewType: 'contract' | 'engineering'
-): RunRecord | undefined {
-  return [...runs]
+  reviewType: 'contract' | 'engineering',
+  events: readonly ShipgraphEvent[]
+): { run?: RunRecord; orderingKnown: boolean } {
+  const candidates = runs
     .filter((run) => run.reviewType === reviewType)
-    .sort((left, right) => left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id))
-    .at(-1);
+    .map((run) => ({
+      run,
+      sequence: events.find(
+        (event): event is Extract<ShipgraphEvent, { type: typeof EventType.RUN_CREATED }> =>
+          event.type === EventType.RUN_CREATED && event.runId === run.id
+      )?.sequence,
+    }));
+  if (candidates.length === 0) return { orderingKnown: true };
+  if (candidates.some((candidate) => candidate.sequence === undefined)) {
+    return { orderingKnown: false };
+  }
+  const latest = candidates.reduce((current, candidate) =>
+    (candidate.sequence ?? 0) > (current.sequence ?? 0) ? candidate : current
+  );
+  return { run: latest.run, orderingKnown: true };
 }
 
 function safetyStatusFor(
@@ -394,7 +413,7 @@ function safetyStatusFor(
     return { status: 'blocked', runIds: [], reason: 'Unresolved KAR-10 NEEDS_HUMAN safety evidence exists' };
   }
   const runIds = currentReviews.map((run) => run.id);
-  if (currentReviews.some((run) => run.safetyPolicySha256 === undefined)) {
+  if (currentReviews.some((run) => !hasBoundSafetyPolicy(run, events))) {
     return { status: 'unknown', runIds, reason: 'Current review evidence does not prove KAR-7 policy satisfaction' };
   }
   if (repair?.occurred === true) {
@@ -402,12 +421,75 @@ function safetyStatusFor(
     const repairRun = repairRunId === undefined
       ? undefined
       : runs.find((run) => run.id === repairRunId && run.task === 'repair' && run.status === 'SUCCEEDED');
-    if (repairRun === undefined || repairRun.safetyPolicySha256 === undefined) {
+    if (repairRun === undefined || !hasBoundSafetyPolicy(repairRun, events)) {
       return { status: 'unknown', runIds, reason: `KAR-10 repair safety evidence for ${sha} is missing` };
     }
     runIds.push(repairRun.id);
   }
   return { status: 'satisfied', runIds: [...new Set(runIds)] };
+}
+
+function hasBoundSafetyPolicy(run: RunRecord, events: readonly ShipgraphEvent[]): boolean {
+  if (run.safetyPolicySha256 === undefined) return false;
+  const created = events.find(
+    (event): event is Extract<ShipgraphEvent, { type: typeof EventType.RUN_CREATED }> =>
+      event.type === EventType.RUN_CREATED && event.runId === run.id
+  );
+  return created?.payload.safetyPolicySha256 === run.safetyPolicySha256;
+}
+
+function passReferencesMatch(
+  evidence: ReadinessEvidence,
+  sha: string,
+  provenance: TicketContractProvenance,
+  events: readonly ShipgraphEvent[],
+  runs: readonly RunRecord[]
+): boolean {
+  if (
+    evidence.readySha !== sha ||
+    evidence.contractDigest !== provenance.contractDigest ||
+    evidence.contractSource !== provenance.contractSource ||
+    evidence.contractRevision !== provenance.contractRevision ||
+    evidence.verificationEventId === undefined ||
+    evidence.contractReviewRunId === undefined ||
+    evidence.engineeringReviewRunId === undefined
+  ) return false;
+  const contract = runs.find((run) => run.id === evidence.contractReviewRunId);
+  const engineering = runs.find((run) => run.id === evidence.engineeringReviewRunId);
+  if (
+    contract === undefined ||
+    engineering === undefined ||
+    contract.task !== 'review' ||
+    engineering.task !== 'review' ||
+    contract.reviewType !== 'contract' ||
+    engineering.reviewType !== 'engineering' ||
+    contract.status !== 'SUCCEEDED' ||
+    engineering.status !== 'SUCCEEDED' ||
+    contract.reviewedSha !== sha ||
+    engineering.reviewedSha !== sha ||
+    contract.reviewContractDigest !== provenance.contractDigest ||
+    engineering.reviewContractDigest !== provenance.contractDigest ||
+    contract.reviewContractSource !== provenance.contractSource ||
+    engineering.reviewContractSource !== provenance.contractSource ||
+    contract.reviewContractRevision !== provenance.contractRevision ||
+    engineering.reviewContractRevision !== provenance.contractRevision ||
+    contract.reviewResult !== 'PASS' ||
+    engineering.reviewResult !== 'PASS' ||
+    (contract.reviewFindings?.length ?? 0) > 0 ||
+    (engineering.reviewFindings?.length ?? 0) > 0
+  ) return false;
+  const verification = events.find((event) => event.id === evidence.verificationEventId);
+  if (
+    verification === undefined ||
+    verification.type !== EventType.REPAIR_ATTEMPT_RECORDED ||
+    verification.payload.outcome !== 'PASSED' ||
+    (verification.payload.candidateSha !== sha && verification.payload.resultingSha !== sha) ||
+    verification.payload.finalVerification === undefined
+  ) return false;
+  if (evidence.repairOccurred) {
+    return evidence.repairEvidenceEventId === verification.id;
+  }
+  return evidence.repairEvidenceEventId === undefined;
 }
 
 function redEvidenceStatus(

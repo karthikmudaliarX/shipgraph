@@ -12,7 +12,7 @@ import { TicketState } from '../../src/core/state-machine/state.js';
 import { persistTicketTransition } from '../../src/persistence/ticket-state-store.js';
 import { openAndMigrate, type DbConnection } from '../../src/persistence/db.js';
 import { createRunRepository, createTicketRepository } from '../../src/persistence/repositories.js';
-import type { WorkspaceRecord } from '../../src/persistence/repositories.js';
+import type { RunRecord, WorkspaceRecord } from '../../src/persistence/repositories.js';
 import { createEventRepository } from '../../src/persistence/repositories.js';
 import { EventType } from '../../src/events/event.js';
 import type {
@@ -586,7 +586,7 @@ function recordVerificationEvidence(
 function insertRepairRun(harness: Harness, status: 'SUCCEEDED' | 'NEEDS_HUMAN'): string {
   const now = new Date().toISOString();
   const id = randomUUID();
-  createRunRepository(harness.db).create({
+  const run = createRunRepository(harness.db).create({
     id,
     ticketId: 'REV-001',
     projectId: harness.workspace.projectId,
@@ -612,7 +612,40 @@ function insertRepairRun(harness: Harness, status: 'SUCCEEDED' | 'NEEDS_HUMAN'):
     safetyPolicySha256: 'b'.repeat(64),
     timeoutMs: 1000,
   });
+  recordRunCreatedEvent(harness, run);
   return id;
+}
+
+function recordRunCreatedEvent(harness: Harness, run: RunRecord): void {
+  createEventRepository(harness.db).append({
+    id: randomUUID(),
+    timestamp: run.createdAt ?? run.startedAt,
+    projectId: run.projectId ?? harness.workspace.projectId,
+    ticketId: run.ticketId,
+    runId: run.id,
+    type: EventType.RUN_CREATED,
+    payload: {
+      runId: run.id,
+      ticketId: run.ticketId,
+      baseSha: run.baseSha,
+      ...(run.workspaceId === undefined ? {} : { workspaceId: run.workspaceId }),
+      ...(run.workspacePath === undefined ? {} : { workspacePath: run.workspacePath }),
+      ...(run.branchName === undefined ? {} : { branchName: run.branchName }),
+      ...(run.provider === undefined ? {} : { provider: run.provider }),
+      ...(run.modelProviderId === undefined ? {} : { modelProviderId: run.modelProviderId }),
+      ...(run.task === undefined ? {} : { task: run.task }),
+      ...(run.model === undefined ? {} : { model: run.model }),
+      createdAt: run.createdAt ?? run.startedAt,
+      ...(run.timeoutMs === undefined ? {} : { timeoutMs: run.timeoutMs }),
+      ...(run.instructionsSha256 === undefined ? {} : { instructionsSha256: run.instructionsSha256 }),
+      ...(run.safetyPolicySha256 === undefined ? {} : { safetyPolicySha256: run.safetyPolicySha256 }),
+      ...(run.reviewType === undefined ? {} : { reviewType: run.reviewType }),
+      ...(run.reviewedSha === undefined ? {} : { reviewedSha: run.reviewedSha }),
+      ...(run.reviewContractDigest === undefined ? {} : { reviewContractDigest: run.reviewContractDigest }),
+      ...(run.reviewContractSource === undefined ? {} : { reviewContractSource: run.reviewContractSource }),
+      ...(run.reviewContractRevision === undefined ? {} : { reviewContractRevision: run.reviewContractRevision }),
+    },
+  });
 }
 
 describe('KAR-9 exact-SHA pre-PR reviews', () => {
@@ -1179,7 +1212,7 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
     expect(currentReview).toBeDefined();
     if (currentReview === undefined) throw new Error('current contract review run is missing');
     const later = new Date(Date.now() + 1_000).toISOString();
-    createRunRepository(harness.db).create({
+    const failedReviewRun = createRunRepository(harness.db).create({
       ...currentReview,
       id: randomUUID(),
       status: 'FAILED',
@@ -1189,6 +1222,7 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
       completedAt: later,
       failureCategory: 'adapter_error',
     });
+    recordRunCreatedEvent(harness, failedReviewRun);
 
     const result = await runPrePrReadiness(readinessInput(harness));
     expect(result.result).toBe('FAIL');
