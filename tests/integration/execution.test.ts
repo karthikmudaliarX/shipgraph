@@ -131,6 +131,12 @@ describe('KAR-12 single-ticket execution identity', () => {
       .filter((event) => event.type === EventType.EXECUTION_CONTRACT_BOUND)
       .map((event) => event.payload.contract.desiredBehavior);
     expect(boundContracts).toEqual([contract.desiredBehavior, 'A revised bounded entry point.']);
+    await expect(executeTicket({
+      ...input,
+      contract: { ...contract, desiredBehavior: 'Conflicting content for v2.' },
+      contractRevision: 'v2',
+      createExecutionId: () => 'execution-3',
+    })).rejects.toThrow(/immutable once bound/);
   });
 
   it('composes the existing implementation, review, readiness, and GitHub stages to PR_RAISED', async () => {

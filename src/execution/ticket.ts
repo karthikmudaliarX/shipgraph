@@ -426,24 +426,28 @@ function bindExecution(
       (event): event is Extract<ShipgraphEvent, { type: typeof EventType.EXECUTION_CONTRACT_BOUND }> =>
         event.type === EventType.EXECUTION_CONTRACT_BOUND && event.ticketId === input.issueId
     );
-    const matchingRevision = bindings.find(
+    const matchingRevisions = bindings.filter(
       (event) =>
         event.payload.contractSource === provenance.contractSource &&
         event.payload.contractRevision === provenance.contractRevision
     );
+    const conflictingRevision = matchingRevisions.find(
+      (event) => event.payload.contractDigest !== provenance.contractDigest
+    );
+    const matchingRevision = matchingRevisions[0];
+    if (conflictingRevision !== undefined) {
+      return {
+        executionId: conflictingRevision.payload.executionId,
+        contract: conflictingRevision.payload.contract,
+        provenance: {
+          contractDigest: conflictingRevision.payload.contractDigest,
+          contractSource: conflictingRevision.payload.contractSource,
+          contractRevision: conflictingRevision.payload.contractRevision,
+        },
+        conflictReason: 'KAR-12 execution contract is immutable once bound; the supplied source/revision conflicts with durable contract content',
+      };
+    }
     if (matchingRevision !== undefined) {
-      if (matchingRevision.payload.contractDigest !== provenance.contractDigest) {
-        return {
-          executionId: matchingRevision.payload.executionId,
-          contract: matchingRevision.payload.contract,
-          provenance: {
-            contractDigest: matchingRevision.payload.contractDigest,
-            contractSource: matchingRevision.payload.contractSource,
-            contractRevision: matchingRevision.payload.contractRevision,
-          },
-          conflictReason: 'KAR-12 execution contract is immutable once bound; the supplied source/revision conflicts with durable contract content',
-        };
-      }
       return {
         executionId: matchingRevision.payload.executionId,
         contract: matchingRevision.payload.contract,
