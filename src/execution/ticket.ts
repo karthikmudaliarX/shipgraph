@@ -274,7 +274,14 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
   }
   if (repair.status !== 'PASSED') {
     const reason = repair.reason ?? 'KAR-10 did not produce a passing pre-PR candidate';
-    return terminalize(input, projectId, binding, repairOutcome(input, binding.executionId), reason, workspace);
+    return terminalize(
+      input,
+      projectId,
+      binding,
+      repairOutcome(input, binding.executionId, remainingExecution.policy, reason),
+      reason,
+      workspace
+    );
   }
   const terminalAfterRepair = terminalFor(input.workspace, input.issueId, binding.executionId);
   if (terminalAfterRepair !== undefined) return terminalAfterRepair;
@@ -856,7 +863,12 @@ function errorOutcome(input: ExecuteTicketInput, error: unknown): ExecutionOutco
     : 'FAILED';
 }
 
-function repairOutcome(input: ExecuteTicketInput, executionId: string): ExecutionOutcome {
+function repairOutcome(
+  input: ExecuteTicketInput,
+  executionId: string,
+  policy: AgentSafetyPolicy | undefined,
+  reason: string
+): ExecutionOutcome {
   const repairRuns = createRunRepository(input.workspace.db)
     .findByTicketId(input.issueId)
     .filter((run) =>
@@ -864,7 +876,7 @@ function repairOutcome(input: ExecuteTicketInput, executionId: string): Executio
       run.executionId === executionId &&
       (run.task === 'review' || run.task === 'repair')
     );
-  if (repairRuns.some((run) => run.task === 'repair' && runOutcome(run) === 'BUDGET_EXHAUSTED')) {
+  if (repairRuns.some((run) => runOutcome(run) === 'BUDGET_EXHAUSTED') || isExecutionBudgetFailure(reason)) {
     return 'BUDGET_EXHAUSTED';
   }
 
@@ -873,21 +885,23 @@ function repairOutcome(input: ExecuteTicketInput, executionId: string): Executio
   // only proof used here; unknown telemetry is never treated as zero.
   const runIds = new Set(repairRuns.map((run) => run.id));
   const usage = input.modelService.listUsage().filter((entry) => runIds.has(entry.runId));
-  if (input.executionPolicy?.maxTokens !== undefined) {
+  if (policy?.maxTokens !== undefined && usage.every((entry) =>
+    typeof entry.inputTokens === 'number' && typeof entry.outputTokens === 'number'
+  )) {
     const knownTokens = usage.reduce((total, entry) =>
       typeof entry.inputTokens === 'number' && typeof entry.outputTokens === 'number'
         ? total + entry.inputTokens + entry.outputTokens
         : total,
       0
     );
-    if (knownTokens >= input.executionPolicy.maxTokens) return 'BUDGET_EXHAUSTED';
+    if (knownTokens >= policy.maxTokens) return 'BUDGET_EXHAUSTED';
   }
-  if (input.executionPolicy?.maxCost !== undefined) {
+  if (policy?.maxCost !== undefined && usage.every((entry) => typeof entry.cost === 'number')) {
     const knownCost = usage.reduce((total, entry) =>
       typeof entry.cost === 'number' ? total + entry.cost : total,
       0
     );
-    if (knownCost >= input.executionPolicy.maxCost) return 'BUDGET_EXHAUSTED';
+    if (knownCost >= policy.maxCost) return 'BUDGET_EXHAUSTED';
   }
   return 'NEEDS_HUMAN';
 }

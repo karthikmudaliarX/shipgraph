@@ -32,7 +32,9 @@ const contract = {
 };
 
 async function executeSafetyScenario(
-  resultOverrides: Partial<AgentExecutionResult>,
+  resultOverrides:
+    | Partial<AgentExecutionResult>
+    | ((request: AgentExecutionRequest) => Partial<AgentExecutionResult>),
   executionPolicy?: NonNullable<Parameters<typeof executeTicket>[0]['executionPolicy']>
 ): Promise<{
   result: Awaited<ReturnType<typeof executeTicket>>;
@@ -88,6 +90,7 @@ async function executeSafetyScenario(
     probe: () => ({ available: true as const, version: 'test-agent' }),
     execute: async (request): Promise<AgentExecutionResult> => {
       reports.push(request);
+      const overrides = typeof resultOverrides === 'function' ? resultOverrides(request) : resultOverrides;
       return {
         outcome: 'SUCCEEDED',
         timedOut: false,
@@ -98,7 +101,7 @@ async function executeSafetyScenario(
         stdoutTruncated: false,
         stderrTruncated: false,
         usage: { inputTokens: 1, outputTokens: 1, cost: 0 },
-        ...resultOverrides,
+        ...overrides,
       };
     },
   };
@@ -491,4 +494,106 @@ describe('KAR-12 single-ticket execution identity', () => {
       rmSync(overage.worktreeRoot, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it('classifies reduced KAR-10 token and cost exhaustion from review and repair evidence', async () => {
+    const cases: Array<{
+      name: string;
+      executionPolicy: NonNullable<Parameters<typeof executeTicket>[0]['executionPolicy']>;
+      resultOverrides: (request: AgentExecutionRequest) => Partial<AgentExecutionResult>;
+      outcome: 'BUDGET_EXHAUSTED' | 'NEEDS_HUMAN';
+      repairRuns: number;
+    }> = [
+      {
+        name: 'review token exhaustion',
+        executionPolicy: { maxTokens: 100 },
+        resultOverrides: (request) => request.reviewType === undefined
+          ? { usage: { inputTokens: 60, outputTokens: 0, cost: 0 } }
+          : {
+            stdout: JSON.stringify({ result: 'FAIL', findings: ['budget blocker'] }),
+            usage: { inputTokens: 10, outputTokens: 10, cost: 0 },
+          },
+        outcome: 'BUDGET_EXHAUSTED',
+        repairRuns: 0,
+      },
+      {
+        name: 'review cost exhaustion',
+        executionPolicy: { maxCost: 1 },
+        resultOverrides: (request) => request.reviewType === undefined
+          ? { usage: { inputTokens: 1, outputTokens: 1, cost: 0.6 } }
+          : {
+            stdout: JSON.stringify({ result: 'FAIL', findings: ['budget blocker'] }),
+            usage: { inputTokens: 1, outputTokens: 1, cost: 0.2 },
+          },
+        outcome: 'BUDGET_EXHAUSTED',
+        repairRuns: 0,
+      },
+      {
+        name: 'repair token overage',
+        executionPolicy: { maxTokens: 100 },
+        resultOverrides: (request) => request.reviewType === undefined &&
+          request.instructions.includes('Perform one bounded KAR-10 pre-PR repair attempt.')
+          ? {
+            outcome: 'NEEDS_HUMAN',
+            failureCategory: 'safety_limit',
+            failureReason: 'Execution token budget exceeded (40 > 36)',
+            usage: { inputTokens: 20, outputTokens: 20, cost: 0 },
+          }
+          : request.reviewType === undefined
+            ? { usage: { inputTokens: 60, outputTokens: 0, cost: 0 } }
+            : {
+              stdout: JSON.stringify({ result: 'FAIL', findings: ['repair blocker'] }),
+              usage: { inputTokens: 1, outputTokens: 1, cost: 0 },
+            },
+        outcome: 'BUDGET_EXHAUSTED',
+        repairRuns: 1,
+      },
+      {
+        name: 'non-budget repair safety failure',
+        executionPolicy: { maxTokens: 100 },
+        resultOverrides: (request) => request.reviewType === undefined &&
+          request.instructions.includes('Perform one bounded KAR-10 pre-PR repair attempt.')
+          ? {
+            outcome: 'NEEDS_HUMAN',
+            failureCategory: 'scope_growth',
+            failureReason: 'repair crossed scope',
+          }
+          : request.reviewType === undefined
+            ? { usage: { inputTokens: 60, outputTokens: 0, cost: 0 } }
+            : {
+              stdout: JSON.stringify({ result: 'FAIL', findings: ['repair blocker'] }),
+              usage: { inputTokens: 1, outputTokens: 1, cost: 0 },
+            },
+        outcome: 'NEEDS_HUMAN',
+        repairRuns: 1,
+      },
+      {
+        name: 'unknown review usage',
+        executionPolicy: { maxTokens: 100 },
+        resultOverrides: (request) => request.reviewType === undefined
+          ? { usage: { inputTokens: 60, outputTokens: 0, cost: 0 } }
+          : {
+            stdout: JSON.stringify({ result: 'FAIL', findings: ['unknown usage blocker'] }),
+            usage: { inputTokens: 10, cost: 0 },
+          },
+        outcome: 'NEEDS_HUMAN',
+        repairRuns: 0,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const fixture = await executeSafetyScenario(testCase.resultOverrides, testCase.executionPolicy);
+      try {
+        expect(fixture.result.outcome, testCase.name).toBe(testCase.outcome);
+        expect(fixture.reports.filter((request) =>
+          request.instructions.includes('Perform one bounded KAR-10 pre-PR repair attempt.')
+        ), testCase.name).toHaveLength(testCase.repairRuns);
+        expect(createTicketRepository(fixture.db).findById('KAR-12')?.status, testCase.name)
+          .toBe(TicketState.PAUSED);
+      } finally {
+        fixture.db.close();
+        rmSync(fixture.projectDir, { recursive: true, force: true });
+        rmSync(fixture.worktreeRoot, { recursive: true, force: true });
+      }
+    }
+  }, 60_000);
 });
