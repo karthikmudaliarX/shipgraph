@@ -9,6 +9,7 @@ import { stringify } from 'yaml';
 import { initProject } from '../../src/cli/init.js';
 import { syncBacklogProject } from '../../src/cli/backlog.js';
 import type { ShipgraphConfig } from '../../src/config/schema.js';
+import { TicketState } from '../../src/core/state-machine/state.js';
 import { EventType } from '../../src/events/event.js';
 import type { ExecuteTicketInput, ExecuteTicketResult } from '../../src/execution/ticket.js';
 import { openAndMigrate, type DbConnection } from '../../src/persistence/db.js';
@@ -273,6 +274,41 @@ describe('Linear dispatch claim bridge', () => {
       .some((event) => event.type === EventType.DISPATCH_CLAIMED)).toBe(false);
   });
 
+  it('does not let a PR_OPEN ticket consume v1 execution capacity', async () => {
+    const harness = createHarness(['DP-1', 'DP-2']);
+    harness.db.prepare('UPDATE tickets SET status = ? WHERE id = ?').run(TicketState.PR_OPEN, 'DP-1');
+    let calls = 0;
+    const service = serviceFor(harness, async () => {
+      calls += 1;
+      return fakeResult();
+    });
+    const result = await service.handleWebhook(
+      webhook('linear-issue-2', '20202020-2020-4020-8020-202020202020').body,
+      webhook('linear-issue-2', '20202020-2020-4020-8020-202020202020').headers
+    );
+    expect(result.outcome).toBe('CLAIMED');
+    await flushImmediate();
+    expect(calls).toBe(1);
+  });
+
+  it('returns NO_CAPACITY when an execution-active ticket fills capacity', async () => {
+    const harness = createHarness(['DP-1', 'DP-2']);
+    harness.db.prepare('UPDATE tickets SET status = ? WHERE id = ?').run(TicketState.IMPLEMENTING, 'DP-1');
+    let calls = 0;
+    const service = serviceFor(harness, async () => {
+      calls += 1;
+      return fakeResult();
+    });
+    const request = webhook('linear-issue-2', '21212121-2121-4121-8121-212121212121');
+    const result = await service.handleWebhook(request.body, request.headers);
+    expect(result).toMatchObject({ outcome: 'NO_CAPACITY', ticketId: 'DP-2' });
+    expect(calls).toBe(0);
+    const projectId = createProjectRepository(harness.db).findAll()[0].id;
+    expect(createEventRepository(harness.db).findByProjectId(projectId)
+      .some((event) => event.type === EventType.DISPATCH_CLAIMED && event.ticketId === 'DP-2')).toBe(false);
+    expect(harness.issues.get('linear-issue-2')?.labels).toContain('shipgraph:queued');
+  });
+
   it('does not reuse an active claim for a different Linear issue UUID', async () => {
     const harness = createHarness();
     const firstIssue = harness.issues.get('linear-issue-1');
@@ -355,6 +391,55 @@ describe('Linear dispatch claim bridge', () => {
     expect(calls).toBe(2);
   });
 
+  it('recovers the same claim on a repeated delivery after a failed handoff', async () => {
+    const harness = createHarness();
+    let calls = 0;
+    const executionIds: string[] = [];
+    const service = serviceFor(harness, (input) => {
+      calls += 1;
+      if (input.executionId !== undefined) executionIds.push(input.executionId);
+      if (calls === 1) throw new Error('simulated handoff interruption');
+      return Promise.resolve(fakeResult());
+    });
+    const request = webhook('linear-issue-1', '23232323-2323-4232-8232-232323232323');
+    const first = await service.handleWebhook(request.body, request.headers);
+    await flushImmediate();
+    const second = await service.handleWebhook(request.body, request.headers);
+    expect(first.outcome).toBe('CLAIMED');
+    expect(second).toMatchObject({ outcome: 'RECOVERED', claimId: first.claimId, ticketId: 'DP-1' });
+    await flushImmediate();
+    expect(calls).toBe(2);
+    expect(executionIds).toHaveLength(2);
+    expect(executionIds[1]).toBe(executionIds[0]);
+    const projectId = createProjectRepository(harness.db).findAll()[0].id;
+    expect(createEventRepository(harness.db).findByProjectId(projectId)
+      .filter((event) => event.type === EventType.DISPATCH_CLAIMED)).toHaveLength(1);
+  });
+
+  it('recovers the same claim on a different delivery after a failed handoff', async () => {
+    const harness = createHarness();
+    let calls = 0;
+    const executionIds: string[] = [];
+    const service = serviceFor(harness, async (input) => {
+      calls += 1;
+      if (input.executionId !== undefined) executionIds.push(input.executionId);
+      if (calls === 1) throw new Error('simulated handoff interruption');
+      return fakeResult();
+    });
+    const first = webhook('linear-issue-1', '24242424-2424-4242-8242-242424242424');
+    const second = webhook('linear-issue-1', '25252525-2525-4252-8252-252525252525');
+    const firstResult = await service.handleWebhook(first.body, first.headers);
+    await flushImmediate();
+    const secondResult = await service.handleWebhook(second.body, second.headers);
+    expect(secondResult).toMatchObject({ outcome: 'RECOVERED', claimId: firstResult.claimId, ticketId: 'DP-1' });
+    await flushImmediate();
+    expect(calls).toBe(2);
+    expect(executionIds[1]).toBe(executionIds[0]);
+    const projectId = createProjectRepository(harness.db).findAll()[0].id;
+    expect(createEventRepository(harness.db).findByProjectId(projectId)
+      .filter((event) => event.type === EventType.DISPATCH_CLAIMED)).toHaveLength(1);
+  });
+
   it('does not relaunch an incomplete claim when an active provider run is present', async () => {
     const harness = createHarness();
     let calls = 0;
@@ -397,13 +482,16 @@ describe('Linear dispatch claim bridge', () => {
       startedAt: now,
     });
 
+    expect((await service.handleWebhook(request.body, request.headers)).outcome).toBe('ALREADY_CLAIMED');
     expect(await service.recoverIncompleteClaims()).toBe(0);
     expect(calls).toBe(1);
   });
 
   it('reconciles an unfinished claim from durable EXEC-001 terminal evidence', async () => {
     const harness = createHarness();
+    let calls = 0;
     const service = serviceFor(harness, async () => {
+      calls += 1;
       throw new Error('simulated handoff interruption');
     });
     const request = webhook('linear-issue-1', '88888888-8888-4888-8888-888888888888');
@@ -445,6 +533,8 @@ describe('Linear dispatch claim bridge', () => {
     expect(await service.recoverIncompleteClaims()).toBe(0);
     expect(createEventRepository(harness.db).findByProjectId(projectId)
       .filter((event) => event.type === EventType.DISPATCH_COMPLETED)).toHaveLength(1);
+    expect((await service.handleWebhook(request.body, request.headers)).outcome).toBe('IGNORED');
+    expect(calls).toBe(1);
   });
 
   it('does not relaunch a claim when its delivery is repeated after completion', async () => {
@@ -539,6 +629,98 @@ describe('Linear dispatch claim bridge', () => {
     expect(JSON.parse(response.body)).toMatchObject({ outcome: 'CLAIMED' });
     await flushImmediate();
     expect(calls).toBe(1);
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
+  it('acknowledges NO_CAPACITY with HTTP 200 and preserves the queue signal', async () => {
+    const harness = createHarness(['DP-1', 'DP-2']);
+    harness.db.prepare('UPDATE tickets SET status = ? WHERE id = ?').run(TicketState.IMPLEMENTING, 'DP-1');
+    let calls = 0;
+    const { server } = createLinearDispatchServer({
+      workspace: harness.workspace,
+      client: { getIssue: async (id) => harness.issues.get(id) },
+      resolveAuthorizedExecution: (issue) => fakeInput(harness.workspace, issue.identifier),
+      execute: async () => {
+        calls += 1;
+        return fakeResult();
+      },
+      webhookSecret: secret,
+      nowMs: () => timestamp,
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => resolve());
+    });
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('test server did not bind');
+    const signed = webhook('linear-issue-2', '26262626-2626-4262-8262-262626262626');
+    const response = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const clientRequest = request({
+        host: '127.0.0.1',
+        port: address.port,
+        path: '/webhooks/linear',
+        method: 'POST',
+        headers: { ...signed.headers, 'content-length': signed.body.byteLength },
+      }, (clientResponse) => {
+        const chunks: Buffer[] = [];
+        clientResponse.on('data', (chunk: Buffer) => chunks.push(chunk));
+        clientResponse.on('end', () => resolve({
+          status: clientResponse.statusCode ?? 0,
+          body: Buffer.concat(chunks).toString('utf8'),
+        }));
+      });
+      clientRequest.on('error', reject);
+      clientRequest.end(signed.body);
+    });
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toMatchObject({ outcome: 'NO_CAPACITY', ticketId: 'DP-2' });
+    expect(calls).toBe(0);
+    expect(harness.issues.get('linear-issue-2')?.labels).toContain('shipgraph:queued');
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  });
+
+  it('returns HTTP 408 for a stalled upload before resetting the connection', async () => {
+    const harness = createHarness();
+    const { server } = createLinearDispatchServer({
+      workspace: harness.workspace,
+      client: { getIssue: async (id) => harness.issues.get(id) },
+      resolveAuthorizedExecution: (issue) => fakeInput(harness.workspace, issue.identifier),
+      execute: async () => fakeResult(),
+      webhookSecret: secret,
+      nowMs: () => timestamp,
+      requestTimeoutMs: 25,
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => resolve());
+    });
+    const address = server.address();
+    if (address === null || typeof address === 'string') throw new Error('test server did not bind');
+    const response = await new Promise<{ status?: number; connection?: string; error?: string }>((resolve) => {
+      let settled = false;
+      const finish = (result: { status?: number; connection?: string; error?: string }): void => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
+      const clientRequest = request({
+        host: '127.0.0.1',
+        port: address.port,
+        path: '/webhooks/linear',
+        method: 'POST',
+        headers: { 'content-length': 3 },
+      }, (clientResponse) => {
+        clientResponse.resume();
+        clientResponse.on('end', () => finish({
+          status: clientResponse.statusCode,
+          connection: clientResponse.headers.connection,
+        }));
+      });
+      clientRequest.on('error', (error: NodeJS.ErrnoException) => finish({ error: error.code ?? error.message }));
+      clientRequest.write('x');
+    });
+    expect(response).toMatchObject({ status: 408, connection: 'close' });
+    expect(response.error).toBeUndefined();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   });
 });

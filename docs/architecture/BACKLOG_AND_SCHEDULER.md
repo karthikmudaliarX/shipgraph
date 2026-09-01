@@ -78,9 +78,9 @@ is restart-safe because it reads the persisted graph and states on every run.
 when their dependencies are still complete, and selects the deterministic
 prefix that fits the configured `execution.maxConcurrentTickets` capacity.
 Persisted eligibility is revalidated on every read, so stale legacy state fails
-closed into the waiting report instead of becoming dispatchable. Active
-lifecycle states from
-`PLANNING` through `MERGED` consume a slot; `QUEUED`, `ELIGIBLE`, exceptional
+closed into the waiting report instead of becoming dispatchable. The v1
+execution-active states `PLANNING`, `IMPLEMENTING`, `VERIFYING`, and
+`REPAIRING` consume a slot; `QUEUED`, `ELIGIBLE`, post-PR states, exceptional
 states, and terminal `COMPLETE`/`CANCELLED` do not. Selection is ordered by
 `critical`, `high`, `medium`, `low`, then stable ticket ID. The command reports
 what could be admitted next; it does not start it. Production work selection,

@@ -10,44 +10,69 @@ export type LinearDispatchServerOptions = LinearDispatchServiceOptions & {
   webhookPath?: string;
   listenHost?: string;
   listenPort?: number;
+  requestTimeoutMs?: number;
 };
 
-function writeJson(response: ServerResponse, status: number, body: unknown): void {
+function writeJson(
+  response: ServerResponse,
+  status: number,
+  body: unknown,
+  closeConnection = false
+): void {
   const encoded = JSON.stringify(body);
   response.writeHead(status, {
     'content-type': 'application/json',
     'content-length': Buffer.byteLength(encoded),
+    ...(closeConnection ? { connection: 'close' } : {}),
   });
   response.end(encoded);
 }
 
-async function readRawBody(request: IncomingMessage): Promise<Buffer> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const body = (async (): Promise<Buffer> => {
+function readRawBody(request: IncomingMessage, timeoutMs: number): Promise<Buffer> {
+  return new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
-    for await (const chunk of request) {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      settle(new LinearWebhookError('Linear webhook request timed out', 408), true);
+    }, timeoutMs);
+
+    const cleanup = (): void => {
+      if (timeout !== undefined) clearTimeout(timeout);
+      request.off('data', onData);
+      request.off('end', onEnd);
+      request.off('error', onError);
+      request.off('aborted', onAborted);
+    };
+    const settle = (error?: Error, pause = false): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (pause) request.pause();
+      if (error !== undefined) {
+        reject(error);
+      } else {
+        resolve(Buffer.concat(chunks, size));
+      }
+    };
+    const onData = (chunk: Buffer | string): void => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       size += buffer.byteLength;
       if (size > LINEAR_WEBHOOK_MAX_BODY_BYTES) {
+        settle(new LinearWebhookError('Linear webhook body exceeds the configured limit', 413));
         request.resume();
-        throw new LinearWebhookError('Linear webhook body exceeds the configured limit', 413);
+        return;
       }
       chunks.push(buffer);
-    }
-    return Buffer.concat(chunks, size);
-  })();
-  const deadline = new Promise<Buffer>((_, reject) => {
-    timeout = setTimeout(() => {
-      request.destroy();
-      reject(new LinearWebhookError('Linear webhook request timed out', 408));
-    }, LINEAR_WEBHOOK_REQUEST_TIMEOUT_MS);
+    };
+    const onEnd = (): void => settle();
+    const onError = (error: Error): void => settle(error);
+    const onAborted = (): void => settle(new Error('Linear webhook request was aborted'));
+    request.on('data', onData);
+    request.once('end', onEnd);
+    request.once('error', onError);
+    request.once('aborted', onAborted);
   });
-  try {
-    return await Promise.race([body, deadline]);
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
-  }
 }
 
 function requestHeaders(request: IncomingMessage): LinearDispatchHeaders {
@@ -75,7 +100,7 @@ export function createLinearDispatchServer(options: LinearDispatchServerOptions)
         return;
       }
       const result = await service.handleWebhook(
-        await readRawBody(request),
+        await readRawBody(request, options.requestTimeoutMs ?? LINEAR_WEBHOOK_REQUEST_TIMEOUT_MS),
         requestHeaders(request)
       );
       writeJson(response, 200, result);
@@ -85,7 +110,12 @@ export function createLinearDispatchServer(options: LinearDispatchServerOptions)
         return;
       }
       if (error instanceof LinearWebhookError) {
-        writeJson(response, error.statusCode, { error: error.message });
+        if (error.statusCode === 408) {
+          response.once('finish', () => {
+            if (!request.destroyed) request.destroy();
+          });
+        }
+        writeJson(response, error.statusCode, { error: error.message }, error.statusCode === 408);
         return;
       }
       writeJson(response, 503, { error: 'Linear dispatch is temporarily unavailable' });

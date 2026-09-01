@@ -230,7 +230,7 @@ export function createLinearDispatchService(options: LinearDispatchServiceOption
       ).get(projectId, ...ACTIVE_CAPACITY_STATES) as { count: number };
       const activeTicketIds = new Set<string>();
       if (activeRow.count >= config.execution.maxConcurrentTickets) {
-        return { kind: 'ignored', reason: 'ShipGraph capacity is exhausted' };
+        return { kind: 'noCapacity', reason: 'ShipGraph capacity is exhausted' };
       }
       for (const claim of activeClaims(projectEvents)) {
         const claimedTicket = ticketRepository.findById(claim.ticketId);
@@ -327,7 +327,8 @@ export function createLinearDispatchService(options: LinearDispatchServiceOption
       createExecutionId: () => claim.payload.executionId,
     };
     setImmediate(() => {
-      void execute(boundInput)
+      void Promise.resolve()
+        .then(() => execute(boundInput))
         .then((result) => completeClaim(claim, result.outcome))
         .catch(() => {
           // An incomplete claim is intentionally left durable for recovery.
@@ -390,6 +391,27 @@ export function createLinearDispatchService(options: LinearDispatchServiceOption
       }
       if (decision.kind === 'ignored') return { outcome: 'IGNORED', reason: decision.reason };
       if (decision.kind === 'existing') {
+        if (inFlight.has(decision.claim.payload.claimId)) {
+          return {
+            outcome: 'ALREADY_CLAIMED',
+            claimId: decision.claim.payload.claimId,
+            ticketId: issue.identifier,
+          };
+        }
+        if (createRunRepository(options.workspace.db).findActiveByTicket(projectId, issue.identifier) !== undefined) {
+          return {
+            outcome: 'ALREADY_CLAIMED',
+            claimId: decision.claim.payload.claimId,
+            ticketId: issue.identifier,
+          };
+        }
+        if (scheduleClaim(decision.claim, input)) {
+          return {
+            outcome: 'RECOVERED',
+            claimId: decision.claim.payload.claimId,
+            ticketId: issue.identifier,
+          };
+        }
         return { outcome: 'ALREADY_CLAIMED', claimId: decision.claim.payload.claimId, ticketId: issue.identifier };
       }
       scheduleClaim(decision.claim, input);

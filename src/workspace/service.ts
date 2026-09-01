@@ -316,8 +316,8 @@ function assertDispatchableAndClaimCapacityInTx(
     );
   }
   // Capacity accounting without double counting:
-  // - activeCapacityStates: persisted ticket states that consume CORE-002
-  //   capacity (PLANNING and beyond).
+  // - activeCapacityStates: persisted v1 execution states that consume CORE-002
+  //   capacity (PLANNING, IMPLEMENTING, VERIFYING, and REPAIRING).
   // - claimedNotTransitioned: workspaces reserved (CREATING/READY/NEEDS_HUMAN)
   //   whose tickets have NOT yet transitioned (still ELIGIBLE/QUEUED) — these
   //   are claims held by concurrent or crashed creators.
