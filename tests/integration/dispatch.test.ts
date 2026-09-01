@@ -291,6 +291,29 @@ describe('Linear dispatch claim bridge', () => {
     expect(calls).toBe(1);
   });
 
+  it('does not relaunch a duplicate while the claimed execution is running', async () => {
+    const harness = createHarness();
+    let releaseExecution: (result: ExecuteTicketResult) => void = () => undefined;
+    const execution = new Promise<ExecuteTicketResult>((resolve) => {
+      releaseExecution = resolve;
+    });
+    let calls = 0;
+    const service = serviceFor(harness, async () => {
+      calls += 1;
+      return execution;
+    });
+    const first = webhook('linear-issue-1', '18181818-1818-4181-8181-181818181818');
+    const second = webhook('linear-issue-1', '19191919-1919-4191-8191-191919191919');
+    expect((await service.handleWebhook(first.body, first.headers)).outcome).toBe('CLAIMED');
+    await flushImmediate();
+    expect(calls).toBe(1);
+    expect((await service.handleWebhook(second.body, second.headers)).outcome).toBe('ALREADY_CLAIMED');
+    expect(calls).toBe(1);
+    releaseExecution(fakeResult());
+    await execution;
+    await flushImmediate();
+  });
+
   it('serializes concurrent deliveries and does not exceed local capacity', async () => {
     const harness = createHarness(['DP-1', 'DP-2']);
     let calls = 0;

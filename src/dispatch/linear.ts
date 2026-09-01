@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const LINEAR_DISPATCH_API_TIMEOUT_MS = 4_000;
+export const LINEAR_DISPATCH_API_TIMEOUT_MS = 2_000;
 
 const linearIssueResponseSchema = z.object({
   data: z.object({

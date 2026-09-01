@@ -12,11 +12,12 @@ import { ACTIVE_CAPACITY_STATES } from '../scheduler/ready.js';
 import { getCurrentProjectId, type WorkspaceServiceOptions } from '../workspace/service.js';
 import {
   parseLinearWebhook,
-  LINEAR_WEBHOOK_REQUEST_TIMEOUT_MS,
   type LinearWebhookPayload,
   LinearWebhookError,
 } from './webhook.js';
 import type { LinearDispatchClient, LinearDispatchIssue } from './linear.js';
+
+const LINEAR_DISPATCH_RESOLUTION_TIMEOUT_MS = 2_000;
 
 export type LinearDispatchHeaders = {
   [name: string]: string | undefined;
@@ -150,7 +151,7 @@ export function createLinearDispatchService(options: LinearDispatchServiceOption
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const resolution = Promise.resolve(options.resolveAuthorizedExecution(issue));
     const deadline = new Promise<undefined>((resolve) => {
-      timeout = setTimeout(() => resolve(undefined), LINEAR_WEBHOOK_REQUEST_TIMEOUT_MS);
+      timeout = setTimeout(() => resolve(undefined), LINEAR_DISPATCH_RESOLUTION_TIMEOUT_MS);
     });
     let input: ExecuteTicketInput | undefined;
     try {
