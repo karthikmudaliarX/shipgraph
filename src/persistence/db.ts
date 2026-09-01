@@ -504,6 +504,20 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE runs ADD COLUMN review_contract_revision TEXT;
     `,
   },
+  {
+    version: 18,
+    name: 'bind_runs_to_execution_contract',
+    up: `
+      -- KAR-12 keeps one generic behavioral-contract binding across every
+      -- provider run without introducing a second run store.
+      ALTER TABLE runs ADD COLUMN execution_id TEXT;
+      ALTER TABLE runs ADD COLUMN contract_digest TEXT;
+      ALTER TABLE runs ADD COLUMN contract_source TEXT;
+      ALTER TABLE runs ADD COLUMN contract_revision TEXT;
+      CREATE INDEX IF NOT EXISTS idx_runs_execution_id
+        ON runs(project_id, execution_id, started_at);
+    `,
+  },
 ];
 
 export function createDatabase(path: string): DbConnection {

@@ -82,6 +82,9 @@ export const githubUsageReceiptSchema = z.object({
   ticketId: identitySchema,
   headSha: shaSchema,
   contractDigest: z.string().regex(/^[0-9a-f]{64}$/),
+  // Added by KAR-12; optional here so older durable receipt evidence remains
+  // readable. New evidence includes the source.
+  contractSource: z.string().min(1).max(4_096).optional(),
   contractRevision: identitySchema,
   executionRunId: identitySchema,
   routingMode: z.union([modelRoutingModeSchema, z.literal('unknown')]),
@@ -102,6 +105,9 @@ export const githubUsageReceiptEvidenceSchema = z.object({
   commentId: identitySchema,
   commentUrl: z.string().url().max(2_048).optional(),
   contractDigest: z.string().regex(/^[0-9a-f]{64}$/),
+  // Added by KAR-12; optional here so older durable receipt evidence remains
+  // readable. New evidence includes the source.
+  contractSource: z.string().min(1).max(4_096).optional(),
   contractRevision: identitySchema,
   executionRunId: identitySchema,
   recordedAt: timestampSchema,

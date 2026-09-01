@@ -14,7 +14,7 @@ import type { ModelRoutingRequest } from '../domain/model-provider.js';
 import { TicketState } from '../core/state-machine/state.js';
 import { redactSensitiveText } from '../adapters/agent/safety.js';
 import { createAgentProcessRunner } from '../adapters/agent/process.js';
-import { EventType } from '../events/event.js';
+import { EventType, type ShipgraphEvent } from '../events/event.js';
 import { createGitRunner, isStrictlyClean, resolveCommitSha } from '../git/service.js';
 import { ModelRoutingService, type RoutedAgentTaskResult } from '../model/service.js';
 import {
@@ -32,6 +32,10 @@ import {
   type PrePrReviewResult,
 } from '../review/service.js';
 import type { AgentSafetyPolicy } from '../execution/service.js';
+import type {
+  BehavioralTicketContract,
+  ExecutionContractProvenance,
+} from '../domain/execution.js';
 import {
   getCurrentProjectId,
   getVerifiedWorkspaceForExecution,
@@ -70,6 +74,9 @@ export type PrePrRepairInput = {
   signal?: AbortSignal;
   safety?: AgentSafetyPolicy;
   verificationRunner?: RepairVerificationRunner;
+  contract?: BehavioralTicketContract;
+  contractProvenance?: ExecutionContractProvenance;
+  executionId?: string;
 };
 
 export type PrePrRepairResult = {
@@ -100,11 +107,17 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
   const effectiveLimit = Math.min(configuredLimit, input.safety?.maxAttempts ?? configuredLimit);
   const repairEvents = createEventRepository(input.workspace.db)
     .findByTicketId(input.ticketId)
-    .filter((event) => event.type === EventType.REPAIR_ATTEMPT_RECORDED);
+    .filter((event): event is Extract<ShipgraphEvent, { type: typeof EventType.REPAIR_ATTEMPT_RECORDED }> =>
+      event.type === EventType.REPAIR_ATTEMPT_RECORDED &&
+      (input.executionId === undefined || event.payload.executionId === input.executionId)
+    );
   const evidencedAttempts = repairEvents
     .reduce((maximum, event) => Math.max(maximum, event.payload.attempt), 0);
   const runRepository = createRunRepository(input.workspace.db);
-  const repairRuns = runRepository.findByTicketId(input.ticketId).filter((run) => run.task === 'repair');
+  const repairRuns = runRepository.findByTicketId(input.ticketId).filter((run) =>
+    run.task === 'repair' &&
+    (input.executionId === undefined || run.executionId === input.executionId)
+  );
   // A logical attempt can own multiple provider runs while MODEL-001 falls
   // back. Only KAR-10 evidence counts completed logical attempts.
   const attemptsUsed = evidencedAttempts;
@@ -125,6 +138,9 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
       }
       const evidence: RepairAttemptEvidence = {
         ticketId: input.ticketId,
+        ...(input.executionId === undefined || input.contractProvenance === undefined
+          ? {}
+          : { executionId: input.executionId, ...input.contractProvenance }),
         attempt: interruptedAttempt,
         candidateSha: evidenceSha,
         blockers: [],
@@ -162,6 +178,9 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
       }
       const evidence: RepairAttemptEvidence = {
         ticketId: input.ticketId,
+        ...(input.executionId === undefined || input.contractProvenance === undefined
+          ? {}
+          : { executionId: input.executionId, ...input.contractProvenance }),
         attempt: interruptedAttempt,
         candidateSha: terminalWithoutEvidence.baseSha,
         ...(resultingSha === undefined ? {} : { resultingSha }),
@@ -326,7 +345,8 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
       headSha,
       blockers,
       ticket.verification.commands,
-      ticket.scope
+      ticket.scope,
+      input.contract
     );
     if (Buffer.byteLength(instructions, 'utf8') > AGENT_INSTRUCTIONS_LIMIT_BYTES) {
       return needsHuman(
@@ -357,6 +377,8 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
             attempt,
             maxTimeoutMs: input.safety?.maxTimeoutMs ?? timeoutMs,
           },
+          ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
+          ...(input.contractProvenance === undefined ? {} : input.contractProvenance),
         }
       );
     } catch (error) {
@@ -663,6 +685,9 @@ async function runReviews(input: PrePrRepairInput, requestId: string): Promise<P
     ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
     safety: reviewSafety,
+    ...(input.contract === undefined ? {} : { contract: input.contract }),
+    ...(input.contractProvenance === undefined ? {} : { contractProvenance: input.contractProvenance }),
+    ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
   });
 }
 
@@ -672,7 +697,10 @@ function remainingStageSafety(input: PrePrRepairInput, upcomingRuns: number): Ag
   const eligibleRunIds = new Set(
     createRunRepository(input.workspace.db)
       .findByTicketId(input.ticketId)
-      .filter((run) => run.task === 'review' || run.task === 'repair')
+      .filter((run) =>
+        (run.task === 'review' || run.task === 'repair') &&
+        (input.executionId === undefined || run.executionId === input.executionId)
+      )
       .map((run) => run.id)
   );
   const usage = input.modelService.listUsage().filter((entry) => eligibleRunIds.has(entry.runId));
@@ -711,7 +739,13 @@ async function currentOrFreshReviews(
   requestId: string
 ): Promise<PrePrReviewResult> {
   await assertVerificationHead(input.workspace, input.ticketId, headSha);
-  const current = await listCurrentPrePrReviewEvidence(input.workspace, input.ticketId);
+  const current = await listCurrentPrePrReviewEvidence(
+    input.workspace,
+    input.ticketId,
+    input.contract,
+    input.contractProvenance,
+    input.executionId
+  );
   const contractRun = [...current].reverse().find((run) => run.reviewType === 'contract');
   const engineeringRun = [...current].reverse().find((run) => run.reviewType === 'engineering');
   if (contractRun === undefined && engineeringRun === undefined) {
@@ -930,7 +964,8 @@ function composeRepairInstructions(
   candidateSha: string,
   blockers: readonly RepairBlocker[],
   verificationCommands: readonly string[],
-  scope: { allowedPaths: readonly string[]; forbiddenPaths: readonly string[] }
+  scope: { allowedPaths: readonly string[]; forbiddenPaths: readonly string[] },
+  contract?: BehavioralTicketContract
 ): string {
   const untrustedEvidence = JSON.stringify({ blockers, verificationCommands })
     .replace(/</gu, '\\u003c')
@@ -944,6 +979,10 @@ function composeRepairInstructions(
     untrustedEvidence,
     '</untrusted_blocker_evidence>',
     `Authorized ticket path scope (trusted): ${JSON.stringify(scope)}`,
+    ...(contract === undefined ? [] : [
+      'Behavioral Ticket Contract (trusted authorization; do not replace it with legacy title/description):',
+      JSON.stringify(contract),
+    ]),
     'Fix only these blockers. Do not reinterpret the ticket, perform cleanup, refactor adjacent code, add subsystems, or broaden product scope.',
     'If a blocker materially requires broader scope, stop with NEEDS_HUMAN and report scope_growth.',
     'Do not include reviewer reasoning or implementation transcripts in your response.',
@@ -1048,9 +1087,13 @@ async function isClean(workspace: WorkspaceServiceOptions, ticketId: string): Pr
 }
 
 function recordAttempt(input: PrePrRepairInput, evidence: RepairAttemptEvidence): void {
-  const durableEvidence: RepairAttemptEvidence = evidence.reason === undefined
-    ? evidence
-    : { ...evidence, reason: bounded(evidence.reason, 2_048) };
+  const durableEvidence: RepairAttemptEvidence = {
+    ...evidence,
+    ...(input.executionId === undefined || input.contractProvenance === undefined
+      ? {}
+      : { executionId: input.executionId, ...input.contractProvenance }),
+    ...(evidence.reason === undefined ? {} : { reason: bounded(evidence.reason, 2_048) }),
+  };
   createEventRepository(input.workspace.db).append({
     id: randomUUID(),
     timestamp: new Date().toISOString(),

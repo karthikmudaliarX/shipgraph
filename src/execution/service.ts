@@ -97,6 +97,11 @@ export type AgentTaskInput = {
   signal?: AbortSignal;
   /** Optional per-run limits and explicit safety signals; no ticket schema is implied. */
   safety?: AgentSafetyPolicy;
+  /** KAR-12 binds every provider run to one behavioral contract revision. */
+  executionId?: string;
+  contractDigest?: string;
+  contractSource?: string;
+  contractRevision?: string;
 };
 
 export type AgentTaskResult = {
@@ -124,6 +129,10 @@ export type PrePrReviewProvenance = {
   reviewContractDigest?: string;
   reviewContractSource?: string;
   reviewContractRevision?: string;
+  executionId?: string;
+  contractDigest?: string;
+  contractSource?: string;
+  contractRevision?: string;
 };
 
 type ExecutionTaskInput = AgentTaskInput & Partial<PrePrReviewProvenance>;
@@ -560,6 +569,15 @@ export async function reconcileAgentRun(
   return { released: reconcile(), run };
 }
 
+// KAR-12's single-ticket composition entry point is kept alongside the
+// existing AGENT-001 execution API for callers that already depend on this
+// module; the implementation lives in its narrow composition module.
+export { executeTicket } from './ticket.js';
+export type {
+  ExecuteTicketInput,
+  ExecuteTicketResult,
+} from './ticket.js';
+
 function validateTaskInput(
   options: AgentExecutionServiceOptions,
   input: ExecutionTaskInput
@@ -575,6 +593,10 @@ function validateTaskInput(
   reviewContractDigest?: string;
   reviewContractSource?: string;
   reviewContractRevision?: string;
+  executionId?: string;
+  contractDigest?: string;
+  contractSource?: string;
+  contractRevision?: string;
   safety: AgentSafetyPolicy;
 } {
   if (!agentProviderSchema.safeParse(options.adapter.provider).success) {
@@ -623,6 +645,21 @@ function validateTaskInput(
   if (input.reviewContractDigest !== undefined && !/^[0-9a-f]{64}$/u.test(input.reviewContractDigest)) {
     throw new Error('KAR-11 contract digest must be a SHA-256 hex digest');
   }
+  const executionContractFields = [
+    input.executionId,
+    input.contractDigest,
+    input.contractSource,
+    input.contractRevision,
+  ];
+  if (executionContractFields.some((field) => field !== undefined) && executionContractFields.some((field) => field === undefined)) {
+    throw new Error('KAR-12 execution contract provenance requires execution ID, digest, source, and revision together');
+  }
+  if (input.executionId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(input.executionId)) {
+    throw new Error('KAR-12 execution ID is invalid');
+  }
+  if (input.contractDigest !== undefined && !/^[0-9a-f]{64}$/u.test(input.contractDigest)) {
+    throw new Error('KAR-12 contract digest must be a SHA-256 hex digest');
+  }
   if (!options.adapter.capabilities.includes(MODEL_TASK_TO_AGENT_CAPABILITY[task])) {
     throw new Error(
       `AGENT-001 adapter for ${options.adapter.provider} does not support MODEL task ${task}`
@@ -660,6 +697,10 @@ function validateTaskInput(
     ...(input.reviewContractDigest === undefined ? {} : { reviewContractDigest: input.reviewContractDigest }),
     ...(input.reviewContractSource === undefined ? {} : { reviewContractSource: input.reviewContractSource }),
     ...(input.reviewContractRevision === undefined ? {} : { reviewContractRevision: input.reviewContractRevision }),
+    ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
+    ...(input.contractDigest === undefined ? {} : { contractDigest: input.contractDigest }),
+    ...(input.contractSource === undefined ? {} : { contractSource: input.contractSource }),
+    ...(input.contractRevision === undefined ? {} : { contractRevision: input.contractRevision }),
     safety: safetyPolicyWithTicketRisk(
       options,
       input.ticketId,
@@ -1214,6 +1255,10 @@ function buildAgentRun(
     reviewContractDigest?: string;
     reviewContractSource?: string;
     reviewContractRevision?: string;
+    executionId?: string;
+    contractDigest?: string;
+    contractSource?: string;
+    contractRevision?: string;
     safety: AgentSafetyPolicy;
   },
   runId: string,
@@ -1237,6 +1282,10 @@ function buildAgentRun(
     ...(normalized.reviewContractDigest === undefined ? {} : { reviewContractDigest: normalized.reviewContractDigest }),
     ...(normalized.reviewContractSource === undefined ? {} : { reviewContractSource: normalized.reviewContractSource }),
     ...(normalized.reviewContractRevision === undefined ? {} : { reviewContractRevision: normalized.reviewContractRevision }),
+    ...(normalized.executionId === undefined ? {} : { executionId: normalized.executionId }),
+    ...(normalized.contractDigest === undefined ? {} : { contractDigest: normalized.contractDigest }),
+    ...(normalized.contractSource === undefined ? {} : { contractSource: normalized.contractSource }),
+    ...(normalized.contractRevision === undefined ? {} : { contractRevision: normalized.contractRevision }),
     task: normalized.task,
     model: normalized.model,
     createdAt,
@@ -1271,6 +1320,10 @@ function loadPreparedRun(
     reviewContractDigest?: string;
     reviewContractSource?: string;
     reviewContractRevision?: string;
+    executionId?: string;
+    contractDigest?: string;
+    contractSource?: string;
+    contractRevision?: string;
     safety: AgentSafetyPolicy;
   }
 ): AgentRunRecord {
@@ -1303,6 +1356,10 @@ function assertPreparedRunMatchesRequest(
     reviewContractDigest?: string;
     reviewContractSource?: string;
     reviewContractRevision?: string;
+    executionId?: string;
+    contractDigest?: string;
+    contractSource?: string;
+    contractRevision?: string;
     safety: AgentSafetyPolicy;
   }
 ): void {
@@ -1334,6 +1391,14 @@ function assertPreparedRunMatchesRequest(
     run.reviewContractRevision !== normalized.reviewContractRevision
   ) {
     throw new Error(`Prepared agent run ${run.id} does not match the ticket contract provenance`);
+  }
+  if (
+    run.executionId !== normalized.executionId ||
+    run.contractDigest !== normalized.contractDigest ||
+    run.contractSource !== normalized.contractSource ||
+    run.contractRevision !== normalized.contractRevision
+  ) {
+    throw new Error(`Prepared agent run ${run.id} does not match the KAR-12 execution contract`);
   }
   if (run.instructionsSha256 !== instructionHash || run.timeoutMs !== normalized.timeoutMs) {
     throw new Error(`Prepared agent run ${run.id} does not match the execution request`);
@@ -1425,6 +1490,10 @@ function persistCreatedRun(
         ...(run.reviewContractDigest === undefined ? {} : { reviewContractDigest: run.reviewContractDigest }),
         ...(run.reviewContractSource === undefined ? {} : { reviewContractSource: run.reviewContractSource }),
         ...(run.reviewContractRevision === undefined ? {} : { reviewContractRevision: run.reviewContractRevision }),
+        ...(run.executionId === undefined ? {} : { executionId: run.executionId }),
+        ...(run.contractDigest === undefined ? {} : { contractDigest: run.contractDigest }),
+        ...(run.contractSource === undefined ? {} : { contractSource: run.contractSource }),
+        ...(run.contractRevision === undefined ? {} : { contractRevision: run.contractRevision }),
         safetyPolicySha256: run.safetyPolicySha256,
         timeoutMs: run.timeoutMs,
         instructionsSha256: run.instructionsSha256,
@@ -1548,6 +1617,10 @@ function finalizeRun(
         ...(durableUpdated.reviewContractDigest === undefined ? {} : { reviewContractDigest: durableUpdated.reviewContractDigest }),
         ...(durableUpdated.reviewContractSource === undefined ? {} : { reviewContractSource: durableUpdated.reviewContractSource }),
         ...(durableUpdated.reviewContractRevision === undefined ? {} : { reviewContractRevision: durableUpdated.reviewContractRevision }),
+        ...(durableUpdated.executionId === undefined ? {} : { executionId: durableUpdated.executionId }),
+        ...(durableUpdated.contractDigest === undefined ? {} : { contractDigest: durableUpdated.contractDigest }),
+        ...(durableUpdated.contractSource === undefined ? {} : { contractSource: durableUpdated.contractSource }),
+        ...(durableUpdated.contractRevision === undefined ? {} : { contractRevision: durableUpdated.contractRevision }),
         ...(durableUpdated.reviewResult === undefined ? {} : { reviewResult: durableUpdated.reviewResult }),
         ...(durableUpdated.reviewFindings === undefined ? {} : { reviewFindings: durableUpdated.reviewFindings }),
       },
@@ -1665,6 +1738,10 @@ function markRunNeedsHuman(
         cancelled: false,
         failureCategory: durableUpdated.failureCategory,
         failureReason: durableUpdated.failureReason,
+        ...(durableUpdated.executionId === undefined ? {} : { executionId: durableUpdated.executionId }),
+        ...(durableUpdated.contractDigest === undefined ? {} : { contractDigest: durableUpdated.contractDigest }),
+        ...(durableUpdated.contractSource === undefined ? {} : { contractSource: durableUpdated.contractSource }),
+        ...(durableUpdated.contractRevision === undefined ? {} : { contractRevision: durableUpdated.contractRevision }),
       },
     });
     if (releaseCapacity) releaseActiveModelReservation(options, durableUpdated, timestamp);

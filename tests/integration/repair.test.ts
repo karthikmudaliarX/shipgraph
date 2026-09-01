@@ -331,12 +331,25 @@ describe('KAR-10 bounded pre-PR repair', () => {
       next: TicketState.REPAIRING,
       reason: 'simulate interrupted active repair',
     });
-    const result = await runPrePrRepair(input(value, sequenceRunner([0])));
+    const result = await runPrePrRepair({
+      ...input(value, sequenceRunner([0])),
+      executionId: 'execution-repair',
+      contractProvenance: {
+        contractDigest: 'a'.repeat(64),
+        contractSource: 'linear:REP-001',
+        contractRevision: 'v1',
+      },
+    });
     expect(result).toMatchObject({ status: 'NEEDS_HUMAN', attempts: 1 });
     expect(value.adapter.requests).toHaveLength(2);
-    expect(createEventRepository(value.db).findByTicketId(ticket.id)
-      .some((event) => event.type === EventType.REPAIR_ATTEMPT_RECORDED && event.runId === row.id))
-      .toBe(true);
+    const attemptEvent = createEventRepository(value.db).findByTicketId(ticket.id)
+      .find((event) => event.type === EventType.REPAIR_ATTEMPT_RECORDED && event.runId === row.id);
+    expect(attemptEvent?.payload).toMatchObject({
+      executionId: 'execution-repair',
+      contractDigest: 'a'.repeat(64),
+      contractSource: 'linear:REP-001',
+      contractRevision: 'v1',
+    });
   });
 
   it('does not accept a terminal repair commit whose boundary evidence was interrupted', async () => {
