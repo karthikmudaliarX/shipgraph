@@ -19,10 +19,10 @@ deletion cannot be atomic with the worktree registry. `git reset --hard`,
 `git clean -fd`,
 `git stash`, and force-deletion of user changes are never executed.
 
-## Pipeline
+## Single-ticket admission pipeline
 
 ```
-eligible ticket
+explicitly authorized eligible ticket
       ↓
 persistent reservation (CREATING)
       ↓
@@ -43,7 +43,7 @@ Branches move; commits do not. WORK-001 resolves the configured local default
 branch to an exact commit SHA at creation time and persists that SHA. Before a
 workspace may be marked READY, the live worktree HEAD must equal the recorded
 base SHA. No remote synchronization happens in WORK-001 — no fetch, no pull.
-GH-001 will later own remote policy.
+KAR-8 owns the later exact-head GitHub PR handoff.
 
 ## Branch ownership
 
@@ -75,7 +75,7 @@ Git operations and database writes cannot share one transaction. WORK-001 is
 explicit about this:
 
 1. validate project/repository/ticket
-2. prove dispatchability (CORE-002 scheduler logic)
+2. prove local eligibility/admission (CORE-002 logic)
 3. resolve exact base SHA
 4. derive branch/path deterministically
 5. reserve persistently as `CREATING` (+ audit event, single commit)

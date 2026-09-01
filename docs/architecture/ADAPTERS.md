@@ -129,8 +129,9 @@ CREATED run and request ID.
 
 The AGENT-001 execution command accepts an explicit provider/model and can use
 the bounded Codex, Grok or Antigravity adapters as well as OpenCode. MODEL-001
-does not dispatch Linear work or turn these adapters into post-KAR-6 PR, CI,
-merge or scheduler automation.
+does not dispatch Linear work, choose successor work, or turn these adapters
+into post-PR CI, merge, or Scheduler automation. KAR-12 composes the pre-PR
+stages, and KAR-8 owns the single GitHub PR/receipt handoff.
 
 ## GitHostAdapter
 
@@ -143,11 +144,10 @@ export interface GitHostAdapter {
 }
 ```
 
-The first future implementation will be GitHub (GH-001). It will handle:
+The current GitHub (KAR-8 / GH-001) implementation handles:
 
-- pull-request creation and updates
-- CI status monitoring
-- review recording
-- merge operations
+- the exact-head pre-PR handoff
+- pull-request creation and one compact usage receipt
 
-CORE-001 defines the interface only.
+Post-PR CI monitoring, review management, and merge operations remain outside
+ShipGraph's v1 inner loop.

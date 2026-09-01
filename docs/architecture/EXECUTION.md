@@ -12,10 +12,12 @@ capability-probed provider adapter
 one verified WORK-001 worktree
 ```
 
-ShipGraph is given one ticket, one existing READY workspace, one explicit model
-and one bounded instruction string. It does not choose the next work item,
-select a model, poll Linear, create a pull request, review changes, repair a
-branch or merge code.
+ChatGPT Scheduler authorizes one Linear issue; ShipGraph claims exactly that
+issue and runs it in one existing READY workspace. EXEC-001 then composes the
+explicit model/provider route, implementation, verification, Contract Review,
+Engineering Review, bounded repair, Pre-PR Readiness, and KAR-8 GitHub handoff.
+ShipGraph does not choose the next work item, own global scheduling, poll
+Linear, supervise post-PR CI, merge code, or select successor work.
 
 ## Isolation
 
@@ -106,10 +108,10 @@ ownership cannot be proven; usage finalization cannot release an active run's
 slot by itself.
 Usage finalization remains append-only and idempotent for capacity release.
 Unknown quota and usage values remain unknown.
-The AGENT-001 command remains explicit-provider execution; MODEL-001 resolves an
-opaque routed target and executes it only through its own durable bridge. It does
-not automatically dispatch a ticket, replace that execution contract, or add
-post-execution PR/review/release automation.
+The low-level AGENT-001 command remains explicit-provider execution; MODEL-001
+resolves an opaque routed target and executes it only through its durable bridge.
+KAR-12 is the separate single-ticket composition boundary that invokes the
+pre-PR review, repair, readiness, and GitHub handoff stages.
 
 ## Known limitations
 
@@ -122,6 +124,7 @@ post-execution PR/review/release automation.
   prepares a CREATED AGENT run before binding the MODEL-001 route; MODEL-001
   does not automatically dispatch routed choices or add scheduler/Linear
   orchestration.
-- A terminal run describes the bounded provider execution only. The ticket
-  remains in the existing implementation lifecycle for later verification,
-  review, repair, release and merge tickets to advance.
+- A terminal run describes one bounded provider execution. KAR-12 evaluates the
+  resulting candidate through pre-PR verification, reviews, repair, readiness,
+  and the GitHub handoff; post-PR waiting, merge, and successor selection remain
+  outside ShipGraph.

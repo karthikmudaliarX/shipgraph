@@ -1,7 +1,9 @@
-# Approved backlog and eligibility scheduler
+# Backlog validation and admission diagnostics
 
-CORE-002 adds a persistent, deterministic view of approved work without
-starting any agent or creating any worktree.
+CORE-002 provides persistent, deterministic backlog validation and eligibility
+information without starting an agent or creating a worktree. It is not the
+production outer Scheduler: ChatGPT Scheduler chooses one eligible Linear issue
+and authorizes it for ShipGraph.
 
 ```text
 shipgraph.backlog.yml
@@ -16,7 +18,7 @@ SQLite persisted tickets and dependencies
 runtime ticket states and append-only events
         |
         v
-dependency completion
+dependency completion and eligibility
         |
         v
 QUEUED -> ELIGIBLE reconciliation
@@ -25,13 +27,14 @@ QUEUED -> ELIGIBLE reconciliation
 capacity calculation
         |
         v
-deterministic dispatchable candidates
+deterministic diagnostic/admission candidates
 ```
 
 ## Approved work is separate from runtime state
 
-`shipgraph.backlog.yml` is repository-owned and describes the static contract
-for work that has been approved for execution. Its ticket definitions contain
+For local backlog use, `shipgraph.backlog.yml` is repository-owned and describes
+the static contract for work that has been approved for execution. Its ticket
+definitions contain
 the title, scope, acceptance criteria, verification, risk, agent preference,
 release policy, priority, and dependencies. It deliberately contains no
 mutable lifecycle state.
@@ -44,7 +47,8 @@ a fail-closed mismatch, not a deletion operation.
 Approval is tracked per ticket in SQLite as part of the sync transaction. The
 eligibility and ready paths read only tickets marked as belonging to the
 approved backlog; direct persistence callers cannot skip the initial `QUEUED`
-boundary or make unapproved work dispatchable.
+boundary or make unapproved work dispatchable. This local admission information
+does not authorize ShipGraph to scan the backlog and launch work autonomously.
 
 Agents may suggest work, but only approved backlog entries are executable.
 Suggestions are not copied into `shipgraph.backlog.yml` automatically.
@@ -74,8 +78,10 @@ is restart-safe because it reads the persisted graph and states on every run.
 when their dependencies are still complete, and selects the deterministic
 prefix that fits the configured `execution.maxConcurrentTickets` capacity.
 Persisted eligibility is revalidated on every read, so stale legacy state fails
-closed into the waiting report instead of becoming dispatchable. Active build/release states from
+closed into the waiting report instead of becoming dispatchable. Active
+lifecycle states from
 `PLANNING` through `MERGED` consume a slot; `QUEUED`, `ELIGIBLE`, exceptional
 states, and terminal `COMPLETE`/`CANCELLED` do not. Selection is ordered by
 `critical`, `high`, `medium`, `low`, then stable ticket ID. The command reports
-what could run next; it does not start it.
+what could be admitted next; it does not start it. Production work selection,
+global concurrency, and later progression remain Scheduler-owned.
