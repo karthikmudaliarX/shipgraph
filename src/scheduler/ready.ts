@@ -7,20 +7,12 @@ import {
 } from './eligibility.js';
 import { compareStableStrings } from '../utils/sorting.js';
 
-/** States that represent active build/release work and consume capacity. */
+/** States that represent active v1 execution work and consume capacity. */
 export const ACTIVE_CAPACITY_STATES: readonly TicketStateValue[] = [
   TicketState.PLANNING,
   TicketState.IMPLEMENTING,
   TicketState.VERIFYING,
-  TicketState.PR_OPEN,
-  TicketState.CI_WAIT,
-  TicketState.REVIEWING,
-  TicketState.CHANGES_REQUIRED,
   TicketState.REPAIRING,
-  TicketState.RELEASE_READY,
-  TicketState.AWAITING_APPROVAL,
-  TicketState.MERGING,
-  TicketState.MERGED,
 ];
 
 export type ReadyTicket = {

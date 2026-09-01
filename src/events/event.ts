@@ -18,6 +18,7 @@ import {
 } from '../domain/github.js';
 import {
   executionContractBoundPayloadSchema,
+  executionOutcomeSchema,
   executionStartedPayloadSchema,
   executionTerminalPayloadSchema,
 } from '../domain/execution.js';
@@ -42,6 +43,8 @@ export const EVENT_TYPES = [
   'execution.contract_bound',
   'execution.started',
   'execution.terminal',
+  'dispatch.claimed',
+  'dispatch.completed',
 ] as const;
 
 export const EventType = {
@@ -63,6 +66,8 @@ export const EventType = {
   EXECUTION_CONTRACT_BOUND: EVENT_TYPES[15],
   EXECUTION_STARTED: EVENT_TYPES[16],
   EXECUTION_TERMINAL: EVENT_TYPES[17],
+  DISPATCH_CLAIMED: EVENT_TYPES[18],
+  DISPATCH_COMPLETED: EVENT_TYPES[19],
 } as const;
 
 export type EventTypeValue = (typeof EVENT_TYPES)[number];
@@ -190,6 +195,24 @@ export const workspaceFailedPayloadSchema = z.object({
   escalatedToHuman: z.boolean().optional(),
 }).strict();
 
+export const dispatchClaimedPayloadSchema = z.object({
+  claimId: z.string().uuid(),
+  executionId: identitySchema,
+  ticketId: identitySchema,
+  linearIssueId: identitySchema,
+  linearIdentifier: identitySchema,
+  linearDeliveryId: z.string().uuid(),
+  linearProjectId: identitySchema,
+  claimedAt: timestampSchema,
+}).strict();
+
+export const dispatchCompletedPayloadSchema = z.object({
+  claimId: z.string().uuid(),
+  ticketId: identitySchema,
+  outcome: executionOutcomeSchema,
+  completedAt: timestampSchema,
+}).strict();
+
 const baseEnvelopeShape = {
   id: z.string().uuid(),
   sequence: z.number().int().positive(),
@@ -308,6 +331,18 @@ const eventUnionSchema = z.discriminatedUnion('type', [
     type: z.literal(EventType.EXECUTION_TERMINAL),
     payload: executionTerminalPayloadSchema,
   }).strict(),
+  z.object({
+    ...baseEnvelopeShape,
+    ticketId: identitySchema,
+    type: z.literal(EventType.DISPATCH_CLAIMED),
+    payload: dispatchClaimedPayloadSchema,
+  }).strict(),
+  z.object({
+    ...baseEnvelopeShape,
+    ticketId: identitySchema,
+    type: z.literal(EventType.DISPATCH_COMPLETED),
+    payload: dispatchCompletedPayloadSchema,
+  }).strict(),
 ]);
 
 /** Runtime-typed event union with duplicated envelope identities kept consistent. */
@@ -382,6 +417,8 @@ export type GithubUsageReceiptRecordedPayload = z.infer<typeof githubUsageReceip
 export type ExecutionContractBoundPayload = z.infer<typeof executionContractBoundPayloadSchema>;
 export type ExecutionStartedPayload = z.infer<typeof executionStartedPayloadSchema>;
 export type ExecutionTerminalPayload = z.infer<typeof executionTerminalPayloadSchema>;
+export type DispatchClaimedPayload = z.infer<typeof dispatchClaimedPayloadSchema>;
+export type DispatchCompletedPayload = z.infer<typeof dispatchCompletedPayloadSchema>;
 
 export function isValidStateValue(value: string): value is TicketStateValue {
   return ticketStateSchema.safeParse(value).success;

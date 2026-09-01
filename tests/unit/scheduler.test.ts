@@ -138,6 +138,22 @@ describe('eligibility and deterministic ready selection', () => {
     }
   });
 
+  it('does not count post-PR states as v1 execution capacity', () => {
+    for (const state of [
+      TicketState.PR_OPEN,
+      TicketState.CI_WAIT,
+      TicketState.REVIEWING,
+      TicketState.CHANGES_REQUIRED,
+      TicketState.RELEASE_READY,
+      TicketState.AWAITING_APPROVAL,
+      TicketState.MERGING,
+      TicketState.MERGED,
+    ]) {
+      expect(ACTIVE_CAPACITY_STATES).not.toContain(state);
+      expect(calculateReady([ticket(`POST-PR-${state}`, state)], 1).capacity.active).toBe(0);
+    }
+  });
+
   it('reports zero available slots without selecting work', () => {
     const report = calculateReady([
       ticket('ACTIVE-001', TicketState.IMPLEMENTING),

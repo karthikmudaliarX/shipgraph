@@ -103,12 +103,31 @@ export const agentsConfigSchema = z.object({
     .default(['correctness']),
 }).strict();
 
+export const linearDispatchConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  linearProjectId: z.string().min(1).max(256).optional(),
+  linearTeamId: z.string().min(1).max(256).optional(),
+  queueLabel: z.string().min(1).max(128).default('shipgraph:queued'),
+  webhookPath: z.string().regex(/^\/[A-Za-z0-9._~/-]+$/u).default('/webhooks/linear'),
+  listenHost: z.string().min(1).max(256).default('127.0.0.1'),
+  listenPort: z.number().int().min(1).max(65_535).default(8080),
+}).strict().superRefine((dispatch, context) => {
+  if (dispatch.enabled && dispatch.linearProjectId === undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['linearProjectId'],
+      message: 'enabled Linear dispatch requires a configured Linear project ID',
+    });
+  }
+});
+
 export const shipgraphConfigSchema = z.object({
   version: configVersionSchema,
   project: projectConfigSchema,
   execution: executionConfigSchema.default({}),
   release: releaseConfigSchema.default({}),
   agents: agentsConfigSchema.default({}),
+  dispatch: linearDispatchConfigSchema.optional(),
   providers: modelProvidersConfigSchema.optional(),
   routing: routingConfigSchema.optional(),
 }).strict();
@@ -118,6 +137,7 @@ export type ProjectConfig = z.infer<typeof projectConfigSchema>;
 export type ExecutionConfig = z.infer<typeof executionConfigSchema>;
 export type ReleaseConfig = z.infer<typeof releaseConfigSchema>;
 export type AgentsConfig = z.infer<typeof agentsConfigSchema>;
+export type LinearDispatchConfig = z.infer<typeof linearDispatchConfigSchema>;
 export type ModelProvidersConfig = z.infer<typeof modelProvidersConfigSchema>;
 export type RoutingConfig = z.infer<typeof routingConfigSchema>;
 export type { ModelProviderConfiguration };

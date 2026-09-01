@@ -49,6 +49,8 @@ export type ExecuteTicketInput = {
   workspace: WorkspaceServiceOptions;
   modelService: ModelRoutingService;
   routing: Omit<ModelRoutingRequest, 'task' | 'runId'>;
+  /** Optional durable execution identity supplied by an authorized dispatch claim. */
+  executionId?: string;
   executionPolicy?: AgentSafetyPolicy;
   timeoutMs?: number;
   signal?: AbortSignal;
@@ -468,6 +470,17 @@ function bindExecution(
       };
     }
     if (matchingRevision !== undefined) {
+      if (
+        input.executionId !== undefined &&
+        matchingRevision.payload.executionId !== input.executionId
+      ) {
+        return {
+          executionId: input.executionId,
+          contract,
+          provenance,
+          conflictReason: 'KAR-13 dispatch claim does not match the existing EXEC-001 contract binding',
+        };
+      }
       return {
         executionId: matchingRevision.payload.executionId,
         contract: matchingRevision.payload.contract,
@@ -478,7 +491,7 @@ function bindExecution(
         },
       };
     }
-    const executionId = input.createExecutionId?.() ?? randomUUID().replaceAll('-', '');
+    const executionId = input.executionId ?? input.createExecutionId?.() ?? randomUUID().replaceAll('-', '');
     const payload = executionContractBoundPayloadSchema.parse({
       executionId,
       ticketId: input.issueId,
