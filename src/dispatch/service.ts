@@ -12,6 +12,7 @@ import { ACTIVE_CAPACITY_STATES } from '../scheduler/ready.js';
 import { getCurrentProjectId, type WorkspaceServiceOptions } from '../workspace/service.js';
 import {
   parseLinearWebhook,
+  LINEAR_WEBHOOK_REQUEST_TIMEOUT_MS,
   type LinearWebhookPayload,
   LinearWebhookError,
 } from './webhook.js';
@@ -146,7 +147,17 @@ export function createLinearDispatchService(options: LinearDispatchServiceOption
   const resolveExecution = async (
     issue: LinearDispatchIssue
   ): Promise<ExecuteTicketInput | undefined> => {
-    const input = await options.resolveAuthorizedExecution(issue);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const resolution = Promise.resolve(options.resolveAuthorizedExecution(issue));
+    const deadline = new Promise<undefined>((resolve) => {
+      timeout = setTimeout(() => resolve(undefined), LINEAR_WEBHOOK_REQUEST_TIMEOUT_MS);
+    });
+    let input: ExecuteTicketInput | undefined;
+    try {
+      input = await Promise.race([resolution, deadline]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
     if (input === undefined) return undefined;
     if (!executionInputMatchesWorkspace(input, issue, projectId, options.workspace)) {
       throw new Error('trusted execution composition did not bind to the current project and issue');
@@ -311,6 +322,7 @@ export function createLinearDispatchService(options: LinearDispatchServiceOption
     inFlight.add(claim.payload.claimId);
     const boundInput: ExecuteTicketInput = {
       ...input,
+      executionId: claim.payload.executionId,
       createExecutionId: () => claim.payload.executionId,
     };
     setImmediate(() => {
@@ -377,11 +389,7 @@ export function createLinearDispatchService(options: LinearDispatchServiceOption
       }
       if (decision.kind === 'ignored') return { outcome: 'IGNORED', reason: decision.reason };
       if (decision.kind === 'existing') {
-        const activeRun = createRunRepository(options.workspace.db).findActiveByTicket(projectId, issue.identifier);
-        if (activeRun !== undefined || !scheduleClaim(decision.claim, input)) {
-          return { outcome: 'ALREADY_CLAIMED', claimId: decision.claim.payload.claimId, ticketId: issue.identifier };
-        }
-        return { outcome: 'RECOVERED', claimId: decision.claim.payload.claimId, ticketId: issue.identifier };
+        return { outcome: 'ALREADY_CLAIMED', claimId: decision.claim.payload.claimId, ticketId: issue.identifier };
       }
       scheduleClaim(decision.claim, input);
       return { outcome: 'CLAIMED', claimId: decision.claim.payload.claimId, ticketId: issue.identifier };
