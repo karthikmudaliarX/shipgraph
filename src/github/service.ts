@@ -59,6 +59,8 @@ export type GitHubPullRequestInput = {
 export type GitHubPullRequestResult = {
   pullRequest: GitHostPullRequest;
   readiness: CurrentPrePrReadinessEvidence;
+  prEvidenceEventId: string;
+  receiptEvidenceEventId: string;
   prEvidence: GitHubPrEvidence;
   receipt: GitHubUsageReceipt;
   receiptEvidence: GitHubUsageReceiptEvidence;
@@ -199,6 +201,8 @@ export async function createGitHubPullRequest(
   return {
     pullRequest,
     readiness,
+    prEvidenceEventId: prEvidenceEvent.id,
+    receiptEvidenceEventId: receiptEvidenceEvent.id,
     prEvidence: prEvidenceEvent.payload,
     receipt,
     receiptEvidence: receiptEvidenceEvent.payload,

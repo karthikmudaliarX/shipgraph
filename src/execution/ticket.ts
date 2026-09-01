@@ -296,6 +296,18 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
       executionId: binding.executionId,
     });
   } catch (error) {
+    const hasPartialPullRequestEvidence = createEventRepository(input.workspace.db)
+      .findByTicketId(input.issueId)
+      .some((event) =>
+        event.type === EventType.GITHUB_PR_RECORDED &&
+        event.payload.submittedHeadSha !== undefined &&
+        event.payload.contractDigest === binding.provenance.contractDigest &&
+        event.payload.contractSource === binding.provenance.contractSource &&
+        event.payload.contractRevision === binding.provenance.contractRevision
+      );
+    if (hasPartialPullRequestEvidence) {
+      return recoverOpenPullRequest(input, projectId, binding);
+    }
     return terminalize(input, projectId, binding, 'NEEDS_HUMAN', `KAR-8 PR handoff failed: ${errorMessage(error)}`, workspace, implementationRun);
   }
 
@@ -307,6 +319,8 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
     contractReviewRunId: currentReadiness.contractReviewRunId,
     engineeringReviewRunId: currentReadiness.engineeringReviewRunId,
     readinessEventId: currentReadiness.eventId,
+    githubPrEvidenceEventId: github.prEvidenceEventId,
+    githubUsageReceiptEvidenceEventId: github.receiptEvidenceEventId,
     prNumber: github.pullRequest.number,
     prUrl: github.pullRequest.url,
     submittedHeadSha: github.readiness.readySha,
@@ -354,6 +368,8 @@ async function recoverOpenPullRequest(
         ? {}
         : { engineeringReviewRunId: github.readiness.engineeringReviewRunId }),
       readinessEventId: github.readiness.eventId,
+      githubPrEvidenceEventId: github.prEvidenceEventId,
+      githubUsageReceiptEvidenceEventId: github.receiptEvidenceEventId,
       prNumber: github.pullRequest.number,
       prUrl: github.pullRequest.url,
       submittedHeadSha: github.readiness.readySha,
@@ -537,9 +553,9 @@ function terminalize(
     reason,
   });
   const ticket = createTicketRepository(input.workspace.db).findById(input.issueId);
-  const next = outcome === 'BLOCKED'
+  const next = evidence.outcome === 'BLOCKED'
     ? TicketState.BLOCKED
-    : outcome === 'FAILED'
+    : evidence.outcome === 'FAILED'
       ? TicketState.FAILED
       : TicketState.NEEDS_HUMAN;
   if (ticket !== undefined && canTransition(ticket.status, next)) {

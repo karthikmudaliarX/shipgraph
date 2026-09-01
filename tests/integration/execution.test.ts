@@ -276,6 +276,8 @@ describe('KAR-12 single-ticket execution identity', () => {
     expect(createTicketRepository(db).findById('KAR-12')?.status).toBe(TicketState.PR_OPEN);
     expect(result.evidence.contractDigest).toMatch(/^[0-9a-f]{64}$/);
     expect(result.evidence.submittedHeadSha).toBe(result.github?.readiness.readySha);
+    expect(result.evidence.githubPrEvidenceEventId).toBe(result.github?.prEvidenceEventId);
+    expect(result.evidence.githubUsageReceiptEvidenceEventId).toBe(result.github?.receiptEvidenceEventId);
     expect(createRunRepository(db).findByTicketId('KAR-12').every((run) =>
       run.executionId === result.evidence.executionId &&
       run.contractDigest === result.evidence.contractDigest &&
