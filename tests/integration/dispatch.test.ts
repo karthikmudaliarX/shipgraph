@@ -12,7 +12,12 @@ import type { ShipgraphConfig } from '../../src/config/schema.js';
 import { EventType } from '../../src/events/event.js';
 import type { ExecuteTicketInput, ExecuteTicketResult } from '../../src/execution/ticket.js';
 import { openAndMigrate, type DbConnection } from '../../src/persistence/db.js';
-import { createEventRepository, createProjectRepository } from '../../src/persistence/repositories.js';
+import {
+  createEventRepository,
+  createProjectRepository,
+  createRunRepository,
+  createWorkspaceRepository,
+} from '../../src/persistence/repositories.js';
 import {
   createLinearDispatchService,
   type LinearDispatchService,
@@ -122,12 +127,15 @@ function fakeResult(): ExecuteTicketResult {
 
 function serviceFor(
   harness: Harness,
-  execute: (input: ExecuteTicketInput) => Promise<ExecuteTicketResult> = async () => fakeResult()
+  execute: (input: ExecuteTicketInput) => Promise<ExecuteTicketResult> = async () => fakeResult(),
+  resolveAuthorizedExecution: (
+    issue: LinearDispatchIssue
+  ) => ExecuteTicketInput | undefined = (issue) => fakeInput(harness.workspace, issue.identifier)
 ): LinearDispatchService {
   return createLinearDispatchService({
     workspace: harness.workspace,
     client: { getIssue: async (id) => harness.issues.get(id) },
-    resolveAuthorizedExecution: (issue) => fakeInput(harness.workspace, issue.identifier),
+    resolveAuthorizedExecution,
     execute,
     webhookSecret: secret,
     nowMs: () => timestamp,
@@ -187,6 +195,82 @@ describe('Linear dispatch claim bridge', () => {
     expect(createEventRepository(harness.db).findByProjectId(
       createProjectRepository(harness.db).findAll()[0].id
     ).some((event) => event.type === EventType.DISPATCH_CLAIMED)).toBe(false);
+  });
+
+  it('ignores an authenticated issue outside the configured Linear project', async () => {
+    const harness = createHarness();
+    const issue = harness.issues.get('linear-issue-1');
+    if (!issue) throw new Error('test issue missing');
+    harness.issues.set(issue.id, { ...issue, projectId: 'other-project' });
+    const result = await serviceFor(harness).handleWebhook(
+      webhook(issue.id, '12121212-1212-4121-8121-121212121212').body,
+      webhook(issue.id, '12121212-1212-4121-8121-121212121212').headers
+    );
+    expect(result.outcome).toBe('IGNORED');
+  });
+
+  it('ignores an issue without an exact local ticket identifier', async () => {
+    const harness = createHarness();
+    const issue = harness.issues.get('linear-issue-1');
+    if (!issue) throw new Error('test issue missing');
+    harness.issues.set(issue.id, { ...issue, identifier: 'DP-404' });
+    const result = await serviceFor(harness).handleWebhook(
+      webhook(issue.id, '13131313-1313-4131-8131-131313131313').body,
+      webhook(issue.id, '13131313-1313-4131-8131-131313131313').headers
+    );
+    expect(result.outcome).toBe('IGNORED');
+  });
+
+  it('does not claim when the trusted EXEC-001 input is unavailable', async () => {
+    const harness = createHarness();
+    const result = await serviceFor(harness, async () => fakeResult(), () => undefined).handleWebhook(
+      webhook('linear-issue-1', '14141414-1414-4141-8141-141414141414').body,
+      webhook('linear-issue-1', '14141414-1414-4141-8141-141414141414').headers
+    );
+    expect(result.outcome).toBe('IGNORED');
+    expect(createEventRepository(harness.db).findByProjectId(
+      createProjectRepository(harness.db).findAll()[0].id
+    ).some((event) => event.type === EventType.DISPATCH_CLAIMED)).toBe(false);
+  });
+
+  it('does not claim while an active provider run already owns the ticket', async () => {
+    const harness = createHarness();
+    const projectId = createProjectRepository(harness.db).findAll()[0].id;
+    const now = new Date().toISOString();
+    createWorkspaceRepository(harness.db).insert({
+      id: 'workspace-active',
+      projectId,
+      ticketId: 'DP-1',
+      sourceRepositoryPath: harness.projectDir,
+      worktreePath: harness.projectDir,
+      branchName: 'main',
+      baseSha: 'a'.repeat(40),
+      status: 'READY',
+      createdAt: now,
+      updatedAt: now,
+    });
+    createRunRepository(harness.db).create({
+      id: 'active-provider-run',
+      ticketId: 'DP-1',
+      projectId,
+      workspaceId: 'workspace-active',
+      workspacePath: harness.projectDir,
+      baseSha: 'a'.repeat(40),
+      branchName: 'main',
+      status: 'RUNNING',
+      provider: 'test',
+      model: 'test-model',
+      instructionsSha256: 'a'.repeat(64),
+      timeoutMs: 1_000,
+      startedAt: now,
+    });
+    const result = await serviceFor(harness).handleWebhook(
+      webhook('linear-issue-1', '15151515-1515-4151-8151-151515151515').body,
+      webhook('linear-issue-1', '15151515-1515-4151-8151-151515151515').headers
+    );
+    expect(result.outcome).toBe('IGNORED');
+    expect(createEventRepository(harness.db).findByProjectId(projectId)
+      .some((event) => event.type === EventType.DISPATCH_CLAIMED)).toBe(false);
   });
 
   it('serializes concurrent deliveries and does not exceed local capacity', async () => {
