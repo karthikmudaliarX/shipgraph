@@ -60,6 +60,12 @@ providers:
     enabled: true
   gemini:
     enabled: true
+dispatch:
+  enabled: false
+  queueLabel: shipgraph:queued
+  webhookPath: /webhooks/linear
+  listenHost: 127.0.0.1
+  listenPort: 8080
 `;
 
 /**
