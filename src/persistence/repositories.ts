@@ -93,6 +93,10 @@ export type RunRecord = {
   reviewContractDigest?: string;
   reviewContractSource?: string;
   reviewContractRevision?: string;
+  executionId?: string;
+  contractDigest?: string;
+  contractSource?: string;
+  contractRevision?: string;
   reviewResult?: import('../domain/agent-run.js').ReviewResult;
   reviewFindings?: readonly string[];
   timeoutMs?: number;
@@ -552,12 +556,14 @@ export function createRunRepository(db: DbConnection): RunRepository {
             timed_out, cancelled, failure_category, failure_reason, stdout, stderr,
             stdout_truncated, stderr_truncated, evidence_json, instructions_sha256, timeout_ms,
             safety_policy_sha256, review_type, reviewed_sha, review_result, review_findings_json,
-            review_contract_digest, review_contract_source, review_contract_revision
+            review_contract_digest, review_contract_source, review_contract_revision,
+            execution_id, contract_digest, contract_source, contract_revision
           ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?
           )`
         ).run(
           run.id,
@@ -598,7 +604,11 @@ export function createRunRepository(db: DbConnection): RunRepository {
           run.reviewFindings === undefined ? null : JSON.stringify(run.reviewFindings),
           run.reviewContractDigest ?? null,
           run.reviewContractSource ?? null,
-          run.reviewContractRevision ?? null
+          run.reviewContractRevision ?? null,
+          run.executionId ?? null,
+          run.contractDigest ?? null,
+          run.contractSource ?? null,
+          run.contractRevision ?? null
         );
       } catch (error) {
         if (error instanceof Error && /UNIQUE constraint failed/.test(error.message)) {
@@ -1024,6 +1034,18 @@ function rowToRun(row: Record<string, unknown>): RunRecord {
     ...(row.review_contract_revision === null || row.review_contract_revision === undefined
       ? {}
       : { reviewContractRevision: requiredString(row, 'review_contract_revision') }),
+    ...(row.execution_id === null || row.execution_id === undefined
+      ? {}
+      : { executionId: requiredString(row, 'execution_id') }),
+    ...(row.contract_digest === null || row.contract_digest === undefined
+      ? {}
+      : { contractDigest: requiredString(row, 'contract_digest') }),
+    ...(row.contract_source === null || row.contract_source === undefined
+      ? {}
+      : { contractSource: requiredString(row, 'contract_source') }),
+    ...(row.contract_revision === null || row.contract_revision === undefined
+      ? {}
+      : { contractRevision: requiredString(row, 'contract_revision') }),
     ...(row.review_result === null || row.review_result === undefined
       ? {}
       : { reviewResult: reviewResultSchema.parse(requiredString(row, 'review_result')) }),

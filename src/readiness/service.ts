@@ -18,6 +18,7 @@ import {
   deriveTicketContractProvenance,
   type TicketContractProvenance,
 } from '../domain/ticket.js';
+import type { ExecutionContractProvenance } from '../domain/execution.js';
 import {
   createEventRepository,
   createRunRepository,
@@ -36,6 +37,9 @@ const FULL_SHA_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/u;
 export type PrePrReadinessInput = {
   ticketId: string;
   workspace: WorkspaceServiceOptions;
+  /** Optional KAR-12 behavioral provenance; legacy callers use backlog provenance. */
+  contractProvenance?: ExecutionContractProvenance;
+  executionId?: string;
 };
 
 export type PrePrReadinessResult = {
@@ -54,6 +58,8 @@ export type CurrentPrePrReadinessEvidence = ReadinessEvidence & {
 export type ReadinessLookupOptions = {
   /** Allow KAR-8 to revalidate the historical pre-PR proof after PR_OPEN. */
   allowPrOpen?: boolean;
+  contractProvenance?: ExecutionContractProvenance;
+  executionId?: string;
 };
 
 type Candidate = {
@@ -93,7 +99,7 @@ export async function runPrePrReadiness(
     setupReason = errorMessage(error);
   }
   try {
-    provenance = contractProvenance(input.workspace.projectDir, input.workspace.db, ticket);
+    provenance = input.contractProvenance ?? contractProvenance(input.workspace.projectDir, input.workspace.db, ticket);
   } catch (error) {
     setupReason = setupReason ?? errorMessage(error);
   }
@@ -117,7 +123,7 @@ export async function runPrePrReadiness(
 
   const events = createEventRepository(input.workspace.db).findByTicketId(input.ticketId);
   const runs = createRunRepository(input.workspace.db).findByTicketId(input.ticketId);
-  const assessment = readinessAssessment(ticket, candidate.sha, provenance, events, runs);
+  const assessment = readinessAssessment(ticket, candidate.sha, provenance, events, runs, false, input.executionId);
   const { repair, currentReviews, safetyStatus, redStatus } = assessment;
   const failures = assessment.failures;
   const result = failures.length === 0 ? 'PASS' : 'FAIL';
@@ -144,7 +150,7 @@ export async function runPrePrReadiness(
     safetyRunIds,
     ...(failures.length === 0 ? {} : { reason: failures.join('; ') }),
   });
-  if (result === 'PASS' && !passReferencesMatch(evidence, candidate.sha, provenance, events, runs)) {
+  if (result === 'PASS' && !passReferencesMatch(evidence, candidate.sha, provenance, events, runs, input.executionId)) {
     throw new Error('KAR-11 PASS evidence references are not current durable records');
   }
   if (result === 'PASS') {
@@ -219,7 +225,7 @@ export async function getCurrentPrePrReadinessEvidence(
   if (ticket === undefined || ticket.projectId !== projectId) return undefined;
   let provenance: TicketContractProvenance;
   try {
-    provenance = contractProvenance(workspace.projectDir, workspace.db, ticket);
+    provenance = options.contractProvenance ?? contractProvenance(workspace.projectDir, workspace.db, ticket);
   } catch {
     return undefined;
   }
@@ -231,7 +237,8 @@ export async function getCurrentPrePrReadinessEvidence(
     provenance,
     eventsForAssessment,
     runsForAssessment,
-    options.allowPrOpen === true
+    options.allowPrOpen === true,
+    options.executionId
   ).failures.length > 0) {
     return undefined;
   }
@@ -248,7 +255,7 @@ export async function getCurrentPrePrReadinessEvidence(
   const event = events.at(-1);
   if (
     event === undefined ||
-    !passReferencesMatch(event.payload, candidate.sha, provenance, eventsForAssessment, runsForAssessment)
+    !passReferencesMatch(event.payload, candidate.sha, provenance, eventsForAssessment, runsForAssessment, options.executionId)
   ) return undefined;
   try {
     const boundaryCandidate = await currentCandidate(workspace, ticketId);
@@ -322,15 +329,16 @@ function readinessAssessment(
   provenance: TicketContractProvenance,
   events: readonly ShipgraphEvent[],
   runs: readonly RunRecord[],
-  allowPrOpen = false
+  allowPrOpen = false,
+  executionId?: string
 ): ReadinessAssessment {
-  const repair = currentRepairEvidence(events, sha);
+  const repair = currentRepairEvidence(events, sha, executionId);
   const verification = repair === undefined
     ? { passed: false, reason: 'No KAR-10 final verification evidence applies to the current SHA' }
     : verificationStatus(ticket.verification.commands, repair.event.payload.finalVerification, sha);
-  const currentReviews = currentReviewRuns(runs, sha, provenance);
+  const currentReviews = currentReviewRuns(runs, sha, provenance, executionId);
   const reviewStatus = reviewStatusFor(currentReviews, events);
-  const safetyStatus = safetyStatusFor(ticket.status, runs, currentReviews, repair, events, sha);
+  const safetyStatus = safetyStatusFor(ticket.status, runs, currentReviews, repair, events, sha, executionId);
   const redStatus = redEvidenceStatus(repair, sha);
   return {
     repair,
@@ -352,14 +360,16 @@ function readinessAssessment(
 
 function currentRepairEvidence(
   events: readonly ShipgraphEvent[],
-  sha: string
+  sha: string,
+  executionId?: string
 ): CurrentRepairEvidence | undefined {
   const repairEvents = events.filter(
     (event): event is Extract<ShipgraphEvent, { type: typeof EventType.REPAIR_ATTEMPT_RECORDED }> =>
       event.type === EventType.REPAIR_ATTEMPT_RECORDED
   );
   const applicableEvents = repairEvents.filter((candidate) => {
-    return candidate.payload.candidateSha === sha || candidate.payload.resultingSha === sha;
+    return (candidate.payload.candidateSha === sha || candidate.payload.resultingSha === sha) &&
+      (executionId === undefined || candidate.payload.executionId === executionId);
   });
   const event = applicableEvents.at(-1);
   if (event === undefined || event.payload.outcome !== 'PASSED') return undefined;
@@ -405,7 +415,8 @@ function verificationStatus(
 function currentReviewRuns(
   runs: readonly RunRecord[],
   sha: string,
-  provenance: TicketContractProvenance
+  provenance: TicketContractProvenance,
+  executionId?: string
 ): RunRecord[] {
   return runs.filter((run) =>
     run.task === 'review' &&
@@ -414,6 +425,7 @@ function currentReviewRuns(
     run.reviewContractDigest === provenance.contractDigest &&
     run.reviewContractSource === provenance.contractSource &&
     run.reviewContractRevision === provenance.contractRevision
+    && (executionId === undefined || run.executionId === executionId)
   );
 }
 
@@ -462,7 +474,8 @@ function safetyStatusFor(
   currentReviews: readonly RunRecord[],
   repair: CurrentRepairEvidence | undefined,
   events: readonly ShipgraphEvent[],
-  sha: string
+  sha: string,
+  executionId?: string
 ): { status: 'satisfied' | 'blocked' | 'unknown'; runIds: string[]; reason?: string } {
   if (ticketStatus === TicketState.NEEDS_HUMAN) {
     return { status: 'blocked', runIds: [], reason: 'Ticket has an unresolved NEEDS_HUMAN safety condition' };
@@ -470,7 +483,8 @@ function safetyStatusFor(
   const currentRepairEvents = events.filter(
     (event): event is Extract<ShipgraphEvent, { type: typeof EventType.REPAIR_ATTEMPT_RECORDED }> =>
       event.type === EventType.REPAIR_ATTEMPT_RECORDED &&
-      (event.payload.candidateSha === sha || event.payload.resultingSha === sha)
+      (event.payload.candidateSha === sha || event.payload.resultingSha === sha) &&
+      (executionId === undefined || event.payload.executionId === executionId)
   );
   const latestRepairEvent = currentRepairEvents.at(-1);
   if (latestRepairEvent?.payload.outcome === 'NEEDS_HUMAN') {
@@ -485,7 +499,7 @@ function safetyStatusFor(
     const repairRun = repairRunId === undefined
       ? undefined
       : runs.find((run) => run.id === repairRunId && run.task === 'repair' && run.status === 'SUCCEEDED');
-    if (repairRun === undefined || !hasBoundSafetyPolicy(repairRun, events)) {
+    if (repairRun === undefined || (executionId !== undefined && repairRun.executionId !== executionId) || !hasBoundSafetyPolicy(repairRun, events)) {
       return { status: 'unknown', runIds, reason: `KAR-10 repair safety evidence for ${sha} is missing` };
     }
     runIds.push(repairRun.id);
@@ -507,7 +521,8 @@ function passReferencesMatch(
   sha: string,
   provenance: TicketContractProvenance,
   events: readonly ShipgraphEvent[],
-  runs: readonly RunRecord[]
+  runs: readonly RunRecord[],
+  executionId?: string
 ): boolean {
   if (
     evidence.readySha !== sha ||
@@ -537,6 +552,7 @@ function passReferencesMatch(
     engineering.reviewContractSource !== provenance.contractSource ||
     contract.reviewContractRevision !== provenance.contractRevision ||
     engineering.reviewContractRevision !== provenance.contractRevision ||
+    (executionId !== undefined && (contract.executionId !== executionId || engineering.executionId !== executionId)) ||
     contract.reviewResult !== 'PASS' ||
     engineering.reviewResult !== 'PASS' ||
     (contract.reviewFindings?.length ?? 0) > 0 ||
@@ -548,7 +564,8 @@ function passReferencesMatch(
     verification.type !== EventType.REPAIR_ATTEMPT_RECORDED ||
     verification.payload.outcome !== 'PASSED' ||
     (verification.payload.candidateSha !== sha && verification.payload.resultingSha !== sha) ||
-    verification.payload.finalVerification === undefined
+    verification.payload.finalVerification === undefined ||
+    (executionId !== undefined && verification.payload.executionId !== executionId)
   ) return false;
   if (evidence.repairOccurred) {
     if (evidence.repairEvidenceEventId === undefined) return false;

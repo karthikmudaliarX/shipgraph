@@ -174,9 +174,23 @@ export const agentRunRecordSchema = z.object({
   reviewContractDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   reviewContractSource: z.string().min(1).max(4_096).optional(),
   reviewContractRevision: z.string().min(1).max(256).optional(),
+  /** KAR-12 contract provenance shared by every run in one execution. */
+  executionId: durableIdentity.optional(),
+  contractDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  contractSource: z.string().min(1).max(4_096).optional(),
+  contractRevision: z.string().min(1).max(256).optional(),
   reviewResult: reviewResultSchema.optional(),
   reviewFindings: z.array(z.string().min(1).max(2_048)).max(100).optional(),
   timeoutMs: z.number().int().positive().max(MAX_AGENT_TIMEOUT_MS),
-}).strict();
+}).strict().superRefine((run, context) => {
+  const contractFields = [run.executionId, run.contractDigest, run.contractSource, run.contractRevision];
+  if (contractFields.some((field) => field !== undefined) && contractFields.some((field) => field === undefined)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['executionId'],
+      message: 'KAR-12 execution contract provenance must be complete',
+    });
+  }
+});
 
 export type AgentRunRecord = z.infer<typeof agentRunRecordSchema>;

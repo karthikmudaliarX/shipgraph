@@ -45,6 +45,10 @@ export const repairReviewEvidenceSchema = z.object({
 
 export const repairAttemptEvidenceSchema = z.object({
   ticketId: z.string().min(1),
+  executionId: z.string().min(1).max(256).optional(),
+  contractDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  contractSource: z.string().min(1).max(4_096).optional(),
+  contractRevision: z.string().min(1).max(256).optional(),
   attempt: z.number().int().nonnegative().max(100),
   candidateSha: shaSchema,
   resultingSha: shaSchema.optional(),
@@ -59,7 +63,12 @@ export const repairAttemptEvidenceSchema = z.object({
   redInfeasibilityReason: z.string().min(1).max(2_048).optional(),
   outcome: repairAttemptOutcomeSchema,
   reason: z.string().min(1).max(2_048).optional(),
-}).strict();
+}).strict().superRefine((evidence, context) => {
+  const fields = [evidence.executionId, evidence.contractDigest, evidence.contractSource, evidence.contractRevision];
+  if (fields.some((field) => field !== undefined) && fields.some((field) => field === undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['executionId'], message: 'execution contract provenance must be complete' });
+  }
+});
 
 export type RepairVerificationObservation = z.infer<typeof repairVerificationObservationSchema>;
 export type RepairBlocker = z.infer<typeof repairBlockerSchema>;

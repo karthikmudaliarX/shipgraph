@@ -16,6 +16,11 @@ import {
   githubPrEvidenceSchema,
   githubUsageReceiptEvidenceSchema,
 } from '../domain/github.js';
+import {
+  executionContractBoundPayloadSchema,
+  executionStartedPayloadSchema,
+  executionTerminalPayloadSchema,
+} from '../domain/execution.js';
 
 /** Core event types for the append-only audit log. */
 export const EVENT_TYPES = [
@@ -34,6 +39,9 @@ export const EVENT_TYPES = [
   'pre_pr_readiness.recorded',
   'github.pr_recorded',
   'github.usage_receipt_recorded',
+  'execution.contract_bound',
+  'execution.started',
+  'execution.terminal',
 ] as const;
 
 export const EventType = {
@@ -52,6 +60,9 @@ export const EventType = {
   PRE_PR_READINESS_RECORDED: EVENT_TYPES[12],
   GITHUB_PR_RECORDED: EVENT_TYPES[13],
   GITHUB_USAGE_RECEIPT_RECORDED: EVENT_TYPES[14],
+  EXECUTION_CONTRACT_BOUND: EVENT_TYPES[15],
+  EXECUTION_STARTED: EVENT_TYPES[16],
+  EXECUTION_TERMINAL: EVENT_TYPES[17],
 } as const;
 
 export type EventTypeValue = (typeof EVENT_TYPES)[number];
@@ -110,6 +121,10 @@ export const runCreatedPayloadSchema = z.object({
   reviewContractDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   reviewContractSource: z.string().min(1).max(4_096).optional(),
   reviewContractRevision: z.string().min(1).max(256).optional(),
+  executionId: z.string().min(1).max(256).optional(),
+  contractDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  contractSource: z.string().min(1).max(4_096).optional(),
+  contractRevision: z.string().min(1).max(256).optional(),
 }).strict();
 
 export const runCompletedPayloadSchema = z.object({
@@ -131,6 +146,10 @@ export const runCompletedPayloadSchema = z.object({
   reviewContractDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   reviewContractSource: z.string().min(1).max(4_096).optional(),
   reviewContractRevision: z.string().min(1).max(256).optional(),
+  executionId: z.string().min(1).max(256).optional(),
+  contractDigest: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  contractSource: z.string().min(1).max(4_096).optional(),
+  contractRevision: z.string().min(1).max(256).optional(),
   reviewResult: reviewResultSchema.optional(),
   reviewFindings: z.array(z.string().min(1).max(2_048)).max(100).optional(),
 }).strict();
@@ -271,6 +290,24 @@ const eventUnionSchema = z.discriminatedUnion('type', [
     type: z.literal(EventType.GITHUB_USAGE_RECEIPT_RECORDED),
     payload: githubUsageReceiptEvidenceSchema,
   }).strict(),
+  z.object({
+    ...baseEnvelopeShape,
+    ticketId: identitySchema,
+    type: z.literal(EventType.EXECUTION_CONTRACT_BOUND),
+    payload: executionContractBoundPayloadSchema,
+  }).strict(),
+  z.object({
+    ...baseEnvelopeShape,
+    ticketId: identitySchema,
+    type: z.literal(EventType.EXECUTION_STARTED),
+    payload: executionStartedPayloadSchema,
+  }).strict(),
+  z.object({
+    ...baseEnvelopeShape,
+    ticketId: identitySchema,
+    type: z.literal(EventType.EXECUTION_TERMINAL),
+    payload: executionTerminalPayloadSchema,
+  }).strict(),
 ]);
 
 /** Runtime-typed event union with duplicated envelope identities kept consistent. */
@@ -342,6 +379,9 @@ export type RepairAttemptRecordedPayload = z.infer<typeof repairAttemptEvidenceS
 export type PrePrReadinessRecordedPayload = z.infer<typeof readinessEvidenceSchema>;
 export type GithubPrRecordedPayload = z.infer<typeof githubPrEvidenceSchema>;
 export type GithubUsageReceiptRecordedPayload = z.infer<typeof githubUsageReceiptEvidenceSchema>;
+export type ExecutionContractBoundPayload = z.infer<typeof executionContractBoundPayloadSchema>;
+export type ExecutionStartedPayload = z.infer<typeof executionStartedPayloadSchema>;
+export type ExecutionTerminalPayload = z.infer<typeof executionTerminalPayloadSchema>;
 
 export function isValidStateValue(value: string): value is TicketStateValue {
   return ticketStateSchema.safeParse(value).success;

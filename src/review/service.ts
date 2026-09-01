@@ -30,6 +30,10 @@ import {
   deriveTicketContractProvenance,
   type TicketContractProvenance,
 } from '../domain/ticket.js';
+import type {
+  BehavioralTicketContract,
+  ExecutionContractProvenance,
+} from '../domain/execution.js';
 
 const REVIEW_DIFF_LIMIT_BYTES = 32 * 1024;
 const FULL_SHA_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/u;
@@ -44,6 +48,10 @@ export type PrePrReviewInput = {
   timeoutMs?: number;
   signal?: AbortSignal;
   safety?: AgentSafetyPolicy;
+  /** KAR-12 supplies the behavioral contract instead of the legacy backlog contract. */
+  contract?: BehavioralTicketContract;
+  contractProvenance?: ExecutionContractProvenance;
+  executionId?: string;
 };
 
 export type PrePrReviewAxisResult = {
@@ -69,7 +77,12 @@ export type PrePrReviewResult = {
  * ticket; each still receives a separate routed run and request identity.
  */
 export async function runPrePrReviews(input: PrePrReviewInput): Promise<PrePrReviewResult> {
-  const snapshot = await readReviewSnapshot(input.workspace, input.ticketId);
+  const snapshot = await readReviewSnapshot(
+    input.workspace,
+    input.ticketId,
+    input.contract,
+    input.contractProvenance
+  );
   const baseRequestId = input.routing.requestId ?? randomUUID();
   const reviewSafety: AgentSafetyPolicy = {
     ...(input.safety ?? {}),
@@ -98,7 +111,9 @@ export async function runPrePrReviews(input: PrePrReviewInput): Promise<PrePrRev
         instructions: reviewInstruction,
         ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
         ...(input.signal === undefined ? {} : { signal: input.signal }),
-      safety: reviewSafety,
+        safety: reviewSafety,
+        ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
+        ...(input.contractProvenance === undefined ? {} : input.contractProvenance),
       },
       {
         reviewType,
@@ -106,6 +121,8 @@ export async function runPrePrReviews(input: PrePrReviewInput): Promise<PrePrRev
         reviewContractDigest: snapshot.contractProvenance.contractDigest,
         reviewContractSource: snapshot.contractProvenance.contractSource,
         reviewContractRevision: snapshot.contractProvenance.contractRevision,
+        ...(input.executionId === undefined ? {} : { executionId: input.executionId }),
+        ...(input.contractProvenance === undefined ? {} : input.contractProvenance),
       }
     );
     results.push(axisResult(reviewType, snapshot.headSha, routed));
@@ -177,9 +194,12 @@ function composeReviewInstructions(
  */
 export async function listCurrentPrePrReviewEvidence(
   workspace: WorkspaceServiceOptions,
-  ticketId: string
+  ticketId: string,
+  contract?: BehavioralTicketContract,
+  contractProvenance?: ExecutionContractProvenance,
+  executionId?: string
 ): Promise<readonly AgentRunRecord[]> {
-  const snapshot = await readReviewSnapshot(workspace, ticketId);
+  const snapshot = await readReviewSnapshot(workspace, ticketId, contract, contractProvenance);
   const projectId = getCurrentProjectId(workspace);
   return createRunRepository(workspace.db)
     .findByTicketId(ticketId)
@@ -191,6 +211,7 @@ export async function listCurrentPrePrReviewEvidence(
       run.reviewContractDigest === snapshot.contractProvenance.contractDigest &&
       run.reviewContractSource === snapshot.contractProvenance.contractSource &&
       run.reviewContractRevision === snapshot.contractProvenance.contractRevision &&
+      (executionId === undefined || run.executionId === executionId) &&
       run.status === 'SUCCEEDED' &&
       run.reviewResult !== undefined
     )
@@ -202,7 +223,9 @@ export async function listCurrentPrePrReviewEvidence(
 
 async function readReviewSnapshot(
   options: WorkspaceServiceOptions,
-  ticketId: string
+  ticketId: string,
+  behavioralContract?: BehavioralTicketContract,
+  behavioralProvenance?: ExecutionContractProvenance
 ): Promise<{
   workspace: WorkspaceRecord;
   baseSha: string;
@@ -239,7 +262,7 @@ async function readReviewSnapshot(
   if (ticket === undefined || ticket.projectId !== workspace.projectId) {
     throw new Error(`Ticket ${ticketId} is missing or does not belong to the review workspace`);
   }
-  const contract = {
+  const legacyContract = {
     id: ticket.id,
     title: ticket.title,
     description: ticket.description,
@@ -252,6 +275,20 @@ async function readReviewSnapshot(
     agent: ticket.agent,
     release: ticket.release,
   } satisfies Record<string, unknown>;
+  if (behavioralContract !== undefined || behavioralProvenance !== undefined) {
+    if (behavioralContract === undefined || behavioralProvenance === undefined) {
+      throw new Error('KAR-12 review contract and provenance must be supplied together');
+    }
+    return {
+      workspace,
+      baseSha: workspace.baseSha,
+      headSha,
+      diff: boundedDiff.value,
+      diffTruncated: boundedDiff.truncated,
+      contract: behavioralContract,
+      contractProvenance: behavioralProvenance,
+    };
+  }
   const sync = options.db
     .prepare('SELECT version, source_path FROM backlog_syncs WHERE project_id = ?')
     .get(workspace.projectId) as { version: number; source_path: string } | undefined;
@@ -269,7 +306,7 @@ async function readReviewSnapshot(
     headSha,
     diff: boundedDiff.value,
     diffTruncated: boundedDiff.truncated,
-    contract,
+    contract: legacyContract,
     contractProvenance,
   };
 }

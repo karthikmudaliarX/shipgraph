@@ -39,6 +39,7 @@ import { persistTicketTransition } from '../persistence/ticket-state-store.js';
 import { compareStableStrings } from '../utils/sorting.js';
 import type { WorkspaceServiceOptions } from '../workspace/service.js';
 import { getCurrentProjectId, getVerifiedWorkspaceForExecution } from '../workspace/service.js';
+import type { ExecutionContractProvenance } from '../domain/execution.js';
 
 const RECEIPT_MARKER_PATTERN = /<!-- shipgraph-usage-receipt:v1\n([\s\S]*?)\n-->/gu;
 const MAX_USAGE_RECEIPT_BODY_BYTES = 60_000;
@@ -51,6 +52,8 @@ export type GitHubPullRequestInput = {
   workspace: WorkspaceServiceOptions;
   gitHost?: GitHostAdapter;
   remote?: string;
+  contractProvenance?: ExecutionContractProvenance;
+  executionId?: string;
 };
 
 export type GitHubPullRequestResult = {
@@ -114,7 +117,7 @@ export async function createGitHubPullRequest(
     throw new Error(`KAR-8 fail closed: GitHub authentication is unavailable (${reason})`);
   }
 
-  let readiness = await assertCurrentReadyCandidate(workspace, input.ticketId, verifiedWorkspace, runner);
+  let readiness = await assertCurrentReadyCandidate(workspace, input.ticketId, verifiedWorkspace, runner, input.contractProvenance, input.executionId);
   // Build the compact local receipt before publishing the branch. Missing or
   // ambiguous execution telemetry must not leave a remote handoff behind.
   buildUsageReceipt(workspace, projectId, input.ticketId, verifiedWorkspace, readiness);
@@ -150,7 +153,7 @@ export async function createGitHubPullRequest(
 
   // Re-read readiness at the final branch/PR write boundary. This is not a
   // lock; it is the required fail-closed proof immediately before GitHub use.
-  readiness = await assertCurrentReadyCandidate(workspace, input.ticketId, verifiedWorkspace, runner);
+  readiness = await assertCurrentReadyCandidate(workspace, input.ticketId, verifiedWorkspace, runner, input.contractProvenance, input.executionId);
   if (readiness.readySha !== remoteSha) {
     throw new Error('KAR-8 fail closed: readiness changed after branch publication');
   }
@@ -208,13 +211,19 @@ async function assertCurrentReadyCandidate(
   workspace: WorkspaceServiceOptions,
   ticketId: string,
   expectedWorkspace: WorkspaceRecord,
-  runner: GitRunner
+  runner: GitRunner,
+  contractProvenance?: ExecutionContractProvenance,
+  executionId?: string
 ): Promise<VerifiedReadiness> {
   const currentTicket = createTicketRepository(workspace.db).findById(ticketId);
   const readiness = await getCurrentPrePrReadinessEvidence(
     workspace,
     ticketId,
-    { allowPrOpen: currentTicket?.status === TicketState.PR_OPEN }
+    {
+      allowPrOpen: currentTicket?.status === TicketState.PR_OPEN,
+      ...(contractProvenance === undefined ? {} : { contractProvenance }),
+      ...(executionId === undefined ? {} : { executionId }),
+    }
   );
   if (readiness === undefined || readiness.result !== 'PASS' || readiness.readySha === undefined) {
     throw new Error('KAR-8 fail closed: current exact-SHA Pre-PR Readiness PASS is unavailable');
@@ -390,7 +399,9 @@ function persistPrEvidence(
     event.payload.baseBranch === project.defaultBranch &&
     event.payload.headBranch === verifiedWorkspace.branchName &&
     event.payload.submittedHeadSha === readiness.readySha &&
-    event.payload.contractDigest === readiness.contractDigest
+    event.payload.contractDigest === readiness.contractDigest &&
+    event.payload.contractSource === readiness.contractSource &&
+    event.payload.contractRevision === readiness.contractRevision
   );
   if (prior.some((event) => !matching.includes(event))) {
     throw new Error('KAR-8 fail closed: durable GitHub PR evidence conflicts with the current submission');
@@ -439,6 +450,7 @@ async function ensureUsageReceipt(
     event.payload.prNumber === pullRequest.number &&
     event.payload.submittedHeadSha === readiness.readySha &&
     event.payload.contractDigest === readiness.contractDigest &&
+    event.payload.contractSource === readiness.contractSource &&
     event.payload.contractRevision === receipt.contractRevision &&
     event.payload.executionRunId === receipt.executionRunId
   );
@@ -479,6 +491,7 @@ async function ensureUsageReceipt(
       commentId: comment.id,
       ...(comment.url === undefined ? {} : { commentUrl: comment.url }),
       contractDigest: receipt.contractDigest,
+      contractSource: receipt.contractSource,
       contractRevision: receipt.contractRevision,
       executionRunId: receipt.executionRunId,
       recordedAt: workspace.now?.() ?? new Date().toISOString(),
@@ -653,6 +666,7 @@ function buildUsageReceipt(
     ticketId,
     headSha: readiness.readySha,
     contractDigest: readiness.contractDigest,
+    contractSource: readiness.contractSource,
     contractRevision: readiness.contractRevision,
     executionRunId,
     routingMode,
