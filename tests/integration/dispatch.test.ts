@@ -149,8 +149,10 @@ describe('Linear dispatch claim bridge', () => {
   it('refetches the live queued issue and claims exactly once for duplicate delivery', async () => {
     const harness = createHarness();
     let calls = 0;
-    const service = serviceFor(harness, async () => {
+    const executionIds: Array<string | undefined> = [];
+    const service = serviceFor(harness, async (input) => {
       calls += 1;
+      executionIds.push(input.createExecutionId?.());
       return fakeResult();
     });
     const request = webhook('linear-issue-1', '11111111-1111-4111-8111-111111111111');
@@ -161,6 +163,11 @@ describe('Linear dispatch claim bridge', () => {
     expect(calls).toBe(0);
     await flushImmediate();
     expect(calls).toBe(1);
+    const claim = createEventRepository(harness.db).findByProjectId(
+      createProjectRepository(harness.db).findAll()[0].id
+    ).find((event) => event.type === EventType.DISPATCH_CLAIMED);
+    if (claim?.type !== EventType.DISPATCH_CLAIMED) throw new Error('dispatch claim evidence missing');
+    expect(executionIds).toEqual([claim.payload.executionId]);
     expect(createEventRepository(harness.db).findByProjectId(
       createProjectRepository(harness.db).findAll()[0].id
     ).filter((event) => event.type === EventType.DISPATCH_CLAIMED)).toHaveLength(1);
@@ -232,6 +239,10 @@ describe('Linear dispatch claim bridge', () => {
     expect((await service.handleWebhook(request.body, request.headers)).outcome).toBe('CLAIMED');
     await flushImmediate();
     const projectId = createProjectRepository(harness.db).findAll()[0].id;
+    const claim = createEventRepository(harness.db).findByProjectId(projectId)
+      .find((event): event is Extract<typeof event, { type: typeof EventType.DISPATCH_CLAIMED }> =>
+        event.type === EventType.DISPATCH_CLAIMED);
+    if (claim === undefined) throw new Error('dispatch claim evidence missing');
     createEventRepository(harness.db).append({
       id: randomUUID(),
       timestamp: new Date().toISOString(),
@@ -239,7 +250,7 @@ describe('Linear dispatch claim bridge', () => {
       ticketId: 'DP-1',
       type: EventType.EXECUTION_TERMINAL,
       payload: {
-        executionId: 'dispatch-terminal-test',
+        executionId: claim.payload.executionId,
         ticketId: 'DP-1',
         outcome: 'NEEDS_HUMAN',
         contractDigest: 'a'.repeat(64),
@@ -252,6 +263,39 @@ describe('Linear dispatch claim bridge', () => {
     expect(await service.recoverIncompleteClaims()).toBe(0);
     expect(createEventRepository(harness.db).findByProjectId(projectId)
       .filter((event) => event.type === EventType.DISPATCH_COMPLETED)).toHaveLength(1);
+  });
+
+  it('does not reconcile a terminal event belonging to another execution', async () => {
+    const harness = createHarness();
+    let allowExecution = false;
+    const service = serviceFor(harness, async () => {
+      if (!allowExecution) throw new Error('simulated handoff interruption');
+      return fakeResult();
+    });
+    const request = webhook('linear-issue-1', '99999999-9999-4999-8999-999999999999');
+    expect((await service.handleWebhook(request.body, request.headers)).outcome).toBe('CLAIMED');
+    await flushImmediate();
+    const projectId = createProjectRepository(harness.db).findAll()[0].id;
+    createEventRepository(harness.db).append({
+      id: randomUUID(),
+      timestamp: new Date().toISOString(),
+      projectId,
+      ticketId: 'DP-1',
+      type: EventType.EXECUTION_TERMINAL,
+      payload: {
+        executionId: 'unrelated-execution',
+        ticketId: 'DP-1',
+        outcome: 'NEEDS_HUMAN',
+        contractDigest: 'a'.repeat(64),
+        contractSource: 'test',
+        contractRevision: '1',
+        reason: 'unrelated terminal evidence',
+        recordedAt: new Date().toISOString(),
+      },
+    });
+    allowExecution = true;
+    expect(await service.recoverIncompleteClaims()).toBe(1);
+    await flushImmediate();
   });
 
   it('exposes only the configured POST webhook and acknowledges before execution work', async () => {

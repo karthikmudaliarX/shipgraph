@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+export const LINEAR_DISPATCH_API_TIMEOUT_MS = 4_000;
+
 const linearIssueResponseSchema = z.object({
   data: z.object({
     issue: z.object({
@@ -64,6 +66,7 @@ export function createLinearDispatchClient(
           'content-type': 'application/json',
         },
         body: JSON.stringify({ query: ISSUE_QUERY, variables: { id: issueId } }),
+        signal: AbortSignal.timeout(LINEAR_DISPATCH_API_TIMEOUT_MS),
       });
       if (!response.ok) {
         throw new Error(`Linear issue lookup failed with HTTP ${response.status}`);

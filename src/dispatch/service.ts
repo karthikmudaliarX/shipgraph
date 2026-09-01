@@ -83,6 +83,7 @@ function executionTerminalAfter(
     (event): event is ExecutionTerminal =>
       event.type === EventType.EXECUTION_TERMINAL &&
       event.ticketId === claim.ticketId &&
+      event.payload.executionId === claim.payload.executionId &&
       event.sequence > claim.sequence
   );
 }
@@ -222,6 +223,7 @@ export function createLinearDispatchService(options: LinearDispatchServiceOption
       }
 
       const claimId = randomUUID();
+      const executionId = randomUUID().replaceAll('-', '');
       const claimedAt = nowIso(options.workspace);
       const event = createEventRepository(options.workspace.db).append({
         id: options.workspace.createEventId?.() ?? randomUUID(),
@@ -231,6 +233,7 @@ export function createLinearDispatchService(options: LinearDispatchServiceOption
         type: EventType.DISPATCH_CLAIMED,
         payload: {
           claimId,
+          executionId,
           ticketId: ticket.id,
           linearIssueId: issue.id,
           linearIdentifier: issue.identifier,
@@ -298,8 +301,12 @@ export function createLinearDispatchService(options: LinearDispatchServiceOption
   const scheduleClaim = (claim: DispatchClaim, input: ExecuteTicketInput): boolean => {
     if (inFlight.has(claim.payload.claimId)) return false;
     inFlight.add(claim.payload.claimId);
+    const boundInput: ExecuteTicketInput = {
+      ...input,
+      createExecutionId: () => claim.payload.executionId,
+    };
     setImmediate(() => {
-      void execute(input)
+      void execute(boundInput)
         .then((result) => completeClaim(claim, result.outcome))
         .catch(() => {
           // An incomplete claim is intentionally left durable for recovery.

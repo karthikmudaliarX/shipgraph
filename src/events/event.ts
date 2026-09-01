@@ -197,6 +197,7 @@ export const workspaceFailedPayloadSchema = z.object({
 
 export const dispatchClaimedPayloadSchema = z.object({
   claimId: z.string().uuid(),
+  executionId: identitySchema,
   ticketId: identitySchema,
   linearIssueId: identitySchema,
   linearIdentifier: identitySchema,

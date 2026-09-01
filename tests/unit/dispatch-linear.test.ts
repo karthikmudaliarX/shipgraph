@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { createLinearDispatchClient } from '../../src/dispatch/linear.js';
+import {
+  createLinearDispatchClient,
+  LINEAR_DISPATCH_API_TIMEOUT_MS,
+} from '../../src/dispatch/linear.js';
 
 describe('Linear dispatch GraphQL client', () => {
   it('uses the fixed API endpoint contract and parses the live issue shape', async () => {
@@ -35,6 +38,22 @@ describe('Linear dispatch GraphQL client', () => {
     expect(requestInit?.method).toBe('POST');
     expect(requestInit?.headers).toMatchObject({ authorization: 'linear-test-key' });
     expect(String(requestInit?.body)).toContain('ShipGraphDispatchIssue');
+    expect(requestInit?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('bounds live issue lookup before admission can wait indefinitely', async () => {
+    let signal: AbortSignal | null | undefined;
+    const client = createLinearDispatchClient({
+      apiKey: 'linear-test-key',
+      fetch: async (_url, init) => {
+        signal = init?.signal;
+        return new Response(JSON.stringify({ data: { issue: null } }), { status: 200 });
+      },
+    });
+
+    await expect(client.getIssue('linear-issue-1')).resolves.toBeUndefined();
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(LINEAR_DISPATCH_API_TIMEOUT_MS).toBeLessThan(5_000);
   });
 
   it('fails closed on malformed provider responses and GraphQL errors', async () => {
