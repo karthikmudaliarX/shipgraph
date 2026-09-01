@@ -31,6 +31,121 @@ const contract = {
   outOfScope: ['Scheduler selection', 'Post-PR lifecycle'],
 };
 
+async function executeSafetyScenario(
+  resultOverrides: Partial<AgentExecutionResult>,
+  executionPolicy?: NonNullable<Parameters<typeof executeTicket>[0]['executionPolicy']>
+): Promise<{
+  result: Awaited<ReturnType<typeof executeTicket>>;
+  reports: AgentExecutionRequest[];
+  db: DbConnection;
+  projectDir: string;
+  worktreeRoot: string;
+}> {
+  const projectDir = mkdtempSync(join(tmpdir(), 'shipgraph-execution-guard-src-'));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), 'shipgraph-execution-guard-root-'));
+  git(projectDir, 'init', '-b', 'main');
+  git(projectDir, 'config', 'user.email', 'shipgraph-execution@example.com');
+  git(projectDir, 'config', 'user.name', 'ShipGraph Execution Test');
+  writeFileSync(join(projectDir, 'README.md'), '# execution guard\n');
+  git(projectDir, 'add', '.');
+  git(projectDir, 'commit', '-m', 'initial');
+  initProject(projectDir, {
+    config: {
+      version: 1,
+      project: { name: 'execution-guard', repository: 'owner/execution-guard', defaultBranch: 'main' },
+      execution: { maxConcurrentTickets: 1, maxRepairIterations: 1 },
+      release: { requireHumanApproval: true, requireCleanCI: true, requireExactShaReviews: true },
+      agents: { implementer: 'opencode', reviewers: ['correctness'] },
+    },
+  });
+  writeFileSync(join(projectDir, 'shipgraph.backlog.yml'), stringify({
+    version: 1,
+    tickets: [{
+      id: 'KAR-12',
+      title: 'Execution guard',
+      description: 'Test execution safety accounting.',
+      priority: 'high',
+      dependsOn: [],
+      scope: { allowedPaths: ['README.md'], forbiddenPaths: [] },
+      acceptanceCriteria: [{ id: 'AC-1', description: 'Enforce execution limits.' }],
+      verification: { commands: ['true'] },
+      risk: 'medium',
+      agent: {},
+      release: {},
+    }],
+  }));
+  syncBacklogProject(projectDir);
+  const db = openAndMigrate(join(projectDir, '.shipgraph', 'shipgraph.db'));
+  const projectId = createTicketRepository(db).findById('KAR-12')?.projectId;
+  if (projectId === undefined) throw new Error('test ticket missing');
+  const reports: AgentExecutionRequest[] = [];
+  const executionAdapter: AgentExecutionAdapter = {
+    provider: 'opencode',
+    capabilities: ['execute', 'review', 'repair'],
+    supportsTokenLimit: true,
+    supportsCostLimit: true,
+    reportsUsage: true,
+    probe: () => ({ available: true as const, version: 'test-agent' }),
+    execute: async (request): Promise<AgentExecutionResult> => {
+      reports.push(request);
+      return {
+        outcome: 'SUCCEEDED',
+        timedOut: false,
+        cancelled: false,
+        processGroupStopped: true,
+        stdout: 'implementation complete',
+        stderr: '',
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        usage: { inputTokens: 1, outputTokens: 1, cost: 0 },
+        ...resultOverrides,
+      };
+    },
+  };
+  registerModelProviderAdapter(executionAdapter, 'opencode-go');
+  const modelService = new ModelRoutingService({
+    db,
+    projectId,
+    adapters: [{
+      providerId: 'opencode-go',
+      family: 'opencode',
+      displayName: 'OpenCode Go',
+      probe: async () => ({
+        availability: 'available',
+        auth: 'authenticated',
+        version: 'test-provider',
+        capabilities: ['implementation', 'review', 'repair'],
+      }),
+      discoverModels: async () => ({
+        status: 'known',
+        models: [{ modelId: 'opencode/test', capabilities: ['implementation', 'review', 'repair'] }],
+      }),
+    }],
+    executionAdapters: [{ modelProviderId: 'opencode-go', adapter: executionAdapter }],
+  });
+  const result = await executeTicket({
+    issueId: 'KAR-12',
+    contract,
+    contractSource: 'linear:KAR-12',
+    contractRevision: 'v1',
+    workspace: { db, projectDir, worktreeRoot },
+    modelService,
+    routing: {
+      risk: 'medium',
+      envelope: {
+        mode: 'balanced',
+        maxConcurrentTickets: 1,
+        activeConcurrentTickets: 0,
+        budgetRemaining: 'unknown',
+      },
+    },
+    ...(executionPolicy === undefined ? {} : { executionPolicy }),
+    timeoutMs: 60_000,
+    createExecutionId: () => 'execution-guard',
+  });
+  return { result, reports, db, projectDir, worktreeRoot };
+}
+
 describe('KAR-12 single-ticket execution identity', () => {
   let projectDir: string | undefined;
   let worktreeRoot: string | undefined;
@@ -137,7 +252,7 @@ describe('KAR-12 single-ticket execution identity', () => {
       contractRevision: 'v2',
       createExecutionId: () => 'execution-3',
     })).rejects.toThrow(/immutable once bound/);
-  });
+  }, 20_000);
 
   it('composes the existing implementation, review, readiness, and GitHub stages to PR_RAISED', async () => {
     projectDir = mkdtempSync(join(tmpdir(), 'shipgraph-execution-success-src-'));
@@ -289,7 +404,7 @@ describe('KAR-12 single-ticket execution identity', () => {
           budgetRemaining: 'unknown',
         },
       },
-      executionPolicy: { maxAttempts: 1, maxTimeoutMs: 60_000 },
+      executionPolicy: { maxAttempts: 1, maxTimeoutMs: 60_000, maxTokens: 10, maxCost: 1 },
       timeoutMs: 60_000,
       gitHost: host,
       createExecutionId: () => 'x'.repeat(256),
@@ -299,6 +414,8 @@ describe('KAR-12 single-ticket execution identity', () => {
     expect(result.github?.pullRequest.number).toBe(12);
     expect(reports.filter((request) => request.reviewType === undefined)).toHaveLength(1);
     expect(reports.filter((request) => request.reviewType !== undefined)).toHaveLength(2);
+    expect(reports[1]?.remainingTokens).toBe(4);
+    expect(reports[1]?.remainingCost).toBe(0.5);
     const routingRequestIds = (db.prepare(
       'SELECT request_id FROM routing_decisions ORDER BY created_at'
     ).all() as Array<{ request_id: string }>).map((row) => row.request_id);
@@ -315,4 +432,63 @@ describe('KAR-12 single-ticket execution identity', () => {
       run.contractRevision === result.evidence.contractRevision
     )).toBe(true);
   }, 20_000);
+
+  it('deducts durable implementation usage and fails closed before repair', async () => {
+    const cases = [
+      {
+        name: 'exhausted',
+        resultOverrides: { usage: { inputTokens: 1, outputTokens: 1, cost: 0 } },
+        executionPolicy: { maxTokens: 2 },
+        outcome: 'BUDGET_EXHAUSTED',
+      },
+      {
+        name: 'unknown',
+        resultOverrides: { usage: { cost: 0 } },
+        executionPolicy: { maxTokens: 10 },
+        outcome: 'NEEDS_HUMAN',
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const fixture = await executeSafetyScenario(testCase.resultOverrides, testCase.executionPolicy);
+      try {
+        expect(fixture.result.outcome, testCase.name).toBe(testCase.outcome);
+        expect(fixture.reports, testCase.name).toHaveLength(1);
+        expect(fixture.reports[0]?.reviewType, testCase.name).toBeUndefined();
+        expect(createEventRepository(fixture.db).findByTicketId('KAR-12')
+          .filter((event) => event.type === EventType.EXECUTION_TERMINAL)).toHaveLength(1);
+      } finally {
+        fixture.db.close();
+        rmSync(fixture.projectDir, { recursive: true, force: true });
+        rmSync(fixture.worktreeRoot, { recursive: true, force: true });
+      }
+    }
+  }, 30_000);
+
+  it('keeps human safety outcomes lifecycle-consistent and classifies execution overage', async () => {
+    const paused = await executeSafetyScenario({}, { scopeGrowth: true });
+    try {
+      expect(paused.result.outcome).toBe('NEEDS_HUMAN');
+      expect(createTicketRepository(paused.db).findById('KAR-12')?.status).toBe(TicketState.PAUSED);
+      expect(paused.reports).toHaveLength(0);
+    } finally {
+      paused.db.close();
+      rmSync(paused.projectDir, { recursive: true, force: true });
+      rmSync(paused.worktreeRoot, { recursive: true, force: true });
+    }
+
+    const overage = await executeSafetyScenario({
+      outcome: 'NEEDS_HUMAN',
+      failureCategory: 'safety_limit',
+      failureReason: 'Execution token budget exceeded (3 > 2)',
+    });
+    try {
+      expect(overage.result.outcome).toBe('BUDGET_EXHAUSTED');
+      expect(createTicketRepository(overage.db).findById('KAR-12')?.status).toBe(TicketState.PAUSED);
+    } finally {
+      overage.db.close();
+      rmSync(overage.projectDir, { recursive: true, force: true });
+      rmSync(overage.worktreeRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

@@ -5,6 +5,7 @@ import {
   AGENT_INSTRUCTIONS_LIMIT_BYTES,
   type AgentRunRecord,
 } from '../domain/agent-run.js';
+import type { UsageLedgerRecord } from '../domain/model-provider.js';
 import {
   deriveBehavioralContractProvenance,
   behavioralTicketContractSchema,
@@ -231,6 +232,18 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
   }
   const terminalAfterImplementation = terminalFor(input.workspace, input.issueId, binding.executionId);
   if (terminalAfterImplementation !== undefined) return terminalAfterImplementation;
+  const remainingExecution = remainingExecutionSafety(input, binding, implementationRun);
+  if (remainingExecution.blocked !== undefined) {
+    return terminalize(
+      input,
+      projectId,
+      binding,
+      remainingExecution.blocked.outcome,
+      remainingExecution.blocked.reason,
+      workspace,
+      implementationRun
+    );
+  }
   if (currentTicketStatus(input, input.issueId) === TicketState.IMPLEMENTING) {
     persistTicketTransition(input.workspace.db, {
       ticketId: input.issueId,
@@ -251,7 +264,7 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
       routing: { ...input.routing, requestId: stageRequestId(binding.executionId, 'repair') },
       ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
-      ...(input.executionPolicy === undefined ? {} : { safety: input.executionPolicy }),
+      ...(remainingExecution.policy === undefined ? {} : { safety: remainingExecution.policy }),
       contract,
       contractProvenance: provenance,
       executionId: binding.executionId,
@@ -585,12 +598,11 @@ function terminalize(
     });
   } else if (
     ticket !== undefined &&
-    ticket.status === TicketState.ELIGIBLE &&
+    (evidence.outcome === 'NEEDS_HUMAN' || evidence.outcome === 'BUDGET_EXHAUSTED') &&
     canTransition(ticket.status, TicketState.PAUSED)
   ) {
-    // Some admission failures occur while the ticket is still ELIGIBLE, and
-    // the existing state machine intentionally routes that state through
-    // PAUSED for human recovery rather than inventing a new transition.
+    // Human-recoverable safety outcomes use the existing PAUSED transition
+    // when the current lifecycle state does not permit NEEDS_HUMAN directly.
     persistTicketTransition(input.workspace.db, {
       ticketId: input.issueId,
       projectId,
@@ -711,12 +723,127 @@ function currentTicketStatus(input: ExecuteTicketInput, ticketId: string): strin
 function runOutcome(run: RunRecord): ExecutionOutcome {
   if (
     run.failureCategory === 'safety_limit' &&
-    /(?:execution envelope budget is exhausted|(?:token|cost) budget exhausted)/iu.test(run.failureReason ?? '')
+    isExecutionBudgetFailure(run.failureReason)
   ) {
     return 'BUDGET_EXHAUSTED';
   }
   if (run.status === 'NEEDS_HUMAN') return 'NEEDS_HUMAN';
   return 'FAILED';
+}
+
+const EXECUTION_BUDGET_FAILURE_REASONS = [
+  /^execution envelope budget is exhausted\b/iu,
+  /^execution (?:token|cost) budget (?:exhausted|exceeded)\b/iu,
+  /^kar-10 (?:token|cost) budget exhausted\b/iu,
+] as const;
+
+function isExecutionBudgetFailure(reason: string | undefined): boolean {
+  return reason !== undefined && EXECUTION_BUDGET_FAILURE_REASONS.some((pattern) => pattern.test(reason));
+}
+
+type RemainingExecutionSafety =
+  | { policy: AgentSafetyPolicy | undefined; blocked?: never }
+  | { blocked: { outcome: Extract<ExecutionOutcome, 'NEEDS_HUMAN' | 'BUDGET_EXHAUSTED'>; reason: string }; policy?: never };
+
+function remainingExecutionSafety(
+  input: ExecuteTicketInput,
+  binding: Binding,
+  implementationRun: RunRecord
+): RemainingExecutionSafety {
+  const policy = input.executionPolicy;
+  if (policy === undefined) return { policy: undefined };
+
+  const usage = implementationUsageTotals(input, binding, implementationRun);
+  const remainingPolicy = { ...policy };
+  if (policy.maxTokens !== undefined) {
+    if (usage.inputTokens === undefined || usage.outputTokens === undefined) {
+      return {
+        blocked: {
+          outcome: 'NEEDS_HUMAN',
+          reason: 'KAR-12 cannot continue: durable implementation token usage is unknown under the configured execution budget',
+        },
+      };
+    }
+    const remaining = policy.maxTokens - usage.inputTokens - usage.outputTokens;
+    if (remaining <= 0) {
+      return {
+        blocked: {
+          outcome: 'BUDGET_EXHAUSTED',
+          reason: `KAR-12 execution token budget is exhausted by implementation usage (${usage.inputTokens + usage.outputTokens} >= ${policy.maxTokens})`,
+        },
+      };
+    }
+    remainingPolicy.maxTokens = remaining;
+  }
+  if (policy.maxCost !== undefined) {
+    if (usage.cost === undefined) {
+      return {
+        blocked: {
+          outcome: 'NEEDS_HUMAN',
+          reason: 'KAR-12 cannot continue: durable implementation cost usage is unknown under the configured execution budget',
+        },
+      };
+    }
+    const remaining = policy.maxCost - usage.cost;
+    if (remaining <= 0) {
+      return {
+        blocked: {
+          outcome: 'BUDGET_EXHAUSTED',
+          reason: `KAR-12 execution cost budget is exhausted by implementation usage (${usage.cost} >= ${policy.maxCost})`,
+        },
+      };
+    }
+    remainingPolicy.maxCost = remaining;
+  }
+  return { policy: remainingPolicy };
+}
+
+function implementationUsageTotals(
+  input: ExecuteTicketInput,
+  binding: Binding,
+  implementationRun: RunRecord
+): { inputTokens: number | undefined; outputTokens: number | undefined; cost: number | undefined } {
+  const runs = createRunRepository(input.workspace.db)
+    .findByTicketId(input.issueId)
+    .filter((run) =>
+      run.task === 'implementation' &&
+      run.executionId === binding.executionId &&
+      run.contractDigest === binding.provenance.contractDigest &&
+      run.contractSource === binding.provenance.contractSource &&
+      run.contractRevision === binding.provenance.contractRevision
+    );
+  const entries = input.modelService.listUsage();
+  const usageRunIds = new Set(entries.map((entry) => entry.runId));
+  const runIds = new Set(
+    runs
+      // A pre-launch fallback row has no usage ledger entry and consumed no
+      // provider budget. Every launched/finished run is represented by usage.
+      .filter((run) => run.status !== 'NEEDS_HUMAN' || usageRunIds.has(run.id))
+      .map((run) => run.id)
+  );
+  runIds.add(implementationRun.id);
+  return {
+    inputTokens: sumImplementationMetric(entries, runIds, 'inputTokens'),
+    outputTokens: sumImplementationMetric(entries, runIds, 'outputTokens'),
+    cost: sumImplementationMetric(entries, runIds, 'cost'),
+  };
+}
+
+function sumImplementationMetric(
+  entries: readonly UsageLedgerRecord[],
+  runIds: ReadonlySet<string>,
+  metric: 'inputTokens' | 'outputTokens' | 'cost'
+): number | undefined {
+  let total = 0;
+  const observed = new Set<string>();
+  for (const entry of entries) {
+    if (!runIds.has(entry.runId)) continue;
+    observed.add(entry.runId);
+    if (entry[metric] === 'unknown') return undefined;
+    total += entry[metric];
+  }
+  if ([...runIds].some((runId) => !observed.has(runId))) return undefined;
+  return total;
 }
 
 function errorOutcome(input: ExecuteTicketInput, error: unknown): ExecutionOutcome {
