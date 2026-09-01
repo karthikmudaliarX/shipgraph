@@ -698,17 +698,39 @@ function errorOutcome(input: ExecuteTicketInput, error: unknown): ExecutionOutco
 }
 
 function repairOutcome(input: ExecuteTicketInput, executionId: string): ExecutionOutcome {
-  const budgetRun = createRunRepository(input.workspace.db)
+  const repairRuns = createRunRepository(input.workspace.db)
     .findByTicketId(input.issueId)
-    .find((run) =>
+    .filter((run) =>
       run.executionId !== undefined &&
       run.executionId === executionId &&
-      run.task === 'repair' &&
-      runOutcome(run) === 'BUDGET_EXHAUSTED'
+      (run.task === 'review' || run.task === 'repair')
     );
-  return budgetRun !== undefined
-    ? 'BUDGET_EXHAUSTED'
-    : 'NEEDS_HUMAN';
+  if (repairRuns.some((run) => run.task === 'repair' && runOutcome(run) === 'BUDGET_EXHAUSTED')) {
+    return 'BUDGET_EXHAUSTED';
+  }
+
+  // remainingStageSafety can exhaust a durable budget before a new repair
+  // run exists. A measured UsageLedger total reaching the ceiling is the
+  // only proof used here; unknown telemetry is never treated as zero.
+  const runIds = new Set(repairRuns.map((run) => run.id));
+  const usage = input.modelService.listUsage().filter((entry) => runIds.has(entry.runId));
+  if (input.executionPolicy?.maxTokens !== undefined) {
+    const knownTokens = usage.reduce((total, entry) =>
+      typeof entry.inputTokens === 'number' && typeof entry.outputTokens === 'number'
+        ? total + entry.inputTokens + entry.outputTokens
+        : total,
+      0
+    );
+    if (knownTokens >= input.executionPolicy.maxTokens) return 'BUDGET_EXHAUSTED';
+  }
+  if (input.executionPolicy?.maxCost !== undefined) {
+    const knownCost = usage.reduce((total, entry) =>
+      typeof entry.cost === 'number' ? total + entry.cost : total,
+      0
+    );
+    if (knownCost >= input.executionPolicy.maxCost) return 'BUDGET_EXHAUSTED';
+  }
+  return 'NEEDS_HUMAN';
 }
 
 function stageRequestId(executionId: string, stage: string): string {
