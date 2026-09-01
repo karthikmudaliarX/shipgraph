@@ -33,7 +33,7 @@ policy or human review. Only approved tickets may enter `ELIGIBLE`.
 
 ## Worktree isolation
 
-Each implementation ticket will eventually receive its own isolated git
+Each implementation ticket receives its own isolated git
 worktree based on an exact recorded base SHA.
 
 Ticket mutations are never executed directly in the user's normal working
@@ -42,8 +42,19 @@ change explicit.
 
 ## Safety hard-stops
 
-The following classes of change require human escalation (`NEEDS_HUMAN`) and
-will never be performed autonomously:
+Sensitive or destructive work must be classified by the trusted caller or
+Scheduler before execution. The classification is represented in KAR-7's
+explicit safety policy through signals such as `destructive`,
+`policySensitive`, `materiallyAmbiguous`, `scopeGrowth`,
+`approvalRequired`/`approvalGranted`, and high or critical risk.
+
+When those supplied signals require approval or escalation, KAR-7 fails closed,
+requires approval, or records `NEEDS_HUMAN` as appropriate. KAR-7 does not
+inspect arbitrary repository diffs or content and autonomously infer that a
+change concerns credentials, production, destructive database operations, DNS,
+billing, release policy, or another sensitive category.
+
+The following are examples of work that must be classified before execution:
 
 - secrets / credential changes
 - production mutations
@@ -55,9 +66,9 @@ will never be performed autonomously:
 - autonomous backlog-policy mutation
 - release-policy mutation
 
-KAR-7 implements the execution safety limits and explicit approval/scope gates
-that classify unsafe or unprovable work as `NEEDS_HUMAN`. These gates constrain
-the one authorized execution; they are not a second policy engine or Scheduler.
+KAR-7 enforces the supplied execution safety limits and explicit
+approval/scope gates. These gates constrain the one authorized execution; they
+are not a classifier, a second policy engine, or Scheduler.
 
 ## Systems of record
 
