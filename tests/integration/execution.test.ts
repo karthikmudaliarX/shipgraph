@@ -292,13 +292,17 @@ describe('KAR-12 single-ticket execution identity', () => {
       executionPolicy: { maxAttempts: 1, maxTimeoutMs: 60_000 },
       timeoutMs: 60_000,
       gitHost: host,
-      createExecutionId: () => 'execution-success',
+      createExecutionId: () => 'x'.repeat(256),
     });
 
     expect(result.outcome).toBe('PR_RAISED');
     expect(result.github?.pullRequest.number).toBe(12);
     expect(reports.filter((request) => request.reviewType === undefined)).toHaveLength(1);
     expect(reports.filter((request) => request.reviewType !== undefined)).toHaveLength(2);
+    const routingRequestIds = (db.prepare(
+      'SELECT request_id FROM routing_decisions ORDER BY created_at'
+    ).all() as Array<{ request_id: string }>).map((row) => row.request_id);
+    expect(routingRequestIds.some((requestId) => /^[0-9a-f]{64}:implementation$/u.test(requestId))).toBe(true);
     expect(createTicketRepository(db).findById('KAR-12')?.status).toBe(TicketState.PR_OPEN);
     expect(result.evidence.contractDigest).toMatch(/^[0-9a-f]{64}$/);
     expect(result.evidence.submittedHeadSha).toBe(result.github?.readiness.readySha);

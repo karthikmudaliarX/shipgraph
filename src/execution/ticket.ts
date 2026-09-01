@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { canTransition } from '../core/state-machine/transitions.js';
 import { TicketState } from '../core/state-machine/state.js';
 import {
@@ -767,7 +767,7 @@ function repairOutcome(input: ExecuteTicketInput, executionId: string): Executio
 
 function stageRequestId(executionId: string, stage: string): string {
   const value = `${executionId}:${stage}`;
-  return value.length <= 256 ? value : value.slice(0, 256);
+  return value.length <= 256 ? value : `${createHash('sha256').update(value).digest('hex')}:${stage}`;
 }
 
 function implementationInstructions(issueId: string, contract: BehavioralTicketContract): string {
