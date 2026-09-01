@@ -66,6 +66,7 @@ type Binding = {
   executionId: string;
   contract: BehavioralTicketContract;
   provenance: ExecutionContractProvenance;
+  conflictReason?: string;
 };
 
 /**
@@ -89,6 +90,9 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
   const binding = bindExecution(input, projectId, contract, provenance);
   const priorTerminal = terminalFor(input.workspace, input.issueId, binding.executionId);
   if (priorTerminal !== undefined) return priorTerminal;
+  if (binding.conflictReason !== undefined) {
+    return terminalize(input, projectId, binding, 'NEEDS_HUMAN', binding.conflictReason);
+  }
 
   if (ticket.status === TicketState.PR_OPEN) {
     return recoverOpenPullRequest(input, projectId, binding);
@@ -98,9 +102,14 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
     return terminalize(input, projectId, binding, blocked.outcome, blocked.reason);
   }
 
+  const existingImplementationRun = latestRun(input.workspace, input.issueId, binding.executionId, 'implementation');
   let workspace: WorkspaceRecord;
   try {
-    workspace = await acquireWorkspace(input, ticket.status);
+    workspace = await acquireWorkspace(
+      input,
+      ticket.status,
+      existingImplementationRun?.status === 'SUCCEEDED'
+    );
   } catch (error) {
     return terminalize(
       input,
@@ -115,7 +124,7 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
   // Workspace admission may transition ELIGIBLE to PLANNING. Use the durable
   // post-admission state when deciding which existing stage to resume.
   const executionStatus = currentTicketStatus(input, input.issueId);
-  let implementationRun = latestRun(input.workspace, input.issueId, binding.executionId, 'implementation');
+  let implementationRun = existingImplementationRun;
   const activeRun = activeExecutionRun(input.workspace, input.issueId, binding.executionId);
   if (activeRun !== undefined) {
     return terminalize(
@@ -198,6 +207,8 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
       workspace
     );
   }
+  const terminalAfterImplementation = terminalFor(input.workspace, input.issueId, binding.executionId);
+  if (terminalAfterImplementation !== undefined) return terminalAfterImplementation;
   if (currentTicketStatus(input, input.issueId) === TicketState.IMPLEMENTING) {
     persistTicketTransition(input.workspace.db, {
       ticketId: input.issueId,
@@ -209,6 +220,8 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
 
   let repair;
   try {
+    const terminalBeforeRepair = terminalFor(input.workspace, input.issueId, binding.executionId);
+    if (terminalBeforeRepair !== undefined) return terminalBeforeRepair;
     repair = await runPrePrRepair({
       ticketId: input.issueId,
       modelService: input.modelService,
@@ -225,8 +238,11 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
     return terminalize(input, projectId, binding, 'FAILED', `KAR-12 pre-PR verification failed: ${errorMessage(error)}`, workspace);
   }
   if (repair.status !== 'PASSED') {
-    return terminalize(input, projectId, binding, 'NEEDS_HUMAN', repair.reason ?? 'KAR-10 did not produce a passing pre-PR candidate', workspace);
+    const reason = repair.reason ?? 'KAR-10 did not produce a passing pre-PR candidate';
+    return terminalize(input, projectId, binding, repairOutcome(reason), reason, workspace);
   }
+  const terminalAfterRepair = terminalFor(input.workspace, input.issueId, binding.executionId);
+  if (terminalAfterRepair !== undefined) return terminalAfterRepair;
 
   let readiness;
   try {
@@ -242,6 +258,8 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
   if (readiness.result !== 'PASS' || readiness.evidence === undefined) {
     return terminalize(input, projectId, binding, 'NEEDS_HUMAN', readiness.reason ?? 'KAR-11 readiness did not pass', workspace);
   }
+  const terminalAfterReadiness = terminalFor(input.workspace, input.issueId, binding.executionId);
+  if (terminalAfterReadiness !== undefined) return terminalAfterReadiness;
   const currentReadiness = await getCurrentPrePrReadinessEvidence(
     input.workspace,
     input.issueId,
@@ -253,6 +271,8 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
 
   let github: GitHubPullRequestResult;
   try {
+    const terminalBeforeGitHub = terminalFor(input.workspace, input.issueId, binding.executionId);
+    if (terminalBeforeGitHub !== undefined) return terminalBeforeGitHub;
     github = await createGitHubPullRequest({
       ticketId: input.issueId,
       workspace: input.workspace,
@@ -282,7 +302,9 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
       .filter((run) => run.executionId === binding.executionId)
       .map((run) => run.id),
   });
-  return { outcome: 'PR_RAISED', evidence, github };
+  return evidence.outcome === 'PR_RAISED'
+    ? { outcome: 'PR_RAISED', evidence, github }
+    : { outcome: evidence.outcome, evidence };
 }
 
 async function recoverOpenPullRequest(
@@ -324,7 +346,9 @@ async function recoverOpenPullRequest(
       attempts: repairAttemptsFor(input.workspace, input.issueId, binding.executionId),
       usageRunIds: executionRunIds(input.workspace, input.issueId, binding.executionId),
     });
-    return { outcome: 'PR_RAISED', evidence, github };
+    return evidence.outcome === 'PR_RAISED'
+      ? { outcome: 'PR_RAISED', evidence, github }
+      : { outcome: evidence.outcome, evidence };
   } catch (error) {
     return terminalize(
       input,
@@ -358,16 +382,6 @@ function bindExecution(
       (event): event is Extract<ShipgraphEvent, { type: typeof EventType.EXECUTION_CONTRACT_BOUND }> =>
         event.type === EventType.EXECUTION_CONTRACT_BOUND && event.ticketId === input.issueId
     );
-    const conflictingRevision = events.find(
-      (event): event is Extract<ShipgraphEvent, { type: typeof EventType.EXECUTION_CONTRACT_BOUND }> =>
-        event.type === EventType.EXECUTION_CONTRACT_BOUND &&
-        event.payload.contractSource === provenance.contractSource &&
-        event.payload.contractRevision === provenance.contractRevision &&
-        event.payload.contractDigest !== provenance.contractDigest
-    );
-    if (conflictingRevision !== undefined) {
-      throw new Error('KAR-12 source/revision is already durably bound to conflicting contract content');
-    }
     const existing = bindings.at(-1);
     if (existing !== undefined) {
       if (
@@ -375,7 +389,16 @@ function bindExecution(
         existing.payload.contractSource !== provenance.contractSource ||
         existing.payload.contractRevision !== provenance.contractRevision
       ) {
-        throw new Error('KAR-12 execution contract is immutable once bound');
+        return {
+          executionId: existing.payload.executionId,
+          contract: existing.payload.contract,
+          provenance: {
+            contractDigest: existing.payload.contractDigest,
+            contractSource: existing.payload.contractSource,
+            contractRevision: existing.payload.contractRevision,
+          },
+          conflictReason: 'KAR-12 execution contract is immutable once bound; the supplied source/revision conflicts with durable contract content',
+        };
       }
       return {
         executionId: existing.payload.executionId,
@@ -511,7 +534,8 @@ function terminalize(
 
 async function acquireWorkspace(
   input: ExecuteTicketInput,
-  status: string
+  status: string,
+  completedImplementation: boolean
 ): Promise<WorkspaceRecord> {
   if (status === TicketState.ELIGIBLE) {
     return (await createWorkspace(input.workspace, input.issueId)).workspace;
@@ -519,7 +543,9 @@ async function acquireWorkspace(
   return getVerifiedWorkspaceForExecution(
     input.workspace,
     input.issueId,
-    status === TicketState.PLANNING || status === TicketState.IMPLEMENTING ? 'ready' : 'changed'
+    !completedImplementation && (status === TicketState.PLANNING || status === TicketState.IMPLEMENTING)
+      ? 'ready'
+      : 'changed'
   );
 }
 
@@ -612,6 +638,12 @@ function errorOutcome(error: unknown): ExecutionOutcome {
   return /execution envelope budget is exhausted|token budget exhausted|cost budget exhausted/iu.test(message)
     ? 'BUDGET_EXHAUSTED'
     : 'FAILED';
+}
+
+function repairOutcome(reason: string): ExecutionOutcome {
+  return /(?:token|cost) budget exhausted|budget exhausted/iu.test(reason)
+    ? 'BUDGET_EXHAUSTED'
+    : 'NEEDS_HUMAN';
 }
 
 function stageRequestId(executionId: string, stage: string): string {

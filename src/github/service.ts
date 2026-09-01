@@ -183,7 +183,8 @@ export async function createGitHubPullRequest(
     pullRequest,
     receipt,
     readiness,
-    adapter
+    adapter,
+    input.contractProvenance !== undefined
   );
 
   const currentTicket = createTicketRepository(workspace.db).findById(input.ticketId);
@@ -439,7 +440,8 @@ async function ensureUsageReceipt(
   pullRequest: GitHostPullRequest,
   receipt: GitHubUsageReceipt,
   readiness: CurrentPrePrReadinessEvidence,
-  adapter: GitHostAdapter
+  adapter: GitHostAdapter,
+  requireContractSource: boolean
 ): Promise<Extract<ShipgraphEvent, { type: typeof EventType.GITHUB_USAGE_RECEIPT_RECORDED }>> {
   const events = createEventRepository(workspace.db).findByTicketId(ticketId);
   const prior = events.filter(
@@ -450,7 +452,9 @@ async function ensureUsageReceipt(
     event.payload.prNumber === pullRequest.number &&
     event.payload.submittedHeadSha === readiness.readySha &&
     event.payload.contractDigest === readiness.contractDigest &&
-    event.payload.contractSource === readiness.contractSource &&
+    (requireContractSource
+      ? event.payload.contractSource === readiness.contractSource
+      : event.payload.contractSource === undefined || event.payload.contractSource === readiness.contractSource) &&
     event.payload.contractRevision === receipt.contractRevision &&
     event.payload.executionRunId === receipt.executionRunId
   );
@@ -460,7 +464,7 @@ async function ensureUsageReceipt(
   if (matching.length > 1) throw new Error('KAR-8 fail closed: duplicate usage receipt evidence exists');
   const body = usageReceiptBody(receipt);
   const comments = await adapter.listComments({ repository: project.repository, number: pullRequest.number });
-  const current = findCurrentReceipt(comments, receipt);
+  const current = findCurrentReceipt(comments, receipt, requireContractSource);
   if (matching.length === 1) {
     const persisted = matching[0];
     if (current === undefined || current.id !== persisted.payload.commentId) {
@@ -491,7 +495,7 @@ async function ensureUsageReceipt(
       commentId: comment.id,
       ...(comment.url === undefined ? {} : { commentUrl: comment.url }),
       contractDigest: receipt.contractDigest,
-      contractSource: receipt.contractSource,
+      ...(receipt.contractSource === undefined ? {} : { contractSource: receipt.contractSource }),
       contractRevision: receipt.contractRevision,
       executionRunId: receipt.executionRunId,
       recordedAt: workspace.now?.() ?? new Date().toISOString(),
@@ -499,7 +503,11 @@ async function ensureUsageReceipt(
   }) as Extract<ShipgraphEvent, { type: typeof EventType.GITHUB_USAGE_RECEIPT_RECORDED }>;
 }
 
-function findCurrentReceipt(comments: readonly GitHostComment[], expected: GitHubUsageReceipt): GitHostComment | undefined {
+function findCurrentReceipt(
+  comments: readonly GitHostComment[],
+  expected: GitHubUsageReceipt,
+  requireContractSource: boolean
+): GitHostComment | undefined {
   const matches: GitHostComment[] = [];
   for (const comment of comments) {
     RECEIPT_MARKER_PATTERN.lastIndex = 0;
@@ -516,7 +524,11 @@ function findCurrentReceipt(comments: readonly GitHostComment[], expected: GitHu
         throw new Error('KAR-8 fail closed: a ShipGraph usage receipt has an unsupported schema');
       }
       if (validated.data.ticketId !== expected.ticketId) continue;
-      if (JSON.stringify(validated.data) !== JSON.stringify(expected)) {
+      const sameReceipt = JSON.stringify(validated.data) === JSON.stringify(expected) ||
+        (!requireContractSource &&
+          validated.data.contractSource === undefined &&
+          JSON.stringify(validated.data) === JSON.stringify({ ...expected, contractSource: undefined }));
+      if (!sameReceipt) {
         throw new Error('KAR-8 fail closed: a conflicting ShipGraph usage receipt already exists');
       }
       matches.push(comment);
