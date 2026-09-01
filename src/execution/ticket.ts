@@ -193,7 +193,7 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
         input,
         projectId,
         binding,
-        activeAfterFailure === undefined ? errorOutcome(error) : 'NEEDS_HUMAN',
+        activeAfterFailure === undefined ? errorOutcome(input, error) : 'NEEDS_HUMAN',
         `KAR-12 implementation execution failed: ${errorMessage(error)}`,
         workspace
       );
@@ -253,7 +253,7 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
   }
   if (repair.status !== 'PASSED') {
     const reason = repair.reason ?? 'KAR-10 did not produce a passing pre-PR candidate';
-    return terminalize(input, projectId, binding, repairOutcome(reason), reason, workspace);
+    return terminalize(input, projectId, binding, repairOutcome(input, binding.executionId), reason, workspace);
   }
   const terminalAfterRepair = terminalFor(input.workspace, input.issueId, binding.executionId);
   if (terminalAfterRepair !== undefined) return terminalAfterRepair;
@@ -549,6 +549,20 @@ function terminalize(
       next,
       reason,
     });
+  } else if (
+    ticket !== undefined &&
+    ticket.status === TicketState.ELIGIBLE &&
+    canTransition(ticket.status, TicketState.PAUSED)
+  ) {
+    // Some admission failures occur while the ticket is still ELIGIBLE, and
+    // the existing state machine intentionally routes that state through
+    // PAUSED for human recovery rather than inventing a new transition.
+    persistTicketTransition(input.workspace.db, {
+      ticketId: input.issueId,
+      projectId,
+      next: TicketState.PAUSED,
+      reason,
+    });
   }
   return { outcome: evidence.outcome, evidence };
 }
@@ -657,15 +671,26 @@ function runOutcome(run: RunRecord): ExecutionOutcome {
   return 'FAILED';
 }
 
-function errorOutcome(error: unknown): ExecutionOutcome {
-  const message = errorMessage(error);
-  return /execution envelope budget is exhausted|token budget exhausted|cost budget exhausted/iu.test(message)
+function errorOutcome(input: ExecuteTicketInput, error: unknown): ExecutionOutcome {
+  const budgetRemaining = input.routing.envelope.budgetRemaining;
+  return error instanceof Error &&
+    error.message === 'execution envelope budget is exhausted' &&
+    budgetRemaining !== 'unknown' &&
+    budgetRemaining <= 0
     ? 'BUDGET_EXHAUSTED'
     : 'FAILED';
 }
 
-function repairOutcome(reason: string): ExecutionOutcome {
-  return /(?:execution envelope budget is exhausted|(?:token|cost) budget exhausted)/iu.test(reason)
+function repairOutcome(input: ExecuteTicketInput, executionId: string): ExecutionOutcome {
+  const budgetRun = createRunRepository(input.workspace.db)
+    .findByTicketId(input.issueId)
+    .find((run) =>
+      run.executionId !== undefined &&
+      run.executionId === executionId &&
+      run.task === 'repair' &&
+      runOutcome(run) === 'BUDGET_EXHAUSTED'
+    );
+  return budgetRun !== undefined
     ? 'BUDGET_EXHAUSTED'
     : 'NEEDS_HUMAN';
 }
