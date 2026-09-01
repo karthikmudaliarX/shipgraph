@@ -105,7 +105,13 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
     return terminalize(input, projectId, binding, blocked.outcome, blocked.reason);
   }
 
-  const existingImplementationRun = latestRun(input.workspace, input.issueId, binding.executionId, 'implementation');
+  const existingImplementationRun = latestRun(
+    input.workspace,
+    input.issueId,
+    binding.executionId,
+    'implementation',
+    binding.provenance
+  );
   let workspace: WorkspaceRecord;
   try {
     workspace = await acquireWorkspace(
@@ -128,7 +134,7 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
   // post-admission state when deciding which existing stage to resume.
   const executionStatus = currentTicketStatus(input, input.issueId);
   let implementationRun = existingImplementationRun;
-  const activeRun = activeExecutionRun(input.workspace, input.issueId, binding.executionId);
+  const activeRun = activeExecutionRun(input.workspace, input.issueId, binding.executionId, binding.provenance);
   if (activeRun !== undefined) {
     return terminalize(
       input,
@@ -188,7 +194,7 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
       );
       implementationRun = routed.run;
     } catch (error) {
-      const activeAfterFailure = activeExecutionRun(input.workspace, input.issueId, binding.executionId);
+      const activeAfterFailure = activeExecutionRun(input.workspace, input.issueId, binding.executionId, binding.provenance);
       return terminalize(
         input,
         projectId,
@@ -342,7 +348,13 @@ async function recoverOpenPullRequest(
 ): Promise<ExecuteTicketResult> {
   try {
     const workspace = await getVerifiedWorkspaceForExecution(input.workspace, input.issueId, 'changed');
-    const implementationRun = latestRun(input.workspace, input.issueId, binding.executionId, 'implementation');
+    const implementationRun = latestRun(
+      input.workspace,
+      input.issueId,
+      binding.executionId,
+      'implementation',
+      binding.provenance
+    );
     if (implementationRun === undefined || implementationRun.status !== 'SUCCEEDED') {
       throw new Error('durable implementation evidence is missing while recovering PR_OPEN');
     }
@@ -629,22 +641,36 @@ function admissionOutcome(status: string): { outcome: ExecutionOutcome; reason: 
 function activeExecutionRun(
   workspace: WorkspaceServiceOptions,
   ticketId: string,
-  executionId: string
+  executionId: string,
+  provenance: ExecutionContractProvenance
 ): AgentRunRecord | undefined {
   return createRunRepository(workspace.db)
     .findByTicketId(ticketId)
-    .find((run) => run.executionId === executionId && ['CREATED', 'STARTING', 'RUNNING'].includes(run.status)) as AgentRunRecord | undefined;
+    .find((run) =>
+      run.executionId === executionId &&
+      run.contractDigest === provenance.contractDigest &&
+      run.contractSource === provenance.contractSource &&
+      run.contractRevision === provenance.contractRevision &&
+      ['CREATED', 'STARTING', 'RUNNING'].includes(run.status)
+    ) as AgentRunRecord | undefined;
 }
 
 function latestRun(
   workspace: WorkspaceServiceOptions,
   ticketId: string,
   executionId: string,
-  task: 'implementation' | 'review' | 'repair'
+  task: 'implementation' | 'review' | 'repair',
+  provenance: ExecutionContractProvenance
 ): AgentRunRecord | undefined {
   return createRunRepository(workspace.db)
     .findByTicketId(ticketId)
-    .filter((run) => run.executionId === executionId && run.task === task)
+    .filter((run) =>
+      run.executionId === executionId &&
+      run.contractDigest === provenance.contractDigest &&
+      run.contractSource === provenance.contractSource &&
+      run.contractRevision === provenance.contractRevision &&
+      run.task === task
+    )
     .at(-1) as AgentRunRecord | undefined;
 }
 
