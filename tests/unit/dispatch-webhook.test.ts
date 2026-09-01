@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   LINEAR_WEBHOOK_MAX_BODY_BYTES,
+  LINEAR_WEBHOOK_REQUEST_TIMEOUT_MS,
   LinearWebhookError,
   parseLinearWebhook,
   verifyLinearWebhookSignature,
@@ -52,5 +53,9 @@ describe('Linear webhook authentication', () => {
       signature: signature(oversized),
       delivery,
     }, secret, 1_700_000_000_000)).toThrow(/body exceeds/);
+  });
+
+  it('keeps the HTTP body deadline below Linear’s retry horizon', () => {
+    expect(LINEAR_WEBHOOK_REQUEST_TIMEOUT_MS).toBeLessThanOrEqual(5_000);
   });
 });

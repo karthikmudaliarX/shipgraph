@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 export const LINEAR_WEBHOOK_MAX_BODY_BYTES = 128 * 1024;
 export const LINEAR_WEBHOOK_TIMESTAMP_WINDOW_MS = 60_000;
+export const LINEAR_WEBHOOK_REQUEST_TIMEOUT_MS = 5_000;
 
 const linearWebhookSchema = z.object({
   type: z.string().min(1).max(64),
@@ -16,9 +17,9 @@ const linearWebhookSchema = z.object({
 export type LinearWebhookPayload = z.infer<typeof linearWebhookSchema>;
 
 export class LinearWebhookError extends Error {
-  readonly statusCode: 400 | 401 | 413;
+  readonly statusCode: 400 | 401 | 408 | 413;
 
-  constructor(message: string, statusCode: 400 | 401 | 413 = 400) {
+  constructor(message: string, statusCode: 400 | 401 | 408 | 413 = 400) {
     super(message);
     this.name = 'LinearWebhookError';
     this.statusCode = statusCode;

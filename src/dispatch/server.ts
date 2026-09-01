@@ -1,6 +1,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createLinearDispatchService, type LinearDispatchHeaders, type LinearDispatchServiceOptions } from './service.js';
-import { LINEAR_WEBHOOK_MAX_BODY_BYTES, LinearWebhookError } from './webhook.js';
+import {
+  LINEAR_WEBHOOK_MAX_BODY_BYTES,
+  LINEAR_WEBHOOK_REQUEST_TIMEOUT_MS,
+  LinearWebhookError,
+} from './webhook.js';
 
 export type LinearDispatchServerOptions = LinearDispatchServiceOptions & {
   webhookPath?: string;
@@ -18,18 +22,32 @@ function writeJson(response: ServerResponse, status: number, body: unknown): voi
 }
 
 async function readRawBody(request: IncomingMessage): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.byteLength;
-    if (size > LINEAR_WEBHOOK_MAX_BODY_BYTES) {
-      request.resume();
-      throw new LinearWebhookError('Linear webhook body exceeds the configured limit', 413);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const body = (async (): Promise<Buffer> => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.byteLength;
+      if (size > LINEAR_WEBHOOK_MAX_BODY_BYTES) {
+        request.resume();
+        throw new LinearWebhookError('Linear webhook body exceeds the configured limit', 413);
+      }
+      chunks.push(buffer);
     }
-    chunks.push(buffer);
+    return Buffer.concat(chunks, size);
+  })();
+  const deadline = new Promise<Buffer>((_, reject) => {
+    timeout = setTimeout(() => {
+      request.destroy();
+      reject(new LinearWebhookError('Linear webhook request timed out', 408));
+    }, LINEAR_WEBHOOK_REQUEST_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([body, deadline]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
   }
-  return Buffer.concat(chunks, size);
 }
 
 function requestHeaders(request: IncomingMessage): LinearDispatchHeaders {

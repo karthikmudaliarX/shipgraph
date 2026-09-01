@@ -273,6 +273,24 @@ describe('Linear dispatch claim bridge', () => {
       .some((event) => event.type === EventType.DISPATCH_CLAIMED)).toBe(false);
   });
 
+  it('does not reuse an active claim for a different Linear issue UUID', async () => {
+    const harness = createHarness();
+    const firstIssue = harness.issues.get('linear-issue-1');
+    if (!firstIssue) throw new Error('test issue missing');
+    harness.issues.set('linear-issue-2', { ...firstIssue, id: 'linear-issue-2' });
+    let calls = 0;
+    const service = serviceFor(harness, async () => {
+      calls += 1;
+      return fakeResult();
+    });
+    const first = webhook('linear-issue-1', '16161616-1616-4161-8161-161616161616');
+    const second = webhook('linear-issue-2', '17171717-1717-4171-8171-171717171717');
+    expect((await service.handleWebhook(first.body, first.headers)).outcome).toBe('CLAIMED');
+    expect((await service.handleWebhook(second.body, second.headers)).outcome).toBe('IGNORED');
+    await flushImmediate();
+    expect(calls).toBe(1);
+  });
+
   it('serializes concurrent deliveries and does not exceed local capacity', async () => {
     const harness = createHarness(['DP-1', 'DP-2']);
     let calls = 0;

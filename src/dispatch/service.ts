@@ -190,6 +190,9 @@ export function createLinearDispatchService(options: LinearDispatchServiceOption
         (claim) => claim.ticketId === ticket.id
       );
       if (activeForTicket !== undefined) {
+        if (activeForTicket.payload.linearIssueId !== issue.id) {
+          return { kind: 'ignored', reason: 'local ticket is already claimed by another Linear issue' };
+        }
         return { kind: 'existing', claim: activeForTicket };
       }
       if (ticket.status !== TicketState.ELIGIBLE) {
