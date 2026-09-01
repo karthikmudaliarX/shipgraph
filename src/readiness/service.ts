@@ -51,6 +51,11 @@ export type CurrentPrePrReadinessEvidence = ReadinessEvidence & {
   timestamp: string;
 };
 
+export type ReadinessLookupOptions = {
+  /** Allow KAR-8 to revalidate the historical pre-PR proof after PR_OPEN. */
+  allowPrOpen?: boolean;
+};
+
 type Candidate = {
   sha: string;
 };
@@ -200,7 +205,8 @@ function appendReadinessEvidence(
 /** Return a PASS record only when it matches the current clean HEAD and contract. */
 export async function getCurrentPrePrReadinessEvidence(
   workspace: WorkspaceServiceOptions,
-  ticketId: string
+  ticketId: string,
+  options: ReadinessLookupOptions = {}
 ): Promise<CurrentPrePrReadinessEvidence | undefined> {
   let candidate: Candidate;
   try {
@@ -219,7 +225,14 @@ export async function getCurrentPrePrReadinessEvidence(
   }
   const eventsForAssessment = createEventRepository(workspace.db).findByTicketId(ticketId);
   const runsForAssessment = createRunRepository(workspace.db).findByTicketId(ticketId);
-  if (readinessAssessment(ticket, candidate.sha, provenance, eventsForAssessment, runsForAssessment).failures.length > 0) {
+  if (readinessAssessment(
+    ticket,
+    candidate.sha,
+    provenance,
+    eventsForAssessment,
+    runsForAssessment,
+    options.allowPrOpen === true
+  ).failures.length > 0) {
     return undefined;
   }
   const events = createEventRepository(workspace.db)
@@ -308,7 +321,8 @@ function readinessAssessment(
   sha: string,
   provenance: TicketContractProvenance,
   events: readonly ShipgraphEvent[],
-  runs: readonly RunRecord[]
+  runs: readonly RunRecord[],
+  allowPrOpen = false
 ): ReadinessAssessment {
   const repair = currentRepairEvidence(events, sha);
   const verification = repair === undefined
@@ -324,7 +338,8 @@ function readinessAssessment(
     safetyStatus,
     redStatus,
     failures: [
-      ticket.status === TicketState.VERIFYING || ticket.status === TicketState.REVIEWING
+      ticket.status === TicketState.VERIFYING || ticket.status === TicketState.REVIEWING ||
+      (allowPrOpen && ticket.status === TicketState.PR_OPEN)
         ? undefined
         : `KAR-11 is pre-PR only; ticket is ${ticket.status}`,
       verification.passed ? undefined : verification.reason,
