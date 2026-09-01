@@ -121,8 +121,8 @@ function fakeInput(workspace: WorkspaceServiceOptions, issueId: string): Execute
   return { issueId, workspace } as unknown as ExecuteTicketInput;
 }
 
-function fakeResult(): ExecuteTicketResult {
-  return { outcome: 'NEEDS_HUMAN', evidence: {} as ExecuteTicketResult['evidence'] };
+function fakeResult(outcome: ExecuteTicketResult['outcome'] = 'NEEDS_HUMAN'): ExecuteTicketResult {
+  return { outcome, evidence: {} as ExecuteTicketResult['evidence'] };
 }
 
 function serviceFor(
@@ -355,6 +355,52 @@ describe('Linear dispatch claim bridge', () => {
     expect(calls).toBe(2);
   });
 
+  it('does not relaunch an incomplete claim when an active provider run is present', async () => {
+    const harness = createHarness();
+    let calls = 0;
+    const service = serviceFor(harness, async () => {
+      calls += 1;
+      throw new Error('simulated handoff interruption');
+    });
+    const request = webhook('linear-issue-1', '77777777-7777-4777-8777-777777777777');
+    expect((await service.handleWebhook(request.body, request.headers)).outcome).toBe('CLAIMED');
+    await flushImmediate();
+    expect(calls).toBe(1);
+
+    const projectId = createProjectRepository(harness.db).findAll()[0].id;
+    const now = new Date().toISOString();
+    createWorkspaceRepository(harness.db).insert({
+      id: 'workspace-active-recovery',
+      projectId,
+      ticketId: 'DP-1',
+      sourceRepositoryPath: harness.projectDir,
+      worktreePath: harness.projectDir,
+      branchName: 'main',
+      baseSha: 'a'.repeat(40),
+      status: 'READY',
+      createdAt: now,
+      updatedAt: now,
+    });
+    createRunRepository(harness.db).create({
+      id: 'active-provider-recovery-run',
+      ticketId: 'DP-1',
+      projectId,
+      workspaceId: 'workspace-active-recovery',
+      workspacePath: harness.projectDir,
+      baseSha: 'a'.repeat(40),
+      branchName: 'main',
+      status: 'RUNNING',
+      provider: 'test',
+      model: 'test-model',
+      instructionsSha256: 'a'.repeat(64),
+      timeoutMs: 1_000,
+      startedAt: now,
+    });
+
+    expect(await service.recoverIncompleteClaims()).toBe(0);
+    expect(calls).toBe(1);
+  });
+
   it('reconciles an unfinished claim from durable EXEC-001 terminal evidence', async () => {
     const harness = createHarness();
     const service = serviceFor(harness, async () => {
@@ -377,12 +423,23 @@ describe('Linear dispatch claim bridge', () => {
       payload: {
         executionId: claim.payload.executionId,
         ticketId: 'DP-1',
-        outcome: 'NEEDS_HUMAN',
+        outcome: 'PR_RAISED',
         contractDigest: 'a'.repeat(64),
         contractSource: 'test',
         contractRevision: '1',
         reason: 'terminal handoff recorded',
         recordedAt: new Date().toISOString(),
+        workspaceId: 'dispatch-workspace',
+        workspacePath: harness.projectDir,
+        implementationRunId: 'implementation-run',
+        contractReviewRunId: 'contract-review-run',
+        engineeringReviewRunId: 'engineering-review-run',
+        readinessEventId: randomUUID(),
+        githubPrEvidenceEventId: randomUUID(),
+        githubUsageReceiptEvidenceEventId: randomUUID(),
+        prNumber: 1,
+        prUrl: 'https://github.com/owner/dispatch-test/pull/1',
+        submittedHeadSha: 'a'.repeat(40),
       },
     });
     expect(await service.recoverIncompleteClaims()).toBe(0);
@@ -395,7 +452,7 @@ describe('Linear dispatch claim bridge', () => {
     let calls = 0;
     const service = serviceFor(harness, async () => {
       calls += 1;
-      return fakeResult();
+      return fakeResult('PR_RAISED');
     });
     const request = webhook('linear-issue-1', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
     expect((await service.handleWebhook(request.body, request.headers)).outcome).toBe('CLAIMED');

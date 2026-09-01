@@ -35,6 +35,12 @@ describe('Linear webhook authentication', () => {
     const raw = body();
     expect(() => parseLinearWebhook(raw, { signature: 'bad', delivery }, secret, 1_700_000_000_000))
       .toThrow(LinearWebhookError);
+    expect(() => parseLinearWebhook(raw, {
+      signature: '0'.repeat(64),
+      delivery,
+    }, secret, 1_700_000_000_000)).toThrow(/signature is invalid/);
+    expect(() => parseLinearWebhook(raw, { delivery }, secret, 1_700_000_000_000))
+      .toThrow(/signature is invalid/);
     expect(() => parseLinearWebhook(Buffer.from('{'), {
       signature: signature(Buffer.from('{')),
       delivery,
