@@ -1,8 +1,8 @@
-# Release Invariants
+# Execution and Pre-PR Invariants
 
-ShipGraph is built on a small set of invariants that make autonomous releases
-safe and auditable. These are established in CORE-001 and enforced by later
-tickets.
+ShipGraph is built on a small set of invariants that make one authorized
+pre-PR execution safe and auditable. Scheduler and the release manager own the
+outer progression after ShipGraph raises a PR.
 
 ## Project-owned audit history
 
@@ -16,8 +16,9 @@ while SQLite triggers prevent later event updates or deletes.
 
 A review or approval applies to **exactly one commit SHA**.
 
-If the PR head changes after a review is recorded, that review is **stale** and
-must be renewed before the ticket can advance to `RELEASE_READY` or `MERGING`.
+If the candidate HEAD changes after a review is recorded, that review is
+**stale** and must be renewed before Pre-PR Readiness or the GitHub handoff can
+use it.
 
 This prevents an agent from obtaining approval on one revision and then
 silently landing a different one.
@@ -25,7 +26,7 @@ silently landing a different one.
 ## Approved backlog
 
 Agents may discover or suggest new work, but they must **not** autonomously add
-new work to the approved executable backlog.
+new work to the approved executable backlog or select successor work.
 
 Suggested work lives in a separate non-executable state until it is accepted by
 policy or human review. Only approved tickets may enter `ELIGIBLE`.
@@ -54,5 +55,20 @@ will never be performed autonomously:
 - autonomous backlog-policy mutation
 - release-policy mutation
 
-A dedicated safety-policy ticket (SAFETY-001) will implement the engine that
-classifies changes and produces `NEEDS_HUMAN`.
+KAR-7 implements the execution safety limits and explicit approval/scope gates
+that classify unsafe or unprovable work as `NEEDS_HUMAN`. These gates constrain
+the one authorized execution; they are not a second policy engine or Scheduler.
+
+## Systems of record
+
+Linear records product intent and authorization/dispatch state. GitHub records
+code, commits, pull requests, and CI evidence. GitHub Projects is optional
+derived visibility. ShipGraph SQLite records local durable execution and
+evidence state. No additional system of record is introduced.
+
+## Trusted root
+
+Ordinary coding and execution agents may operate inside ShipGraph's
+authorization, safety, contract-provenance, verification, review-provenance,
+and readiness boundaries. They must not silently rewrite, bypass, or weaken the
+mechanisms that authorize their work or decide whether it is acceptable.

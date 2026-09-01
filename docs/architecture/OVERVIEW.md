@@ -1,17 +1,20 @@
 # ShipGraph Architecture Overview
 
-ShipGraph is a deterministic release-control plane for autonomous coding agents.
-It is **not** a coding agent itself. It orchestrates the outer loop that takes
-approved work through isolation, execution, verification, review, and release.
+ShipGraph is the deterministic engineering execution layer for one explicitly
+authorized work item. It claims the supplied Linear issue, runs the bounded
+pre-PR path, creates the GitHub PR handoff, and stops. ChatGPT Scheduler owns
+selection and progression across work items.
 
 ## Design goals
 
-- **Deterministic outer loop, agentic inner loop**: agents may reason freely
-  inside a bounded task, but ShipGraph controls state transitions deterministically.
+- **Deterministic inner loop, external outer loop**: agents may reason freely
+  inside a bounded task, but ShipGraph controls its evidence and boundaries
+  deterministically.
 - **Exact-SHA provenance**: every review and approval applies to exactly one
   commit SHA. If the PR head moves, prior reviews become stale.
-- **Approved-backlog auto-advancement**: only approved work is eligible for
-  execution. Completed work unlocks dependent tickets automatically.
+- **Explicit authorization**: Scheduler chooses one eligible Linear issue and
+  authorizes it; ShipGraph does not select successor work or auto-advance the
+  backlog.
 - **Auditability**: every state change is recorded in an append-only event log
   that can answer `shipgraph why <ticket>`.
 
@@ -22,8 +25,7 @@ src/
   cli/              Command-line interface
   core/
     state-machine/  Ticket lifecycle transitions
-    scheduler/      Eligibility and dependency ordering (future)
-    policy/         Release and safety policy (future)
+  scheduler/        Backlog eligibility and admission diagnostics
   domain/           Typed contracts (ticket, config)
   persistence/      SQLite repositories, transitions, and migrations
   adapters/
@@ -33,6 +35,10 @@ src/
   events/           Append-only audit-event contract
   config/           Configuration schema and loader
   execution/        Durable agent-run lifecycle and recovery
+  review/           Independent pre-PR review axes
+  repair/           Bounded pre-PR repair
+  readiness/        Exact-SHA Pre-PR Readiness evidence
+  github/            GitHub PR and usage receipt handoff
   utils/            Shared helpers and error types
 ```
 
@@ -65,44 +71,30 @@ should copy `.shipgraph/shipgraph.db` while ShipGraph is stopped. Recovery is
 restoring that backup or re-running `shipgraph init` for disposable empty state;
 lossless down migrations are intentionally not claimed in CORE-001.
 
-## Outer-loop workflow
+## Scheduler boundary and ShipGraph flow
 
 ```
-approved backlog
+ChatGPT Scheduler
+       │ chooses one eligible Linear issue and authorizes `shipgraph:queued`
+       ▼
+ShipGraph: ticket → workspace → implementation → verification
        │
        ▼
-dependency resolution
+Contract Review + Engineering Review → bounded repair
        │
        ▼
-ticket contract
+exact-SHA Pre-PR Readiness
        │
        ▼
-isolated workspace
+GitHub PR + usage receipt → PR_RAISED / PR_OPEN
        │
        ▼
-agent execution
-       │
-       ▼
-verification
-       │
-       ▼
-pull request
-       │
-       ▼
-independent review
-       │
-       ▼
-repair (if needed)
-       │
-       ▼
-exact-SHA release gate
-       │
-       ▼
-merge
-       │
-       ▼
-unlock next approved ticket
+STOP
 ```
+
+Linear webhook wake-up and dispatch are the upcoming KAR-13 boundary. After
+`PR_OPEN`, Scheduler and the release manager decide whether to wait, merge,
+escalate, or select later work; ShipGraph does not supervise that outer loop.
 
 ## Influences
 
@@ -115,16 +107,36 @@ The architecture is informed by, but does not clone:
 - Append-only orchestration event logs
 - Dependency-aware ticket schedulers
 
-ShipGraph's differentiator is the combination of a deterministic outer loop,
-agentic inner loop, exact-SHA release provenance, and approved-backlog
-auto-advancement.
+ShipGraph's differentiator is deterministic single-ticket execution, exact-SHA
+evidence, isolated workspaces, and a bounded pre-PR handoff.
 
-## Current status (MODEL-001)
+## Architectural boundaries
 
-CORE-001, CORE-002, WORK-001 and AGENT-001 establish the foundation, backlog
-scheduler, safe isolated workspaces and one bounded explicit OpenCode execution.
-MODEL-001 adds current provider/model metadata, capability-probed Codex, Grok
-and Antigravity (`agy`) execution adapters, health, append-only usage telemetry
-and deterministic routing for one explicitly supplied engineering step. It does
-**not** select product work, poll Linear, open PRs, perform autonomous reviews,
-repair changes, enforce release gates or merge code.
+Linear is the system of record for product intent and authorization/dispatch
+state. GitHub is the system of record for code, commits, pull requests, and CI
+evidence. GitHub Projects is optional derived visibility/dashboard only. ShipGraph SQLite is
+the local durable record of execution and evidence; no additional source of
+truth is introduced.
+
+The trusted-root invariant is simple: ordinary agents may operate within
+ShipGraph's authorization, safety, contract-provenance, verification,
+review-provenance, and readiness boundaries, but must not silently rewrite,
+bypass, or weaken the mechanisms that authorize work or decide whether it is
+acceptable.
+
+Prompts carry intent, the behavioral Ticket Contract, invariants, unusual
+constraints, domain terms, relevant prior evidence, and scope boundaries.
+Agents discover ordinary repository facts from the repository instead of
+receiving repeated directory trees, long architecture explanations, or
+implementation recipes.
+
+## Current status (KAR-12)
+
+CORE-001, CORE-002, WORK-001 and AGENT-001 establish the foundation and local
+backlog eligibility/admission diagnostics. MODEL-001 through KAR-11 add safe
+workspaces, provider routing, execution safety, independent pre-PR reviews,
+bounded repair, Pre-PR Readiness, and the GitHub PR/receipt handoff. KAR-12
+composes those
+pieces for one explicitly supplied and authorized ticket. It does not select
+product work, own the global Scheduler, supervise post-PR CI, merge code, or
+select successor work.

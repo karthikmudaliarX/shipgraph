@@ -1,65 +1,63 @@
 # ShipGraph
 
-> Deterministic release control for autonomous coding agents.
+> Deterministic engineering execution for one explicitly authorized work item.
 
 ## What ShipGraph is
 
-ShipGraph is an orchestration kernel that runs a deterministic outer loop around
-autonomous coding agents. It decides what work is approved, when it is eligible,
-how it is isolated, how it is verified, and whether it may be released.
+ShipGraph is the deterministic engineering execution layer for one explicitly
+authorized work item. It claims the supplied ticket, prepares an isolated
+workspace, runs implementation, verification, independent pre-PR reviews,
+bounded repair, Pre-PR Readiness, and the GitHub PR handoff with its usage
+receipt. It stops after `PR_RAISED` / `PR_OPEN`.
 
-Agents reason freely inside a bounded task. ShipGraph ensures the task itself
-follows a strict, auditable, repeatable lifecycle.
+ChatGPT Scheduler decides which eligible Linear issue runs next and owns the
+outer progression across work items. ShipGraph decides how that one authorized
+issue reaches a safe PR.
 
 ## What ShipGraph is NOT
 
-ShipGraph is **not** a coding agent. It does not generate code, review code, or
-merge code on its own. It coordinates agents and enforces release policy.
+ShipGraph is **not**:
 
-## Deterministic outer loop
+- the product backlog owner or global Scheduler
+- the merge authority or successor-ticket selector
+- the post-PR CI supervisor
+
+It provides bounded execution and evidence; provider agents generate and review
+changes inside those boundaries.
+
+## Current v1 boundary
 
 ```
-approved backlog
+ChatGPT Scheduler
+       │ chooses one eligible Linear issue and authorizes `shipgraph:queued`
+       ▼
+ShipGraph: authorized ticket
        │
        ▼
-dependency resolution
+workspace → implementation → verification
        │
        ▼
-ticket contract
+Contract Review + Engineering Review
        │
        ▼
-isolated workspace
+bounded repair → Pre-PR Readiness
        │
        ▼
-agent execution
+GitHub PR + usage receipt → PR_RAISED / PR_OPEN
        │
        ▼
-verification
-       │
-       ▼
-pull request
-       │
-       ▼
-independent review
-       │
-       ▼
-repair (if needed)
-       │
-       ▼
-exact-SHA release gate
-       │
-       ▼
-merge
-       │
-       ▼
-unlock next approved ticket
+STOP
 ```
 
-## Why exact-SHA release provenance matters
+Linear webhook wake-up and dispatch are the upcoming KAR-13 boundary; they are
+not implemented here. After a PR, Scheduler and the release manager own later
+wait, merge, escalation, and next-work decisions.
 
-A review or approval applies to exactly one commit SHA. If the PR head changes
-after a review, that review is stale. This closes a common autonomy gap where an
-agent might get approval on one revision and land another.
+## Why exact-SHA provenance matters
+
+A review or approval applies to exactly one commit SHA. If the candidate head
+changes after a review or Pre-PR Readiness decision, that evidence is stale and
+must be renewed before the PR handoff.
 
 ## Current status
 
@@ -90,27 +88,18 @@ WORK-001 shipped:
 - Deterministic workspace lifecycle and fail-closed cleanup
 
 AGENT-001 shipped one bounded provider execution in an already verified
-workspace. MODEL-001 (this PR) adds deterministic provider discovery, health,
-usage telemetry, model routing and capability-probed execution-adapter
-selection. Neither ticket chooses work, creates pull requests, reviews changes,
-or merges code.
+workspace. MODEL-001 adds provider discovery, health, usage telemetry, model
+routing, and capability-probed execution adapters. KAR-7 adds execution safety
+limits; KAR-9 and KAR-10 add independent pre-PR reviews and bounded repair;
+KAR-11 adds exact-SHA Pre-PR Readiness; KAR-8 adds the GitHub PR and usage
+receipt handoff; and KAR-12 composes these stages for one authorized ticket.
 
-The execution envelope is a Scheduler-owned snapshot: MODEL-001 validates the
-supplied global mode, budget and ticket counts but does not claim global ticket
-capacity. A route supplied with a durable `--run-id` reserves a provider run
-slot. Known provider limits are enforced directly; when a provider exposes no
-trustworthy concurrency limit, ShipGraph uses a conservative one-at-a-time
-local admission bound, without estimating quota. The durable run must already
-identify the exact AGENT adapter and discovered model. A route without one is a
-non-persistent decision preview. `resolveExecutionTarget()` returns only an
-opaque target; only `ModelRoutingService.executeSelectedAgentTask()` accepts an
-active run-bound reservation and enters the AGENT-001 lifecycle. Usage finalization releases an execution-bound
-reservation only when the same durable run and routing decision ID are
-supplied and the owning AGENT run is terminal. A normal terminal result
-releases the slot; timeout, cancellation, output-limit termination and
-ambiguous recovery retain it until provider-process ownership is explicitly
-reconciled. Usage finalization remains append-only and idempotent for capacity
-release.
+The execution envelope is supplied by Scheduler and applies to one ticket;
+MODEL-001 does not claim global ticket capacity or choose subsequent work. A
+durable route reserves a provider run slot, and known provider limits are
+enforced directly. Usage finalization remains append-only and idempotent for
+capacity release; ambiguous provider-process ownership remains reserved until
+explicit reconciliation.
 
 ## CLI examples
 
@@ -139,7 +128,7 @@ shipgraph backlog validate
 # Import approved work and reconcile eligibility
 shipgraph backlog sync
 
-# Report eligible and dispatchable work without starting it
+# Read-only eligibility/admission diagnostics; this does not start work
 shipgraph ready
 
 # Structured ready queue
@@ -210,41 +199,31 @@ pnpm test
 pnpm build
 ```
 
-## Roadmap
-
-Shipped:
+## Delivered through KAR-12
 
 - **CORE-001 ✅** — Project foundation and safe state boundary
-- **CORE-002 ✅** — Persistent backlog DAG and eligibility scheduler
+- **CORE-002 ✅** — Persistent backlog DAG and eligibility/admission diagnostics
 - **WORK-001 ✅** — Safe isolated git worktree lifecycle
 - **AGENT-001 ✅** — Provider-neutral bounded agent execution and OpenCode adapter
 
-Active in this PR:
+Delivered:
 
-- **MODEL-001** — Provider registry, dynamic model catalog, capability-probed
-  execution adapters, health, usage ledger and deterministic routing
-  ([design](docs/architecture/ADAPTERS.md))
+- **MODEL-001 ✅** — Provider metadata, routing, health, and usage telemetry
+- **KAR-7 ✅** — Execution limits and human safety gates
+- **KAR-9 ✅** — Independent Contract and Engineering Reviews
+- **KAR-10 ✅** — Bounded pre-PR repair
+- **KAR-11 ✅** — Exact-SHA Pre-PR Readiness
+- **KAR-8 ✅** — GitHub PR and usage receipt handoff
+- **KAR-12 ✅** — Single-ticket EXEC-001 composition
 
-Next up:
-
-- **KAR-7** — Execution budgets and human safety gates
-
-Planned successor tickets (not yet implemented):
-
-- **GH-001** — GitHub PR and CI integration
-- **REV-001** — Independent correctness and adversarial review
-- **REPAIR-001** — Automated review/CI repair loop
-- **RELEASE-001** — Exact-SHA release gate and stale-review invalidation
-- **TRAIN-001** — Merge → dependency unlock → automatic next-ticket execution
-- **SAFETY-001** — Runtime safety and escalation policy
-- **OBS-001** — Full audit/why/metrics observability
-- **UI-001** — Local build-train dashboard
-- **DOGFOOD-001** — Use ShipGraph on a real external repository
+The production outer Scheduler, Linear webhook wake-up, post-PR supervision,
+merge authority, and successor-ticket selection remain outside ShipGraph's v1
+inner-loop boundary.
 
 ## Comparison philosophy
 
 ShipGraph is inspired by autonomous coding-agent systems and orchestrators, but
-it occupies a different layer: the deterministic release-control plane. It does
+it occupies a different layer: the deterministic engineering execution plane. It does
 not claim to be a better code generator. It aims to make agent-generated changes
 safe to land at scale by enforcing policy, provenance, and isolation.
 
