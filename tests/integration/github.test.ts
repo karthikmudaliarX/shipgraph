@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stringify } from 'yaml';
@@ -298,12 +298,13 @@ function addRun(
 function addReceiptRuns(
   harness: Harness,
   count: number,
-  modelForIndex: (index: number) => string = () => 'opencode/model'
+  modelForIndex: (index: number) => string = () => 'opencode/model',
+  order: readonly number[] = Array.from({ length: count }, (_, index) => index)
 ): void {
   const runs = createRunRepository(harness.db);
   const events = createEventRepository(harness.db);
   const timestamp = new Date().toISOString();
-  for (let index = 0; index < count; index += 1) {
+  for (const index of order) {
     addRun(
       runs,
       events,
@@ -457,7 +458,7 @@ describe('KAR-8 GitHub handoff', () => {
     expect(result.receipt.usage.cost).toEqual({ knownTotal: 0.5, unknownRuns: 3 });
   }, 20_000);
 
-  it('retains every distinct provider/model identity for a maximally varied history', async () => {
+  it('bounds a maximally varied provider/model history below the GitHub comment limit', async () => {
     harness = await createHarness(100);
     addReceiptRuns(harness, 400, (index) => `model-${'x'.repeat(240)}-${index}`);
     const result = await createGitHubPullRequest({
@@ -465,11 +466,49 @@ describe('KAR-8 GitHub handoff', () => {
       gitHost: harness.host,
       workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, gitRunner: harness.gitRunner },
     });
-    expect(result.receipt.repair).toHaveLength(400);
-    expect(result.receipt.repair[0]).toEqual({
+    expect(Array.isArray(result.receipt.repair)).toBe(false);
+    if (Array.isArray(result.receipt.repair)) throw new Error('expected a bounded repair summary');
+    expect(result.receipt.repair.distinctCount).toBe(400);
+    expect(result.receipt.repair.omittedCount).toBeGreaterThan(0);
+    expect(result.receipt.repair.identities.length).toBeLessThan(400);
+    const completeIdentities = Array.from({ length: 400 }, (_, index) => ({
       providerId: 'opencode-go',
-      modelId: expect.stringContaining('model-'),
+      modelId: `model-${'x'.repeat(240)}-${index}`,
+    })).sort((left, right) => left.modelId < right.modelId ? -1 : left.modelId > right.modelId ? 1 : 0);
+    const completeDigest = createHash('sha256').update(JSON.stringify(completeIdentities)).digest('hex');
+    expect(result.receipt.repair.identitiesDigest).toBe(completeDigest);
+    expect(harness.host.comments[0]?.body.length ?? Infinity).toBeLessThan(60_000);
+  }, 20_000);
+
+  it('keeps the receipt marker deterministic when durable rows are reordered', async () => {
+    harness = await createHarness(100);
+    addReceiptRuns(harness, 70, (index) => `model-${index}`);
+    await createGitHubPullRequest({
+      ticketId: 'GH-001',
+      gitHost: harness.host,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, gitRunner: harness.gitRunner },
     });
+    const firstBody = harness.host.comments[0]?.body;
+    const runs = createRunRepository(harness.db).findByTicketId('GH-001')
+      .filter((run) => run.task === 'repair')
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const runRepository = createRunRepository(harness.db);
+    runs.forEach((run, index) => {
+      const updatedAt = new Date(Date.UTC(2000, 0, 1, 0, 0, index)).toISOString();
+      const startedAt = new Date(Date.UTC(2000, 0, 1, 0, 1, runs.length - index)).toISOString();
+      runRepository.updateStatus(
+        run.id,
+        run.status,
+        updatedAt,
+        { startedAt }
+      );
+    });
+    await createGitHubPullRequest({
+      ticketId: 'GH-001',
+      gitHost: harness.host,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot, gitRunner: harness.gitRunner },
+    });
+    expect(harness.host.comments[0]?.body).toBe(firstBody);
   }, 20_000);
 
   it('fails closed before GitHub writes when readiness is unavailable', async () => {

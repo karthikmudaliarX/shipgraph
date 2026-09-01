@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type {
   GitHostAdapter,
   GitHostComment,
@@ -41,6 +41,10 @@ import type { WorkspaceServiceOptions } from '../workspace/service.js';
 import { getCurrentProjectId, getVerifiedWorkspaceForExecution } from '../workspace/service.js';
 
 const RECEIPT_MARKER_PATTERN = /<!-- shipgraph-usage-receipt:v1\n([\s\S]*?)\n-->/gu;
+const MAX_USAGE_RECEIPT_BODY_BYTES = 60_000;
+const RECEIPT_ROLES = ['implementation', 'review', 'repair', 'fallback'] as const;
+type ReceiptRole = typeof RECEIPT_ROLES[number];
+type ProviderModelIdentity = { providerId: string; modelId: string };
 
 export type GitHubPullRequestInput = {
   ticketId: string;
@@ -510,6 +514,14 @@ function findCurrentReceipt(comments: readonly GitHostComment[], expected: GitHu
 }
 
 function usageReceiptBody(receipt: GitHubUsageReceipt): string {
+  const body = formatUsageReceiptBody(receipt);
+  if (Buffer.byteLength(body, 'utf8') > MAX_USAGE_RECEIPT_BODY_BYTES) {
+    throw new Error('KAR-8 fail closed: usage receipt exceeds the GitHub comment body limit');
+  }
+  return body;
+}
+
+function formatUsageReceiptBody(receipt: GitHubUsageReceipt): string {
   return [
     'ShipGraph usage receipt',
     `Ticket: ${receipt.ticketId}`,
@@ -520,6 +532,72 @@ function usageReceiptBody(receipt: GitHubUsageReceipt): string {
     JSON.stringify(receipt),
     '-->',
   ].join('\n');
+}
+
+function usageReceiptBodyBytes(receipt: GitHubUsageReceipt): number {
+  return Buffer.byteLength(formatUsageReceiptBody(receipt), 'utf8');
+}
+
+function compactUsageReceipt(receipt: GitHubUsageReceipt): GitHubUsageReceipt {
+  if (usageReceiptBodyBytes(receipt) <= MAX_USAGE_RECEIPT_BODY_BYTES) return receipt;
+
+  const completeIdentities = new Map<ReceiptRole, ProviderModelIdentity[]>();
+  for (const role of RECEIPT_ROLES) {
+    const section = receipt[role];
+    if (Array.isArray(section)) completeIdentities.set(role, section);
+  }
+  const rolesToCompact = [...completeIdentities.keys()].sort((left, right) =>
+    (completeIdentities.get(right)?.length ?? 0) - (completeIdentities.get(left)?.length ?? 0) ||
+    left.localeCompare(right)
+  );
+  let candidate = receipt;
+  for (const role of rolesToCompact) {
+    const identities = completeIdentities.get(role);
+    if (identities === undefined || identities.length === 0) continue;
+    candidate = {
+      ...candidate,
+      [role]: compactProviderModelSection(candidate, role, identities),
+    } as GitHubUsageReceipt;
+    if (usageReceiptBodyBytes(candidate) <= MAX_USAGE_RECEIPT_BODY_BYTES) {
+      return githubUsageReceiptSchema.parse(candidate);
+    }
+  }
+  throw new Error('KAR-8 fail closed: minimal usage receipt exceeds the GitHub comment body limit');
+}
+
+function compactProviderModelSection(
+  receipt: GitHubUsageReceipt,
+  role: ReceiptRole,
+  completeIdentities: readonly ProviderModelIdentity[]
+): {
+  distinctCount: number;
+  identities: ProviderModelIdentity[];
+  omittedCount: number;
+  identitiesDigest: string;
+} {
+  const identitiesDigest = createHash('sha256')
+    .update(JSON.stringify(completeIdentities))
+    .digest('hex');
+  const makeSummary = (count: number) => ({
+    distinctCount: completeIdentities.length,
+    identities: completeIdentities.slice(0, count),
+    omittedCount: completeIdentities.length - count,
+    identitiesDigest,
+  });
+  let low = 0;
+  let high = completeIdentities.length;
+  let best = 0;
+  while (low <= high) {
+    const count = Math.ceil((low + high) / 2);
+    const trial = { ...receipt, [role]: makeSummary(count) } as GitHubUsageReceipt;
+    if (usageReceiptBodyBytes(trial) <= MAX_USAGE_RECEIPT_BODY_BYTES) {
+      best = count;
+      low = count + 1;
+    } else {
+      high = count - 1;
+    }
+  }
+  return makeSummary(best);
 }
 
 function buildUsageReceipt(
@@ -585,7 +663,7 @@ function buildUsageReceipt(
     usage: summarizeUsage(runs, usageEntries),
     providerHealth: health,
   });
-  return receipt;
+  return compactUsageReceipt(receipt);
 }
 
 function providerModel(run: RunRecord): { providerId: string; modelId: string } {

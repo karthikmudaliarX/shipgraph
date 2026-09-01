@@ -37,6 +37,25 @@ const providerModelSchema = z.object({
 // repair runs, with at most four current MODEL-001 providers per route.
 const MAX_PROVIDER_MODEL_IDENTITIES = (1 + (2 * (100 + 1)) + 100) * 4;
 
+const providerModelSummarySchema = z.object({
+  distinctCount: z.number().int().nonnegative(),
+  identities: z.array(providerModelSchema).max(MAX_PROVIDER_MODEL_IDENTITIES),
+  omittedCount: z.number().int().nonnegative(),
+  identitiesDigest: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict().superRefine((summary, context) => {
+  if (summary.identities.length + summary.omittedCount !== summary.distinctCount) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'provider/model summary counts do not match its identities',
+    });
+  }
+});
+
+const providerModelSectionSchema = z.union([
+  z.array(providerModelSchema).max(MAX_PROVIDER_MODEL_IDENTITIES),
+  providerModelSummarySchema,
+]);
+
 const usageMetricSchema = z.object({
   knownTotal: unknownNumberSchema,
   unknownRuns: z.number().int().nonnegative(),
@@ -66,10 +85,10 @@ export const githubUsageReceiptSchema = z.object({
   contractRevision: identitySchema,
   executionRunId: identitySchema,
   routingMode: z.union([modelRoutingModeSchema, z.literal('unknown')]),
-  implementation: z.array(providerModelSchema).max(MAX_PROVIDER_MODEL_IDENTITIES),
-  review: z.array(providerModelSchema).max(MAX_PROVIDER_MODEL_IDENTITIES),
-  repair: z.array(providerModelSchema).max(MAX_PROVIDER_MODEL_IDENTITIES),
-  fallback: z.array(providerModelSchema).max(MAX_PROVIDER_MODEL_IDENTITIES),
+  implementation: providerModelSectionSchema,
+  review: providerModelSectionSchema,
+  repair: providerModelSectionSchema,
+  fallback: providerModelSectionSchema,
   usage: usageSummarySchema,
   providerHealth: z.array(providerHealthSchema).max(32),
 }).strict();
