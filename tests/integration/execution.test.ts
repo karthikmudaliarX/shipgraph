@@ -17,6 +17,7 @@ import { ModelRoutingService } from '../../src/model/service.js';
 import type { ModelProviderAdapter } from '../../src/adapters/model/adapter.js';
 import type { AgentExecutionAdapter, AgentExecutionRequest, AgentExecutionResult } from '../../src/adapters/agent/adapter.js';
 import { registerModelProviderAdapter } from '../../src/adapters/agent/registry.js';
+import { createWorkspace } from '../../src/workspace/service.js';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -111,6 +112,25 @@ describe('KAR-12 single-ticket execution identity', () => {
     expect(events.filter((event) => event.type === EventType.EXECUTION_CONTRACT_BOUND)).toHaveLength(1);
     expect(events.filter((event) => event.type === EventType.EXECUTION_TERMINAL)).toHaveLength(1);
     expect(events.filter((event) => event.type === EventType.RUN_CREATED)).toHaveLength(0);
+
+    db.prepare('UPDATE tickets SET status = ? WHERE id = ?').run(TicketState.ELIGIBLE, 'KAR-12');
+    await expect(
+      createWorkspace(input.workspace, 'KAR-12', { crashAfterReserve: true })
+    ).rejects.toThrow(/Simulated crash/);
+    const revised = await executeTicket({
+      ...input,
+      contract: { ...contract, desiredBehavior: 'A revised bounded entry point.' },
+      contractRevision: 'v2',
+      createExecutionId: () => 'execution-2',
+    });
+    expect(revised.outcome).toBe('NEEDS_HUMAN');
+    const revisedEvents = createEventRepository(db).findByTicketId('KAR-12');
+    expect(revisedEvents.filter((event) => event.type === EventType.EXECUTION_CONTRACT_BOUND)).toHaveLength(2);
+    expect(revisedEvents.filter((event) => event.type === EventType.EXECUTION_TERMINAL)).toHaveLength(2);
+    const boundContracts = revisedEvents
+      .filter((event) => event.type === EventType.EXECUTION_CONTRACT_BOUND)
+      .map((event) => event.payload.contract.desiredBehavior);
+    expect(boundContracts).toEqual([contract.desiredBehavior, 'A revised bounded entry point.']);
   });
 
   it('composes the existing implementation, review, readiness, and GitHub stages to PR_RAISED', async () => {

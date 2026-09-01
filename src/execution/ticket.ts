@@ -120,12 +120,14 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
       existingImplementationRun?.status === 'SUCCEEDED'
     );
   } catch (error) {
+    const reason = `KAR-12 workspace admission failed: ${errorMessage(error)}`;
+    const unsafeRecovery = errorMessage(error).includes('requires human inspection');
     return terminalize(
       input,
       projectId,
       binding,
-      ticket.status === TicketState.ELIGIBLE ? 'BLOCKED' : 'NEEDS_HUMAN',
-      `KAR-12 workspace admission failed: ${errorMessage(error)}`
+      unsafeRecovery || ticket.status !== TicketState.ELIGIBLE ? 'NEEDS_HUMAN' : 'BLOCKED',
+      reason
     );
   }
   const startedByThisInvocation = appendStarted(input, projectId, binding, workspace);
@@ -424,31 +426,31 @@ function bindExecution(
       (event): event is Extract<ShipgraphEvent, { type: typeof EventType.EXECUTION_CONTRACT_BOUND }> =>
         event.type === EventType.EXECUTION_CONTRACT_BOUND && event.ticketId === input.issueId
     );
-    const existing = bindings.at(-1);
-    if (existing !== undefined) {
-      if (
-        existing.payload.contractDigest !== provenance.contractDigest ||
-        existing.payload.contractSource !== provenance.contractSource ||
-        existing.payload.contractRevision !== provenance.contractRevision
-      ) {
+    const matchingRevision = bindings.find(
+      (event) =>
+        event.payload.contractSource === provenance.contractSource &&
+        event.payload.contractRevision === provenance.contractRevision
+    );
+    if (matchingRevision !== undefined) {
+      if (matchingRevision.payload.contractDigest !== provenance.contractDigest) {
         return {
-          executionId: existing.payload.executionId,
-          contract: existing.payload.contract,
+          executionId: matchingRevision.payload.executionId,
+          contract: matchingRevision.payload.contract,
           provenance: {
-            contractDigest: existing.payload.contractDigest,
-            contractSource: existing.payload.contractSource,
-            contractRevision: existing.payload.contractRevision,
+            contractDigest: matchingRevision.payload.contractDigest,
+            contractSource: matchingRevision.payload.contractSource,
+            contractRevision: matchingRevision.payload.contractRevision,
           },
           conflictReason: 'KAR-12 execution contract is immutable once bound; the supplied source/revision conflicts with durable contract content',
         };
       }
       return {
-        executionId: existing.payload.executionId,
-        contract: existing.payload.contract,
+        executionId: matchingRevision.payload.executionId,
+        contract: matchingRevision.payload.contract,
         provenance: {
-          contractDigest: existing.payload.contractDigest,
-          contractSource: existing.payload.contractSource,
-          contractRevision: existing.payload.contractRevision,
+          contractDigest: matchingRevision.payload.contractDigest,
+          contractSource: matchingRevision.payload.contractSource,
+          contractRevision: matchingRevision.payload.contractRevision,
         },
       };
     }
