@@ -138,6 +138,9 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
       }
       const evidence: RepairAttemptEvidence = {
         ticketId: input.ticketId,
+        ...(input.executionId === undefined || input.contractProvenance === undefined
+          ? {}
+          : { executionId: input.executionId, ...input.contractProvenance }),
         attempt: interruptedAttempt,
         candidateSha: evidenceSha,
         blockers: [],
@@ -175,6 +178,9 @@ export async function runPrePrRepair(input: PrePrRepairInput): Promise<PrePrRepa
       }
       const evidence: RepairAttemptEvidence = {
         ticketId: input.ticketId,
+        ...(input.executionId === undefined || input.contractProvenance === undefined
+          ? {}
+          : { executionId: input.executionId, ...input.contractProvenance }),
         attempt: interruptedAttempt,
         candidateSha: terminalWithoutEvidence.baseSha,
         ...(resultingSha === undefined ? {} : { resultingSha }),
