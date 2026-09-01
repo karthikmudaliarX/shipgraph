@@ -88,11 +88,14 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
   }
 
   const binding = bindExecution(input, projectId, contract, provenance);
-  const priorTerminal = terminalFor(input.workspace, input.issueId, binding.executionId);
-  if (priorTerminal !== undefined) return priorTerminal;
   if (binding.conflictReason !== undefined) {
+    if (terminalFor(input.workspace, input.issueId, binding.executionId) !== undefined) {
+      throw new Error(binding.conflictReason);
+    }
     return terminalize(input, projectId, binding, 'NEEDS_HUMAN', binding.conflictReason);
   }
+  const priorTerminal = terminalFor(input.workspace, input.issueId, binding.executionId);
+  if (priorTerminal !== undefined) return priorTerminal;
 
   if (ticket.status === TicketState.PR_OPEN) {
     return recoverOpenPullRequest(input, projectId, binding);
@@ -119,7 +122,7 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
       `KAR-12 workspace admission failed: ${errorMessage(error)}`
     );
   }
-  appendStarted(input, projectId, binding, workspace);
+  const startedByThisInvocation = appendStarted(input, projectId, binding, workspace);
 
   // Workspace admission may transition ELIGIBLE to PLANNING. Use the durable
   // post-admission state when deciding which existing stage to resume.
@@ -144,6 +147,16 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
       binding,
       'NEEDS_HUMAN',
       `KAR-12 cannot start while unrelated provider run ${unrelatedActiveRun.id} is active`,
+      workspace
+    );
+  }
+  if (!startedByThisInvocation && implementationRun === undefined) {
+    return terminalize(
+      input,
+      projectId,
+      binding,
+      'NEEDS_HUMAN',
+      'KAR-12 execution was previously started without durable implementation evidence; manual recovery is required',
       workspace
     );
   }
@@ -175,11 +188,12 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
       );
       implementationRun = routed.run;
     } catch (error) {
+      const activeAfterFailure = activeExecutionRun(input.workspace, input.issueId, binding.executionId);
       return terminalize(
         input,
         projectId,
         binding,
-        errorOutcome(error),
+        activeAfterFailure === undefined ? errorOutcome(error) : 'NEEDS_HUMAN',
         `KAR-12 implementation execution failed: ${errorMessage(error)}`,
         workspace
       );
@@ -436,24 +450,28 @@ function appendStarted(
   projectId: string,
   binding: Binding,
   workspace: WorkspaceRecord
-): void {
-  const events = createEventRepository(input.workspace.db).findByTicketId(input.issueId);
-  if (events.some((event) => event.type === EventType.EXECUTION_STARTED && event.payload.executionId === binding.executionId)) return;
-  const recordedAt = timestamp(input.workspace);
-  createEventRepository(input.workspace.db).append({
-    id: input.workspace.createEventId?.() ?? randomUUID(),
-    timestamp: recordedAt,
-    projectId,
-    ticketId: input.issueId,
-    type: EventType.EXECUTION_STARTED,
-    payload: {
-      executionId: binding.executionId,
+): boolean {
+  const claim = input.workspace.db.transaction((): boolean => {
+    const events = createEventRepository(input.workspace.db).findByTicketId(input.issueId);
+    if (events.some((event) => event.type === EventType.EXECUTION_STARTED && event.payload.executionId === binding.executionId)) return false;
+    const recordedAt = timestamp(input.workspace);
+    createEventRepository(input.workspace.db).append({
+      id: input.workspace.createEventId?.() ?? randomUUID(),
+      timestamp: recordedAt,
+      projectId,
       ticketId: input.issueId,
-      ...binding.provenance,
-      workspaceId: workspace.id,
-      recordedAt,
-    },
-  });
+      type: EventType.EXECUTION_STARTED,
+      payload: {
+        executionId: binding.executionId,
+        ticketId: input.issueId,
+        ...binding.provenance,
+        workspaceId: workspace.id,
+        recordedAt,
+      },
+    });
+    return true;
+  }).immediate;
+  return claim();
 }
 
 function terminalFor(
@@ -480,25 +498,28 @@ function appendTerminal(
   outcome: ExecutionOutcome,
   fields: Omit<Partial<ExecutionEvidence>, 'executionId' | 'ticketId' | 'outcome' | 'contractDigest' | 'contractSource' | 'contractRevision' | 'recordedAt'>
 ): ExecutionEvidence {
-  const existing = terminalFor(input.workspace, input.issueId, binding.executionId);
-  if (existing !== undefined) return existing.evidence;
-  const evidence = executionEvidenceSchema.parse({
-    executionId: binding.executionId,
-    ticketId: input.issueId,
-    outcome: executionOutcomeSchema.parse(outcome),
-    ...binding.provenance,
-    recordedAt: timestamp(input.workspace),
-    ...fields,
-  });
-  createEventRepository(input.workspace.db).append({
-    id: input.workspace.createEventId?.() ?? randomUUID(),
-    timestamp: evidence.recordedAt,
-    projectId,
-    ticketId: input.issueId,
-    type: EventType.EXECUTION_TERMINAL,
-    payload: evidence,
-  });
-  return evidence;
+  const persist = input.workspace.db.transaction((): ExecutionEvidence => {
+    const existing = terminalFor(input.workspace, input.issueId, binding.executionId);
+    if (existing !== undefined) return existing.evidence;
+    const evidence = executionEvidenceSchema.parse({
+      executionId: binding.executionId,
+      ticketId: input.issueId,
+      outcome: executionOutcomeSchema.parse(outcome),
+      ...binding.provenance,
+      recordedAt: timestamp(input.workspace),
+      ...fields,
+    });
+    createEventRepository(input.workspace.db).append({
+      id: input.workspace.createEventId?.() ?? randomUUID(),
+      timestamp: evidence.recordedAt,
+      projectId,
+      ticketId: input.issueId,
+      type: EventType.EXECUTION_TERMINAL,
+      payload: evidence,
+    });
+    return evidence;
+  }).immediate;
+  return persist();
 }
 
 function terminalize(
@@ -529,7 +550,7 @@ function terminalize(
       reason,
     });
   }
-  return { outcome, evidence };
+  return { outcome: evidence.outcome, evidence };
 }
 
 async function acquireWorkspace(
@@ -626,7 +647,10 @@ function currentTicketStatus(input: ExecuteTicketInput, ticketId: string): strin
 }
 
 function runOutcome(run: RunRecord): ExecutionOutcome {
-  if (run.failureCategory === 'safety_limit' && /budget|limit exhausted|token|cost/iu.test(run.failureReason ?? '')) {
+  if (
+    run.failureCategory === 'safety_limit' &&
+    /(?:execution envelope budget is exhausted|(?:token|cost) budget exhausted)/iu.test(run.failureReason ?? '')
+  ) {
     return 'BUDGET_EXHAUSTED';
   }
   if (run.status === 'NEEDS_HUMAN') return 'NEEDS_HUMAN';
@@ -641,7 +665,7 @@ function errorOutcome(error: unknown): ExecutionOutcome {
 }
 
 function repairOutcome(reason: string): ExecutionOutcome {
-  return /(?:token|cost) budget exhausted|budget exhausted/iu.test(reason)
+  return /(?:execution envelope budget is exhausted|(?:token|cost) budget exhausted)/iu.test(reason)
     ? 'BUDGET_EXHAUSTED'
     : 'NEEDS_HUMAN';
 }

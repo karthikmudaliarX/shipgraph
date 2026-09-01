@@ -120,7 +120,7 @@ export async function createGitHubPullRequest(
   let readiness = await assertCurrentReadyCandidate(workspace, input.ticketId, verifiedWorkspace, runner, input.contractProvenance, input.executionId);
   // Build the compact local receipt before publishing the branch. Missing or
   // ambiguous execution telemetry must not leave a remote handoff behind.
-  buildUsageReceipt(workspace, projectId, input.ticketId, verifiedWorkspace, readiness);
+  buildUsageReceipt(workspace, projectId, input.ticketId, verifiedWorkspace, readiness, input.executionId);
   let remoteSha = await resolveRemoteBranchSha(
     runner,
     verifiedWorkspace.sourceRepositoryPath,
@@ -157,7 +157,7 @@ export async function createGitHubPullRequest(
   if (readiness.readySha !== remoteSha) {
     throw new Error('KAR-8 fail closed: readiness changed after branch publication');
   }
-  const receipt = buildUsageReceipt(workspace, projectId, input.ticketId, verifiedWorkspace, readiness);
+  const receipt = buildUsageReceipt(workspace, projectId, input.ticketId, verifiedWorkspace, readiness, input.executionId);
 
   const prInput = {
     repository,
@@ -630,7 +630,8 @@ function buildUsageReceipt(
   projectId: string,
   ticketId: string,
   verifiedWorkspace: WorkspaceRecord,
-  readiness: CurrentPrePrReadinessEvidence
+  readiness: CurrentPrePrReadinessEvidence,
+  executionId?: string
 ): GitHubUsageReceipt {
   const runs = createRunRepository(workspace.db)
     .findByTicketId(ticketId)
@@ -639,6 +640,12 @@ function buildUsageReceipt(
       run.workspaceId === verifiedWorkspace.id &&
       run.workspacePath === verifiedWorkspace.worktreePath &&
       (run.task === 'implementation' || run.task === 'review' || run.task === 'repair')
+      && (executionId === undefined || (
+        run.executionId === executionId &&
+        run.contractDigest === readiness.contractDigest &&
+        run.contractSource === readiness.contractSource &&
+        run.contractRevision === readiness.contractRevision
+      ))
     )
     .sort((left, right) =>
       (left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id))
