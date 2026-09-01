@@ -179,6 +179,11 @@ export function createLinearDispatchService(options: LinearDispatchServiceOption
         (claim) => claim.payload.linearDeliveryId === deliveryId
       );
       if (duplicate !== undefined) {
+        if (!activeClaims(projectEvents).some(
+          (claim) => claim.payload.claimId === duplicate.payload.claimId
+        )) {
+          return { kind: 'ignored', reason: 'dispatch claim has already completed' };
+        }
         return { kind: 'existing', claim: duplicate };
       }
       const activeForTicket = activeClaims(projectEvents).find(

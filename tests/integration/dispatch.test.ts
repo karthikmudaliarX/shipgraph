@@ -265,6 +265,22 @@ describe('Linear dispatch claim bridge', () => {
       .filter((event) => event.type === EventType.DISPATCH_COMPLETED)).toHaveLength(1);
   });
 
+  it('does not relaunch a claim when its delivery is repeated after completion', async () => {
+    const harness = createHarness();
+    let calls = 0;
+    const service = serviceFor(harness, async () => {
+      calls += 1;
+      return fakeResult();
+    });
+    const request = webhook('linear-issue-1', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    expect((await service.handleWebhook(request.body, request.headers)).outcome).toBe('CLAIMED');
+    await flushImmediate();
+    expect(calls).toBe(1);
+    expect((await service.handleWebhook(request.body, request.headers)).outcome).toBe('IGNORED');
+    await flushImmediate();
+    expect(calls).toBe(1);
+  });
+
   it('does not reconcile a terminal event belonging to another execution', async () => {
     const harness = createHarness();
     let allowExecution = false;
