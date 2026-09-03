@@ -17,9 +17,10 @@ import type {
   ModelExecutionTarget,
 } from '../adapters/agent/registry.js';
 import type { AgentExecutionAdapter } from '../adapters/agent/adapter.js';
+import type { AgentFailureCategory } from '../domain/agent-run.js';
 import type { DbConnection } from '../persistence/db.js';
 import { createModelRepository, type ModelRepository } from '../persistence/model-repositories.js';
-import { createRunRepository } from '../persistence/repositories.js';
+import { createEventRepository, createRunRepository } from '../persistence/repositories.js';
 import { UsageLedger, type UsageLedgerInput } from './ledger.js';
 import {
   ProviderRegistry,
@@ -362,11 +363,48 @@ export class ModelRoutingService {
     let providerCount: number | undefined;
     let lastError: unknown;
     let pendingPrepared: { run: AgentTaskResult['run']; decision: ModelRoutingDecision } | undefined;
+    let attemptRequest = request;
+    const unavailableProviders = new Map<ModelProviderId, string>();
+    const persistPreflightFailure = async (
+      failure: {
+        decision: ModelRoutingDecision;
+        target: ModelExecutionTarget;
+        input: SelectedAgentTaskInput;
+        category: AgentFailureCategory;
+      },
+      reason: string
+    ): Promise<RoutedAgentTaskResult> => {
+      const preparedInput = {
+        ...failure.input,
+        task: failure.target.task,
+        provider: failure.target.provider,
+        modelProviderId: failure.target.modelProviderId,
+        model: failure.target.modelId,
+      };
+      const prepared = review === undefined
+        ? await prepareAgentTaskRun(
+            { ...options, adapter: this.createExecutionAdapter(failure.target) },
+            preparedInput
+          )
+        : await preparePrePrReviewTask(
+            { ...options, adapter: this.createExecutionAdapter(failure.target) },
+            preparedInput,
+            review
+          );
+      const terminal = await abandonPreparedAgentTaskRun(
+        options,
+        prepared.run.id,
+        reason,
+        failure.category
+      );
+      return { created: true, run: terminal, decision: failure.decision };
+    };
+    let lastProviderFailureResult: RoutedAgentTaskResult | undefined;
 
     for (let attempt = 0; providerCount === undefined || attempt < providerCount; attempt += 1) {
       let preview: ModelRoutingDecision;
       try {
-        preview = await this.route({ ...request, excludeProviders: [...excluded] });
+        preview = await this.route({ ...attemptRequest, excludeProviders: [...excluded] });
       } catch (error) {
         if (pendingPrepared !== undefined) {
           const exhausted = await abandonPreparedAgentTaskRun(
@@ -377,6 +415,7 @@ export class ModelRoutingService {
           );
           return { created: true, run: exhausted, decision: pendingPrepared.decision };
         }
+        if (lastProviderFailureResult !== undefined) return lastProviderFailureResult;
         throw error;
       }
       providerCount ??= Math.max(this.registry.list().length, 1);
@@ -400,6 +439,45 @@ export class ModelRoutingService {
       const executionInput = executionSafety === undefined
         ? input
         : { ...input, safety: executionSafety };
+      let preflightFailure: { category: AgentFailureCategory; reason: string } | undefined;
+      try {
+        const probe = await this.registry.probeExecution(target);
+        if (!probe.available) {
+          preflightFailure = {
+            category: 'executable_unavailable',
+            reason: 'execution capability unavailable in the current process',
+          };
+        }
+      } catch {
+        preflightFailure = {
+          category: 'adapter_error',
+          reason: 'execution capability probe failed in the current process',
+        };
+      }
+      if (preflightFailure !== undefined) {
+        excluded.add(target.modelProviderId);
+        unavailableProviders.set(target.modelProviderId, preflightFailure.reason);
+        await this.registry.refresh();
+        const failureReason =
+          `Provider could not pass the current-process launch preflight. ` +
+          this.providerFallbackSummary(unavailableProviders, request.task);
+        lastProviderFailureResult = await persistPreflightFailure(
+          {
+            decision: preview,
+            target,
+            input: executionInput,
+            category: preflightFailure.category,
+          },
+          failureReason
+        );
+        const finalAllowedAttempt = input.safety?.maxAttempts !== undefined &&
+          (executionSafety?.attempt ?? attempt + 1) >= input.safety.maxAttempts;
+        const finalProviderAttempt = attempt === providerCount - 1;
+        if (finalAllowedAttempt || finalProviderAttempt) {
+          return lastProviderFailureResult;
+        }
+        continue;
+      }
       const preparedInput = {
         ...executionInput,
         task: target.task,
@@ -436,14 +514,14 @@ export class ModelRoutingService {
       let decision: ModelRoutingDecision;
       try {
         decision = await this.route({
-          ...request,
+          ...attemptRequest,
           runId: prepared.run.id,
           excludeProviders: otherProviders,
         });
       } catch (error) {
         lastError = error;
         const finalAllowedAttempt = input.safety?.maxAttempts !== undefined &&
-          attempt + 1 >= input.safety.maxAttempts;
+          (executionSafety?.attempt ?? attempt + 1) >= input.safety.maxAttempts;
         const finalProviderAttempt = attempt === providerCount - 1;
         const reason = `Selected provider could not be reserved before launch: ${error instanceof Error ? error.message : String(error)}`;
         if (finalAllowedAttempt || finalProviderAttempt) {
@@ -463,6 +541,23 @@ export class ModelRoutingService {
       const result = review === undefined
         ? await this.executeSelectedAgentTask(options, executionTarget, executionInput)
         : await this.executeSelectedPrePrReviewTask(options, executionTarget, executionInput, review);
+      if (this.isProvenPreLaunchProviderFailure(result.run)) {
+        unavailableProviders.set(
+          target.modelProviderId,
+          'final launch capability probe failed before execution started'
+        );
+        excluded.add(target.modelProviderId);
+        await this.registry.refresh();
+        lastProviderFailureResult = { ...result, decision };
+        const finalAllowedAttempt = input.safety?.maxAttempts !== undefined &&
+          (executionSafety?.attempt ?? attempt + 1) >= input.safety.maxAttempts;
+        const finalProviderAttempt = attempt === providerCount - 1;
+        if (finalAllowedAttempt || finalProviderAttempt) {
+          return lastProviderFailureResult;
+        }
+        attemptRequest = { ...request, requestId: undefined };
+        continue;
+      }
       return { ...result, decision };
     }
     throw new Error(
@@ -536,6 +631,69 @@ export class ModelRoutingService {
       probe: () => this.registry.probeExecution(target),
       execute: (request) => this.registry.executeExecution(target, request),
     };
+  }
+
+  private isProvenPreLaunchProviderFailure(run: AgentTaskResult['run']): boolean {
+    if (
+      run.status !== 'NEEDS_HUMAN' ||
+      !['executable_missing', 'executable_unavailable', 'adapter_error'].includes(
+        run.failureCategory ?? ''
+      ) ||
+      run.providerProcessId !== undefined ||
+      run.providerSessionId !== undefined
+    ) {
+      return false;
+    }
+    const enteredProviderBoundary = createEventRepository(this.options.db)
+      .findByTicketId(run.ticketId)
+      .some((event) =>
+        'runId' in event && event.runId === run.id &&
+        event.type === 'run.state_changed' &&
+        (event.payload as { next?: string }).next === 'RUNNING'
+      );
+    return !enteredProviderBoundary &&
+      this.repository.findActiveRoutingDecisionByRun(run.projectId, run.id) === undefined;
+  }
+
+  private providerFallbackSummary(
+    excluded: ReadonlyMap<ModelProviderId, string>,
+    task: ModelRoutingRequest['task']
+  ): string {
+    const healthByProvider = new Map(this.registry.health().map((health) => [health.providerId, health]));
+    return this.registry.list().map((provider) => {
+      const excludedReason = excluded.get(provider.providerId);
+      if (excludedReason !== undefined) {
+        return `${provider.providerId}: excluded — ${excludedReason}`;
+      }
+      if (!provider.configured) return `${provider.providerId}: unavailable — not configured`;
+      if (provider.availability !== 'available') {
+        return `${provider.providerId}: unavailable — provider availability ${provider.availability}`;
+      }
+      if (provider.executionStatus !== 'available') {
+        return `${provider.providerId}: unavailable — execution capability ${provider.executionStatus}`;
+      }
+      if (provider.catalogStatus !== 'known') {
+        return `${provider.providerId}: unavailable — catalog ${provider.catalogStatus}`;
+      }
+      const health = healthByProvider.get(provider.providerId);
+      if (health === undefined || health.auth !== 'authenticated') {
+        return `${provider.providerId}: unavailable — authentication ${health?.auth ?? 'unknown'}`;
+      }
+      if (health.status !== 'healthy' && health.status !== 'degraded') {
+        return `${provider.providerId}: unavailable — health ${health.status}`;
+      }
+      if (!provider.capabilities.includes(task) ||
+          !this.registry.models(provider.providerId).some((model) => model.capabilities.includes(task))) {
+        return `${provider.providerId}: unavailable — no ${task} model capability`;
+      }
+      if (typeof health.quotaRemaining === 'number' && health.quotaRemaining <= 0) {
+        return `${provider.providerId}: unavailable — quota exhausted`;
+      }
+      if (typeof health.maxConcurrentRuns === 'number' && health.activeRuns >= health.maxConcurrentRuns) {
+        return `${provider.providerId}: unavailable — provider capacity exhausted`;
+      }
+      return `${provider.providerId}: available — eligible fallback`;
+    }).join('; ');
   }
 
   private verifyExecutionBinding(

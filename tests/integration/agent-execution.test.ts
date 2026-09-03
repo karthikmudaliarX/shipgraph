@@ -985,6 +985,471 @@ describe('AGENT-001 durable execution', () => {
     expect(modelService.listHealth()[0]?.activeRuns).toBe(0);
   });
 
+  it('refreshes and falls back before preparing a run when the selected provider becomes unlaunchable', async () => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    const provider = (providerId: 'codex' | 'opencode-go', modelId: string): ModelProviderAdapter => ({
+      providerId,
+      family: providerId === 'codex' ? 'openai' : 'opencode',
+      displayName: providerId,
+      probe: async () => ({
+        availability: 'available', auth: 'authenticated', version: 'test',
+        capabilities: ['implementation'],
+      }),
+      discoverModels: async () => ({
+        status: 'known', models: [{ modelId, capabilities: ['implementation'] }],
+      }),
+    });
+    const codexRequests: AgentExecutionRequest[] = [];
+    let codexProbeCount = 0;
+    const codexExecution: AgentExecutionAdapter = {
+      provider: 'codex', capabilities: ['execute'],
+      probe: () => {
+        codexProbeCount += 1;
+        return codexProbeCount === 1
+          ? { available: true, version: 'test' }
+          : { available: false, reason: 'executable unavailable in current process' };
+      },
+      execute: async (request) => {
+        codexRequests.push(request);
+        throw new Error('unlaunchable provider must not execute');
+      },
+    };
+    registerModelProviderAdapter(codexExecution, 'codex');
+    const fallbackExecution = fakeAdapter();
+    const modelService = new ModelRoutingService({
+      db: harness.db,
+      projectId,
+      adapters: [provider('codex', 'codex/primary'), provider('opencode-go', 'opencode/fallback')],
+      executionAdapters: [
+        { modelProviderId: 'codex', adapter: codexExecution },
+        { modelProviderId: 'opencode-go', adapter: fallbackExecution },
+      ],
+    });
+
+    const result = await modelService.executeRoutedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      {
+        requestId: 'kar-17-implementation-stage', task: 'implementation', risk: 'medium',
+        envelope: {
+          mode: 'balanced', maxConcurrentTickets: 1,
+          activeConcurrentTickets: 0, budgetRemaining: 'unknown',
+        },
+      },
+      { ticketId: 'AG-001', instructions: 'fall back before launch' }
+    );
+
+    expect(result.decision.providerId).toBe('opencode-go');
+    expect(result.run.status).toBe('SUCCEEDED');
+    expect(codexRequests).toHaveLength(0);
+    expect(fallbackExecution.requests).toHaveLength(1);
+    const runs = createRunRepository(harness.db).findByTicketId('AG-001');
+    expect(runs).toHaveLength(2);
+    expect(runs[0]).toMatchObject({
+      status: 'NEEDS_HUMAN', modelProviderId: 'codex',
+      failureCategory: 'executable_unavailable',
+    });
+    expect(runs[0]?.providerProcessId).toBeUndefined();
+    expect(createModelRepository(harness.db).findActiveRoutingDecisionByRun(projectId, runs[0]?.id ?? ''))
+      .toBeUndefined();
+    expect(modelService.listProviders().find((entry) => entry.providerId === 'codex'))
+      .toMatchObject({
+        executionStatus: 'unknown',
+        executionReason: 'executable unavailable in current process',
+      });
+  });
+
+  it('falls back after a final-probe race while retaining the failed run and one active reservation', async () => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    const provider = (providerId: 'codex' | 'opencode-go', modelId: string): ModelProviderAdapter => ({
+      providerId,
+      family: providerId === 'codex' ? 'openai' : 'opencode',
+      displayName: providerId,
+      probe: async () => ({
+        availability: 'available', auth: 'authenticated', version: 'test',
+        capabilities: ['implementation'],
+      }),
+      discoverModels: async () => ({
+        status: 'known', models: [{ modelId, capabilities: ['implementation'] }],
+      }),
+    });
+    let codexProbeCount = 0;
+    const codexRequests: AgentExecutionRequest[] = [];
+    const codexExecution: AgentExecutionAdapter = {
+      provider: 'codex', capabilities: ['execute'],
+      probe: () => {
+        codexProbeCount += 1;
+        return codexProbeCount <= 2
+          ? { available: true, version: 'test' }
+          : { available: false, reason: 'executable disappeared before spawn' };
+      },
+      execute: async (request) => {
+        codexRequests.push(request);
+        throw new Error('final-probe failure must prevent execution');
+      },
+    };
+    registerModelProviderAdapter(codexExecution, 'codex');
+    const fallbackExecution = fakeAdapter();
+    fallbackExecution.execute = async (request) => {
+      fallbackExecution.requests.push(request);
+      const active = createRunRepository(harness?.db as DbConnection).findActiveByTicket(projectId, 'AG-001');
+      expect(active?.id).toBe(request.runId);
+      expect(modelService.listHealth().reduce((sum, health) => sum + health.activeRuns, 0)).toBe(1);
+      if (request.onProcessStarted !== undefined) await request.onProcessStarted(4242);
+      return {
+        outcome: 'SUCCEEDED', providerSessionId: 'fallback-session', providerProcessId: 4242,
+        exitCode: 0, timedOut: false, cancelled: false, processGroupStopped: true,
+        stdout: '{"type":"text","text":"done"}', stderr: '',
+        stdoutTruncated: false, stderrTruncated: false,
+      };
+    };
+    const modelService = new ModelRoutingService({
+      db: harness.db,
+      projectId,
+      adapters: [provider('codex', 'codex/primary'), provider('opencode-go', 'opencode/fallback')],
+      executionAdapters: [
+        { modelProviderId: 'codex', adapter: codexExecution },
+        { modelProviderId: 'opencode-go', adapter: fallbackExecution },
+      ],
+    });
+    const contractDigest = 'a'.repeat(64);
+
+    const result = await modelService.executeRoutedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      {
+        requestId: 'kar-17-final-probe-stage', task: 'implementation', risk: 'medium',
+        envelope: {
+          mode: 'balanced', maxConcurrentTickets: 1,
+          activeConcurrentTickets: 0, budgetRemaining: 'unknown',
+        },
+      },
+      {
+        ticketId: 'AG-001', instructions: 'fall back after the final probe',
+        executionId: 'execution-kar-17', contractDigest,
+        contractSource: 'linear://KAR-17', contractRevision: 'revision-1',
+      }
+    );
+
+    const runs = createRunRepository(harness.db).findByTicketId('AG-001');
+    expect(result.decision.providerId).toBe('opencode-go');
+    expect(result.run.status).toBe('SUCCEEDED');
+    expect(runs).toHaveLength(2);
+    expect(runs[0]).toMatchObject({
+      status: 'NEEDS_HUMAN', failureCategory: 'executable_unavailable',
+    });
+    expect(runs[0]?.providerProcessId).toBeUndefined();
+    expect(runs[0]?.providerSessionId).toBeUndefined();
+    expect(createEventRepository(harness.db).findByTicketId('AG-001').some((event) =>
+      'runId' in event && event.runId === runs[0]?.id &&
+      event.type === 'run.state_changed' &&
+      (event.payload as { next?: string }).next === 'RUNNING'
+    )).toBe(false);
+    expect(runs.map((run) => run.executionId)).toEqual(['execution-kar-17', 'execution-kar-17']);
+    expect(runs.map((run) => run.contractDigest)).toEqual([contractDigest, contractDigest]);
+    expect(new Set(runs.map((run) => run.workspaceId)).size).toBe(1);
+    expect(codexRequests).toHaveLength(0);
+    expect(fallbackExecution.requests).toHaveLength(1);
+    const primaryDecision = modelService.listRoutingDecisions()
+      .find((entry) => entry.providerId === 'codex');
+    expect(primaryDecision).toBeDefined();
+    expect(createModelRepository(harness.db).findRoutingDecisionById(projectId, primaryDecision?.id ?? ''))
+      .toMatchObject({ reservationStatus: 'released', runId: runs[0]?.id });
+    expect(modelService.listHealth().every((health) => health.activeRuns === 0)).toBe(true);
+  });
+
+  it('returns the durable final-probe failure when refresh leaves no safe alternative', async () => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    const metadata = (providerId: 'codex' | 'opencode-go', modelId: string): ModelProviderAdapter => ({
+      providerId, family: providerId === 'codex' ? 'openai' : 'opencode', displayName: providerId,
+      probe: async () => ({
+        availability: 'available', auth: 'authenticated', version: 'test',
+        capabilities: ['implementation'],
+      }),
+      discoverModels: async () => ({ status: 'known', models: [{ modelId, capabilities: ['implementation'] }] }),
+    });
+    let primaryProbeCount = 0;
+    const primary: AgentExecutionAdapter = {
+      provider: 'codex', capabilities: ['execute'],
+      probe: () => (++primaryProbeCount <= 2
+        ? { available: true, version: 'test' }
+        : { available: false, reason: 'primary disappeared before launch' }),
+      execute: async () => { throw new Error('final probe must prevent launch'); },
+    };
+    let fallbackProbeCount = 0;
+    const fallback = fakeAdapter();
+    fallback.probe = () => (++fallbackProbeCount === 1
+      ? { available: true, version: 'test' }
+      : { available: false, reason: 'fallback is unavailable after refresh' });
+    registerModelProviderAdapter(primary, 'codex');
+    const modelService = new ModelRoutingService({
+      db: harness.db, projectId,
+      adapters: [metadata('codex', 'codex/primary'), metadata('opencode-go', 'opencode/fallback')],
+      executionAdapters: [
+        { modelProviderId: 'codex', adapter: primary },
+        { modelProviderId: 'opencode-go', adapter: fallback },
+      ],
+    });
+
+    const result = await modelService.executeRoutedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      {
+        requestId: 'kar-17-no-final-fallback', task: 'implementation', risk: 'medium',
+        envelope: {
+          mode: 'balanced', maxConcurrentTickets: 1,
+          activeConcurrentTickets: 0, budgetRemaining: 'unknown',
+        },
+      },
+      { ticketId: 'AG-001', instructions: 'return the durable pre-launch failure' }
+    );
+
+    expect(result.decision.providerId).toBe('codex');
+    expect(result.run).toMatchObject({
+      status: 'NEEDS_HUMAN', failureCategory: 'executable_unavailable',
+    });
+    expect(createEventRepository(harness.db).findByTicketId('AG-001').some((event) =>
+      'runId' in event && event.runId === result.run.id &&
+      event.type === 'run.state_changed' &&
+      (event.payload as { next?: string }).next === 'RUNNING'
+    )).toBe(false);
+    expect(fallback.requests).toHaveLength(0);
+    expect(createRunRepository(harness.db).findByTicketId('AG-001')).toHaveLength(1);
+    expect(createTicketRepository(harness.db).findById('AG-001')?.status).toBe('PLANNING');
+    expect(modelService.listHealth().every((health) => health.activeRuns === 0)).toBe(true);
+  });
+
+  it('fails closed with bounded provider evidence when refreshed alternatives remain unknown', async () => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    const requests: AgentExecutionRequest[] = [];
+    let codexProbeCount = 0;
+    const execution = (
+      modelProviderId: 'codex' | 'gemini' | 'grok' | 'opencode-go',
+      provider: AgentExecutionAdapter['provider'],
+      probe: AgentExecutionAdapter['probe']
+    ): AgentExecutionAdapter => {
+      const adapter: AgentExecutionAdapter = {
+        provider, capabilities: ['execute'], probe,
+        execute: async (request) => {
+          requests.push(request);
+          throw new Error('unknown provider state must not be launched');
+        },
+      };
+      registerModelProviderAdapter(adapter, modelProviderId);
+      return adapter;
+    };
+    const metadata: ModelProviderAdapter[] = [
+      {
+        providerId: 'codex', family: 'openai', displayName: 'Codex',
+        probe: async () => ({
+          availability: 'available', auth: 'authenticated', version: 'test',
+          capabilities: ['implementation'],
+        }),
+        discoverModels: async () => ({
+          status: 'known', models: [{ modelId: 'codex/primary', capabilities: ['implementation'] }],
+        }),
+      },
+      {
+        providerId: 'gemini', family: 'google', displayName: 'Gemini',
+        probe: async () => ({
+          availability: 'available', auth: 'unknown', version: 'test',
+          capabilities: ['implementation'], reason: 'authentication is not proven',
+        }),
+        discoverModels: async () => ({
+          status: 'known', models: [{ modelId: 'gemini/unknown-auth', capabilities: ['implementation'] }],
+        }),
+      },
+      {
+        providerId: 'grok', family: 'xai', displayName: 'Grok',
+        probe: async () => ({
+          availability: 'available', auth: 'authenticated', version: 'test',
+          capabilities: ['implementation'],
+        }),
+        discoverModels: async () => ({
+          status: 'known', models: [{ modelId: 'grok/unknown-execution', capabilities: ['implementation'] }],
+        }),
+      },
+      {
+        providerId: 'opencode-go', family: 'opencode', displayName: 'OpenCode Go',
+        probe: async () => ({
+          availability: 'available', auth: 'authenticated', version: 'test',
+          capabilities: ['implementation'],
+        }),
+        discoverModels: async () => ({ status: 'unknown', reason: 'catalog is not proven' }),
+      },
+    ];
+    const modelService = new ModelRoutingService({
+      db: harness.db,
+      projectId,
+      adapters: metadata,
+      executionAdapters: [
+        {
+          modelProviderId: 'codex',
+          adapter: execution('codex', 'codex', () => {
+            codexProbeCount += 1;
+            return codexProbeCount === 1
+              ? { available: true, version: 'test' }
+              : { available: false, reason: 'executable unavailable' };
+          }),
+        },
+        { modelProviderId: 'gemini', adapter: execution('gemini', 'acp', () => ({ available: true })) },
+        { modelProviderId: 'grok', adapter: execution('grok', 'acp', () => ({ available: false, reason: 'probe unavailable' })) },
+        { modelProviderId: 'opencode-go', adapter: execution('opencode-go', 'opencode', () => ({ available: true })) },
+      ],
+    });
+
+    const result = await modelService.executeRoutedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      {
+        task: 'implementation', risk: 'medium',
+        envelope: {
+          mode: 'balanced', maxConcurrentTickets: 1,
+          activeConcurrentTickets: 0, budgetRemaining: 'unknown',
+        },
+      },
+      { ticketId: 'AG-001', instructions: 'fail closed when no fallback is proven' }
+    );
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe('executable_unavailable');
+    expect(result.run.failureReason).toContain('codex: excluded');
+    expect(result.run.failureReason).toContain('gemini: unavailable — authentication unknown');
+    expect(result.run.failureReason).toContain('grok: unavailable — execution capability unknown');
+    expect(result.run.failureReason).toContain('opencode-go: unavailable — catalog unknown');
+    expect(result.run.failureReason?.length).toBeLessThanOrEqual(2_048);
+    expect(requests).toHaveLength(0);
+    expect(createRunRepository(harness.db).findByTicketId('AG-001')).toHaveLength(1);
+    expect(modelService.listHealth().every((health) => health.activeRuns === 0)).toBe(true);
+  });
+
+  it('does not launch a fallback beyond the configured attempt ceiling', async () => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    const metadata = (providerId: 'codex' | 'opencode-go', modelId: string): ModelProviderAdapter => ({
+      providerId, family: providerId === 'codex' ? 'openai' : 'opencode', displayName: providerId,
+      probe: async () => ({
+        availability: 'available', auth: 'authenticated', version: 'test',
+        capabilities: ['implementation'],
+      }),
+      discoverModels: async () => ({ status: 'known', models: [{ modelId, capabilities: ['implementation'] }] }),
+    });
+    let codexProbeCount = 0;
+    const codexExecution: AgentExecutionAdapter = {
+      provider: 'codex', capabilities: ['execute'],
+      probe: () => (++codexProbeCount === 1
+        ? { available: true, version: 'test' }
+        : { available: false, reason: 'executable unavailable' }),
+      execute: async () => { throw new Error('unlaunchable provider must not execute'); },
+    };
+    registerModelProviderAdapter(codexExecution, 'codex');
+    const fallbackExecution = fakeAdapter();
+    const modelService = new ModelRoutingService({
+      db: harness.db, projectId,
+      adapters: [metadata('codex', 'codex/primary'), metadata('opencode-go', 'opencode/fallback')],
+      executionAdapters: [
+        { modelProviderId: 'codex', adapter: codexExecution },
+        { modelProviderId: 'opencode-go', adapter: fallbackExecution },
+      ],
+    });
+
+    const result = await modelService.executeRoutedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      {
+        task: 'implementation', risk: 'medium',
+        envelope: {
+          mode: 'balanced', maxConcurrentTickets: 1,
+          activeConcurrentTickets: 0, budgetRemaining: 'unknown',
+        },
+      },
+      {
+        ticketId: 'AG-001', instructions: 'respect the attempt ceiling',
+        safety: { maxAttempts: 1 },
+      }
+    );
+
+    expect(result.run.status).toBe('NEEDS_HUMAN');
+    expect(fallbackExecution.requests).toHaveLength(0);
+    expect(createRunRepository(harness.db).findByTicketId('AG-001')).toHaveLength(1);
+  });
+
+  it.each([
+    { name: 'a launched task failure', outcome: 'failed' as const },
+    { name: 'ambiguous provider process ownership', outcome: 'ambiguous' as const },
+    { name: 'an adapter result that omits process identity', outcome: 'identity-omitted' as const },
+  ])('does not fall back after $name', async ({ outcome }) => {
+    harness = await createHarness();
+    const projectId = (await inspectAgentProjectId(harness)).projectId;
+    const metadata = (providerId: 'codex' | 'opencode-go', modelId: string): ModelProviderAdapter => ({
+      providerId, family: providerId === 'codex' ? 'openai' : 'opencode', displayName: providerId,
+      probe: async () => ({
+        availability: 'available', auth: 'authenticated', version: 'test',
+        capabilities: ['implementation'],
+      }),
+      discoverModels: async () => ({ status: 'known', models: [{ modelId, capabilities: ['implementation'] }] }),
+    });
+    const primaryRequests: AgentExecutionRequest[] = [];
+    const primaryExecution: AgentExecutionAdapter = {
+      provider: 'codex', capabilities: ['execute'],
+      probe: () => ({ available: true, version: 'test' }),
+      execute: async (request) => {
+        primaryRequests.push(request);
+        if (outcome === 'identity-omitted') {
+          return {
+            outcome: 'NEEDS_HUMAN', timedOut: false, cancelled: false,
+            processGroupStopped: true, stdout: '', stderr: '',
+            stdoutTruncated: false, stderrTruncated: false,
+            failureCategory: 'adapter_error',
+            failureReason: 'adapter returned no process identity',
+          };
+        }
+        if (request.onProcessStarted !== undefined) await request.onProcessStarted(7331);
+        if (outcome === 'ambiguous') {
+          throw new Error('provider bookkeeping channel was lost after spawn');
+        }
+        return {
+          outcome: 'FAILED', providerProcessId: 7331, exitCode: 1,
+          timedOut: false, cancelled: false, processGroupStopped: true,
+          stdout: '', stderr: 'implementation failed',
+          stdoutTruncated: false, stderrTruncated: false,
+          failureCategory: 'non_zero_exit', failureReason: 'implementation failed',
+        };
+      },
+    };
+    registerModelProviderAdapter(primaryExecution, 'codex');
+    const fallbackExecution = fakeAdapter();
+    const modelService = new ModelRoutingService({
+      db: harness.db, projectId,
+      adapters: [metadata('codex', 'codex/primary'), metadata('opencode-go', 'opencode/fallback')],
+      executionAdapters: [
+        { modelProviderId: 'codex', adapter: primaryExecution },
+        { modelProviderId: 'opencode-go', adapter: fallbackExecution },
+      ],
+    });
+
+    const result = await modelService.executeRoutedAgentTask(
+      { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      {
+        task: 'implementation', risk: 'medium',
+        envelope: {
+          mode: 'balanced', maxConcurrentTickets: 1,
+          activeConcurrentTickets: 0, budgetRemaining: 'unknown',
+        },
+      },
+      { ticketId: 'AG-001', instructions: 'do not retry after process launch' }
+    );
+
+    expect(result.decision.providerId).toBe('codex');
+    expect(result.run.status).toBe(outcome === 'failed' ? 'FAILED' : 'NEEDS_HUMAN');
+    expect(result.run.failureCategory).toBe(outcome === 'failed' ? 'non_zero_exit' : 'adapter_error');
+    expect(result.run.startedAt).toBeDefined();
+    expect(primaryRequests).toHaveLength(1);
+    expect(fallbackExecution.requests).toHaveLength(0);
+    expect(createRunRepository(harness.db).findByTicketId('AG-001')).toHaveLength(1);
+    expect(modelService.listHealth().find((health) => health.providerId === 'codex')?.activeRuns)
+      .toBe(outcome === 'ambiguous' ? 1 : 0);
+  });
+
   it('persists a durable safety outcome when maxAttempts is zero', async () => {
     harness = await createHarness();
     const projectId = (await inspectAgentProjectId(harness)).projectId;
