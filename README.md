@@ -139,6 +139,12 @@ catalog remains non-routable. OpenCode, Codex, Grok, and Antigravity may use the
 current user's existing CLI credential stores; ShipGraph's environment filtering
 is not host-filesystem or credential-store isolation.
 
+`shipgraph.yml` provider configuration is trusted local configuration. Do **not**
+initialize or run ShipGraph with `providers.*.executable`, probe arguments, or
+other provider command settings supplied by an untrusted repository. Provider
+refresh and execution may launch those configured commands with access to the
+current user's HOME/XDG credential stores.
+
 The outer Scheduler supplies the execution envelope for one ticket. MODEL-001
 chooses concrete provider/model attempts within that envelope; it does not own
 global ticket scheduling or select subsequent work.
