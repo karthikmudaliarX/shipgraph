@@ -130,9 +130,10 @@ loop in v1.
 Provider metadata, authentication, catalog state, execution capability, health,
 quota, and local capacity are discovered conservatively. Unknown authentication,
 catalog, execution-capability, or health evidence remains non-routable. Unknown
-quota, provider concurrency, or execution-envelope limits stay explicitly
-unknown; routing may still proceed under conservative bounded defaults unless a
-known limit is exhausted.
+quota, budget, or execution-envelope concurrency values remain explicitly
+unknown and do not by themselves block routing. Unknown provider concurrency is
+the exception: it uses a conservative one-run fallback limit. Known exhausted
+quota, budget, or capacity still blocks routing.
 
 Safety and approval gates run before provider launch. The final capability probe
 also occurs before the durable `RUNNING` transition. KAR-17 permits a provider
