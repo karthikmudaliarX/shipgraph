@@ -19,7 +19,7 @@ import type {
 import type { AgentExecutionAdapter } from '../adapters/agent/adapter.js';
 import type { DbConnection } from '../persistence/db.js';
 import { createModelRepository, type ModelRepository } from '../persistence/model-repositories.js';
-import { createRunRepository } from '../persistence/repositories.js';
+import { createEventRepository, createRunRepository } from '../persistence/repositories.js';
 import { UsageLedger, type UsageLedgerInput } from './ledger.js';
 import {
   ProviderRegistry,
@@ -362,11 +362,13 @@ export class ModelRoutingService {
     let providerCount: number | undefined;
     let lastError: unknown;
     let pendingPrepared: { run: AgentTaskResult['run']; decision: ModelRoutingDecision } | undefined;
+    let attemptRequest = request;
+    let lastProviderFailureResult: RoutedAgentTaskResult | undefined;
 
     for (let attempt = 0; providerCount === undefined || attempt < providerCount; attempt += 1) {
       let preview: ModelRoutingDecision;
       try {
-        preview = await this.route({ ...request, excludeProviders: [...excluded] });
+        preview = await this.route({ ...attemptRequest, excludeProviders: [...excluded] });
       } catch (error) {
         if (pendingPrepared !== undefined) {
           const exhausted = await abandonPreparedAgentTaskRun(
@@ -377,6 +379,7 @@ export class ModelRoutingService {
           );
           return { created: true, run: exhausted, decision: pendingPrepared.decision };
         }
+        if (lastProviderFailureResult !== undefined) return lastProviderFailureResult;
         throw error;
       }
       providerCount ??= Math.max(this.registry.list().length, 1);
@@ -436,14 +439,14 @@ export class ModelRoutingService {
       let decision: ModelRoutingDecision;
       try {
         decision = await this.route({
-          ...request,
+          ...attemptRequest,
           runId: prepared.run.id,
           excludeProviders: otherProviders,
         });
       } catch (error) {
         lastError = error;
         const finalAllowedAttempt = input.safety?.maxAttempts !== undefined &&
-          attempt + 1 >= input.safety.maxAttempts;
+          (executionSafety?.attempt ?? attempt + 1) >= input.safety.maxAttempts;
         const finalProviderAttempt = attempt === providerCount - 1;
         const reason = `Selected provider could not be reserved before launch: ${error instanceof Error ? error.message : String(error)}`;
         if (finalAllowedAttempt || finalProviderAttempt) {
@@ -463,6 +466,19 @@ export class ModelRoutingService {
       const result = review === undefined
         ? await this.executeSelectedAgentTask(options, executionTarget, executionInput)
         : await this.executeSelectedPrePrReviewTask(options, executionTarget, executionInput, review);
+      if (this.isProvenPreLaunchProviderFailure(result.run)) {
+        excluded.add(target.modelProviderId);
+        await this.registry.refresh();
+        lastProviderFailureResult = { ...result, decision };
+        const finalAllowedAttempt = input.safety?.maxAttempts !== undefined &&
+          (executionSafety?.attempt ?? attempt + 1) >= input.safety.maxAttempts;
+        const finalProviderAttempt = attempt === providerCount - 1;
+        if (finalAllowedAttempt || finalProviderAttempt) {
+          return lastProviderFailureResult;
+        }
+        attemptRequest = { ...request, requestId: undefined };
+        continue;
+      }
       return { ...result, decision };
     }
     throw new Error(
@@ -536,6 +552,28 @@ export class ModelRoutingService {
       probe: () => this.registry.probeExecution(target),
       execute: (request) => this.registry.executeExecution(target, request),
     };
+  }
+
+  private isProvenPreLaunchProviderFailure(run: AgentTaskResult['run']): boolean {
+    if (
+      run.status !== 'NEEDS_HUMAN' ||
+      !['executable_missing', 'executable_unavailable', 'adapter_error'].includes(
+        run.failureCategory ?? ''
+      ) ||
+      run.providerProcessId !== undefined ||
+      run.providerSessionId !== undefined
+    ) {
+      return false;
+    }
+    const enteredProviderBoundary = createEventRepository(this.options.db)
+      .findByTicketId(run.ticketId)
+      .some((event) =>
+        'runId' in event && event.runId === run.id &&
+        event.type === 'run.state_changed' &&
+        (event.payload as { next?: string }).next === 'RUNNING'
+      );
+    return !enteredProviderBoundary &&
+      this.repository.findActiveRoutingDecisionByRun(run.projectId, run.id) === undefined;
   }
 
   private verifyExecutionBinding(

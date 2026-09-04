@@ -316,6 +316,72 @@ async function executeAgentTaskInternal(
     throw new Error(`Run ${persisted.id} could not be marked NEEDS_HUMAN for a safety gate`);
   }
 
+  // The workspace can be changed by an external process during the durable
+  // reservation window. Re-prove the hand-off immediately before the provider
+  // boundary while the run is still durably CREATED and therefore explicitly
+  // proves that provider execution has not started.
+  try {
+    const verifiedAgain = await getVerifiedExecutionWorkspace(
+      options,
+      input.ticketId,
+      normalized.task,
+      true,
+      normalized.reviewedSha
+    );
+    if (
+      verifiedAgain.id !== persisted.workspaceId ||
+      verifiedAgain.worktreePath !== persisted.workspacePath ||
+      verifiedAgain.baseSha !== persisted.baseSha ||
+      verifiedAgain.branchName !== persisted.branchName
+    ) {
+      throw new Error('verified workspace identity changed before provider launch');
+    }
+  } catch (error) {
+    const recovered = markRunNeedsHuman(
+      options,
+      persisted.id,
+      `Workspace could not be re-verified before provider launch: ${safeErrorMessage(error)}`,
+      createEventId,
+      now,
+      'workspace_invalid'
+    );
+    if (recovered) return { created: true, run: recovered };
+    throw new Error(`Run ${persisted.id} changed while workspace re-verification was recorded`);
+  }
+
+  // Re-probe after the final workspace proof and immediately before the
+  // adapter can spawn a provider. The earlier MODEL-001 refresh is only a
+  // routing snapshot; it is not launch authority.
+  let executionProbe: Awaited<ReturnType<AgentExecutionAdapter['probe']>>;
+  try {
+    executionProbe = await options.adapter.probe();
+  } catch (error) {
+    const recovered = markRunNeedsHuman(
+      options,
+      persisted.id,
+      `Agent execution capability could not be verified before provider launch: ${safeErrorMessage(error)}`,
+      createEventId,
+      now,
+      'adapter_error',
+      true
+    );
+    if (recovered) return { created: true, run: recovered };
+    throw new Error(`Run ${persisted.id} changed while capability recovery was being recorded`);
+  }
+  if (!executionProbe.available) {
+    const recovered = markRunNeedsHuman(
+      options,
+      persisted.id,
+      `Agent execution surface became unavailable before provider launch: ${executionProbe.reason}`,
+      createEventId,
+      now,
+      'executable_unavailable',
+      true
+    );
+    if (recovered) return { created: true, run: recovered };
+    throw new Error(`Run ${persisted.id} changed while capability recovery was being recorded`);
+  }
+
   let started: AgentRunRecord;
   try {
     started = startRun(options, persisted, normalized.task, createEventId, now);
@@ -334,72 +400,6 @@ async function executeAgentTaskInternal(
       );
     }
     throw error;
-  }
-
-  // The workspace can be changed by an external process during the durable
-  // reservation/start window. Re-prove the hand-off immediately before the
-  // provider boundary; a persisted RUNNING row with no provider process is
-  // safer than launching against drifted or substituted data.
-  try {
-    const verifiedAgain = await getVerifiedExecutionWorkspace(
-      options,
-      input.ticketId,
-      normalized.task,
-      true,
-      normalized.reviewedSha
-    );
-    if (
-      verifiedAgain.id !== started.workspaceId ||
-      verifiedAgain.worktreePath !== started.workspacePath ||
-      verifiedAgain.baseSha !== started.baseSha ||
-      verifiedAgain.branchName !== started.branchName
-    ) {
-      throw new Error('verified workspace identity changed before provider launch');
-    }
-  } catch (error) {
-    const recovered = markRunNeedsHuman(
-      options,
-      started.id,
-      `Workspace could not be re-verified before provider launch: ${safeErrorMessage(error)}`,
-      createEventId,
-      now,
-      'workspace_invalid'
-    );
-    if (recovered) return { created: true, run: recovered };
-    throw new Error(`Run ${started.id} changed while workspace re-verification was recorded`);
-  }
-
-  // Re-probe after the final workspace proof and immediately before the
-  // adapter can spawn a provider. The earlier MODEL-001 refresh is only a
-  // routing snapshot; it is not launch authority.
-  let executionProbe: Awaited<ReturnType<AgentExecutionAdapter['probe']>>;
-  try {
-    executionProbe = await options.adapter.probe();
-  } catch (error) {
-    const recovered = markRunNeedsHuman(
-      options,
-      started.id,
-      `Agent execution capability could not be verified before provider launch: ${safeErrorMessage(error)}`,
-      createEventId,
-      now,
-      'adapter_error',
-      true
-    );
-    if (recovered) return { created: true, run: recovered };
-    throw new Error(`Run ${started.id} changed while capability recovery was being recorded`);
-  }
-  if (!executionProbe.available) {
-    const recovered = markRunNeedsHuman(
-      options,
-      started.id,
-      `Agent execution surface became unavailable before provider launch: ${executionProbe.reason}`,
-      createEventId,
-      now,
-      'executable_unavailable',
-      true
-    );
-    if (recovered) return { created: true, run: recovered };
-    throw new Error(`Run ${started.id} changed while capability recovery was being recorded`);
   }
 
   let adapterResult: AgentExecutionResult;
@@ -1539,7 +1539,7 @@ function startRun(
           ticketId: running.ticketId,
           projectId: running.projectId,
           next: TicketState.IMPLEMENTING,
-          reason: `agent run ${running.id} started in workspace ${running.workspaceId}`,
+          reason: `agent run ${running.id} passed its final provider launch probe`,
         },
         { createEventId, now }
       );
