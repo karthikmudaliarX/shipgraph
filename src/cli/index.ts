@@ -71,7 +71,7 @@ export function createProgram(): Command {
 
   program
     .name('shipgraph')
-    .description('Deterministic release control for autonomous coding agents.')
+    .description('Deterministic engineering execution for one explicitly authorized work item.')
     .version(readPackageVersion());
 
   program
