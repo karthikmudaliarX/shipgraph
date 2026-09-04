@@ -2,186 +2,148 @@
 
 > Deterministic engineering execution for one explicitly authorized work item.
 
-## What ShipGraph is
+ShipGraph is the execution layer between an outer Scheduler and a GitHub pull
+request. The Scheduler decides **what** should run. ShipGraph decides **how** to
+turn that one authorized ticket into a reviewed, verified PR — then stops.
 
-ShipGraph is the deterministic engineering execution layer for one explicitly
-authorized work item. It claims the supplied ticket, prepares an isolated
-workspace, runs implementation, verification, independent pre-PR reviews,
-bounded repair, Pre-PR Readiness, and the GitHub PR handoff with its usage
-receipt. It stops after `PR_RAISED` / `PR_OPEN`.
+## What ShipGraph owns
 
-ChatGPT Scheduler decides which eligible Linear issue runs next and owns the
-outer progression across work items. ShipGraph decides how that one authorized
-issue reaches a safe PR.
+For one explicitly authorized Linear issue, ShipGraph can:
 
-## What ShipGraph is NOT
+- verify and durably claim the dispatch
+- create an isolated Git worktree
+- discover and route across configured coding providers
+- run bounded implementation with safety and budget limits
+- run deterministic local verification
+- obtain independent Contract Review and Engineering Review
+- perform bounded pre-PR repair when required
+- bind readiness evidence to the exact candidate SHA
+- publish exactly one GitHub PR with a compact usage/evidence receipt
+- stop at `PR_RAISED` / `PR_OPEN`
 
-ShipGraph is **not**:
+ShipGraph does **not** own product priority, backlog progression, merge decisions,
+post-PR CI supervision, successor-ticket selection, or communication back to
+ChatGPT.
 
-- the product backlog owner or global Scheduler
-- the merge authority or successor-ticket selector
-- the post-PR CI supervisor
+## v1 control boundary
 
-It provides bounded execution and evidence; provider agents generate and review
-changes inside those boundaries.
-
-## Current v1 boundary
-
-```
-ChatGPT Scheduler
-       │ chooses one eligible Linear issue and authorizes `shipgraph:queued`
-       ▼
-ShipGraph: authorized ticket
-       │
-       ▼
-workspace → implementation → verification
-       │
-       ▼
+```text
+ChatGPT Scheduler / human
+        │
+        │ chooses exactly one eligible Linear issue
+        │ applies shipgraph:queued
+        ▼
+Linear webhook
+        │ verified signature + live issue re-check
+        ▼
+Durable ShipGraph claim
+        │
+        ▼
+isolated workspace
+        │
+        ▼
+provider routing → implementation → verification
+        │
+        ▼
 Contract Review + Engineering Review
-       │
-       ▼
-bounded repair → Pre-PR Readiness
-       │
-       ▼
-GitHub PR + usage receipt → PR_RAISED / PR_OPEN
-       │
-       ▼
+        │
+        ▼
+bounded repair when required
+        │
+        ▼
+exact-SHA Pre-PR Readiness
+        │
+        ▼
+GitHub PR + usage receipt
+        │
+        ▼
+PR_RAISED / PR_OPEN
+        │
+        ▼
 STOP
+
+Later Scheduler wake:
+CI / reviews / merge / next work
 ```
 
-Linear webhook wake-up and dispatch are the upcoming KAR-13 boundary; they are
-not implemented here. After a PR, Scheduler and the release manager own later
-wait, merge, escalation, and next-work decisions.
+Linear is the v1 durable dispatch signal. ShipGraph does not scan Linear for
+work or maintain a second backlog queue. Duplicate webhook deliveries are made
+harmless by durable local claim/execution evidence. If local execution capacity
+is unavailable, ShipGraph acknowledges the webhook without inventing another
+queue; the outer Scheduler owns a later re-drive.
 
-## Why exact-SHA provenance matters
+## Important invariants
 
-A review or approval applies to exactly one commit SHA. If the candidate head
-changes after a review or Pre-PR Readiness decision, that evidence is stale and
-must be renewed before the PR handoff.
+### One ticket, one active execution
 
-## Current status
+One Linear issue may have at most one active ShipGraph execution. Claims,
+execution identity, workspace provenance, contract provenance, provider runs,
+and PR handoff evidence are persisted in SQLite.
 
-CORE-001 ✅
+### Exact-SHA evidence
 
-CORE-001 establishes the foundation:
+Verification, reviews, repair evidence, and Pre-PR Readiness apply to an exact
+candidate commit. If HEAD changes, stale evidence cannot authorize the PR
+handoff.
 
-- CLI (`doctor`, `init`, `status`)
-- Typed configuration (`shipgraph.yml`)
-- Typed ticket contract
-- Deterministic state machine
-- SQLite persistence with explicit migrations
-- Append-only audit-event log
-- Agent and git-host adapter contracts
-- Unit and integration tests
-- GitHub Actions CI
+### Safety before launch
 
-CORE-002 shipped:
+Safety and approval gates run before provider launch. The final provider
+capability check also occurs before the durable `RUNNING` transition.
 
-- Approved `shipgraph.backlog.yml` contract and whole-DAG validation
-- Persistent, transactional backlog synchronization
-- Deterministic `QUEUED` → `ELIGIBLE` reconciliation
-- Read-only capacity-aware `shipgraph ready` selection
+KAR-17 permits provider fallback only when durable evidence proves a selected
+provider became locally unlaunchable **before** execution entered `RUNNING` and
+before any provider process/session could have acted on the workspace. Launched
+or ambiguous attempts remain fail-closed rather than starting another provider
+on the same workspace.
 
-WORK-001 shipped:
+### Unknown stays unknown
 
-- Persistent, provenance-checked isolated Git worktrees
-- Deterministic workspace lifecycle and fail-closed cleanup
+A provider is not routed merely because a subscription probably exists.
+Authentication, execution capability, model catalog/capability, health, quota,
+and local capacity are discovered conservatively. Unsupported quota or usage
+values remain `unknown` instead of being guessed.
 
-AGENT-001 shipped one bounded provider execution in an already verified
-workspace. MODEL-001 adds provider discovery, health, usage telemetry, model
-routing, and capability-probed execution adapters. KAR-7 adds execution safety
-limits; KAR-9 and KAR-10 add independent pre-PR reviews and bounded repair;
-KAR-11 adds exact-SHA Pre-PR Readiness; KAR-8 adds the GitHub PR and usage
-receipt handoff; and KAR-12 composes these stages for one authorized ticket.
+## Current implementation
 
-The execution envelope is supplied by Scheduler and applies to one ticket;
-MODEL-001 does not claim global ticket capacity or choose subsequent work. A
-durable route reserves a provider run slot, and known provider limits are
-enforced directly. Usage finalization remains append-only and idempotent for
-capacity release; ambiguous provider-process ownership remains reserved until
-explicit reconciliation.
+Delivered:
 
-## CLI examples
+- **CORE-001 ✅** — CLI/config foundation, state machine, SQLite migrations and audit events
+- **CORE-002 ✅** — Approved backlog DAG, eligibility and admission diagnostics
+- **WORK-001 ✅** — Provenance-checked isolated Git worktree lifecycle
+- **AGENT-001 / KAR-5 ✅** — Provider-neutral bounded agent execution with OpenCode adapter
+- **MODEL-001 / KAR-6 ✅** — Provider registry, model discovery/routing, health and usage ledger
+- **KAR-7 ✅** — Execution limits, approval and human safety gates
+- **KAR-9 ✅** — Independent exact-SHA Contract and Engineering Reviews
+- **KAR-10 ✅** — Bounded pre-PR repair
+- **KAR-11 ✅** — Exact-SHA Pre-PR Readiness
+- **KAR-8 ✅** — GitHub PR + usage receipt handoff
+- **KAR-12 ✅** — Single-ticket execution-to-PR composition
+- **KAR-13 ✅** — Verified Linear webhook dispatch + idempotent durable claim bridge
+- **KAR-14 ✅** — Frozen Scheduler/ShipGraph documentation boundary
+- **KAR-17 ✅** — Safe provider fallback for proven pre-launch provider unavailability
 
-```bash
-# Check the environment
-shipgraph doctor
+**KAR-15 dogfood is in progress** on a real external repository. v1 should not
+be treated as proven for general use until that end-to-end dogfood reaches a PR
+and the planned recovery/failure cases are exercised.
 
-# Structured diagnostics
-shipgraph doctor --json
+## Provider model
 
-# First run writes shipgraph.yml and waits for a real project identity.
-shipgraph init
+ShipGraph currently has capability-probed provider surfaces for OpenCode Go,
+Codex, Grok/xAI, and Gemini/Antigravity where the corresponding local tools and
+authentication are actually available.
 
-# Edit project.name and project.repository, then initialize persistence.
-shipgraph init
+Provider settings identify executable and catalog surfaces, not hard-coded model
+names. A provider with unknown authentication, execution capability, or model
+catalog remains non-routable. OpenCode, Codex, Grok, and Antigravity may use the
+current user's existing CLI credential stores; ShipGraph's environment filtering
+is not host-filesystem or credential-store isolation.
 
-# Show project status
-shipgraph status
+The outer Scheduler supplies the execution envelope for one ticket. MODEL-001
+chooses concrete provider/model attempts within that envelope; it does not own
+global ticket scheduling or select subsequent work.
 
-# Structured status
-shipgraph status --json
-
-# Validate the approved backlog without changing SQLite
-shipgraph backlog validate
-
-# Import approved work and reconcile eligibility
-shipgraph backlog sync
-
-# Read-only eligibility/admission diagnostics; this does not start work
-shipgraph ready
-
-# Structured ready queue
-shipgraph ready --json
-
-# Execute one explicitly supplied task with the OpenCode adapter
-shipgraph agent run AG-001 --model <discovered-provider/model> --instructions "Implement the approved task"
-
-# Explicitly select the shared ACP boundary's Antigravity adapter
-shipgraph agent run AG-001 --provider acp --model-provider gemini --model <discovered-provider/model> --instructions "Implement the approved task"
-
-# Let MODEL-001 select, reserve, and execute the provider in one operation
-shipgraph agent run-routed AG-001 --task implementation --risk medium --mode balanced --max-concurrent-tickets 2 --active-concurrent-tickets 0 --instructions "Implement the approved task"
-
-# Refresh capability-probed provider and model metadata
-shipgraph providers refresh --json
-
-# Preview a route; --run-id <run-id> binds it to a durable execution reservation
-# Retries without --request-id use the durable run ID as their stable key
-shipgraph providers route implementation --risk medium --mode balanced --run-id <run-id> --json
-# After a terminal run releases that reservation, use a new request ID for a new attempt. Explicit recovery retains it for human reconciliation.
-# After independently proving the provider process stopped, release retained capacity explicitly:
-shipgraph agent reconcile <run-id> --execution-stopped
-# Usage records telemetry only; it never releases provider capacity.
-
-# Inspect persisted provider health and discovered models
-shipgraph providers list --json
-
-# Inspect durable execution state
-shipgraph agent inspect <run-id> --json
-shipgraph agent list --json
-```
-
-`init` never persists the template's empty identity. Once a valid configuration
-has initialized the database, both `init` and `status` fail closed if the file's
-identity or validated configuration drifts from the persisted project.
-
-Provider settings identify executable and catalog surfaces, not model names.
-They are trusted local configuration: do not point them at repository-supplied
-or otherwise untrusted executables. OpenCode, Codex and Antigravity may use the
-current user's HOME/XDG stores for existing CLI authentication; ShipGraph's
-environment filtering is not host-filesystem or credential-store isolation.
-OpenCode, Codex, Grok and Antigravity (`agy`) have conservative execution
-defaults; Grok uses its `workspace` sandbox profile and Antigravity uses its
-supported `--sandbox` mode. Configure a provider's machine-readable
-`catalogArgs` when its model catalog surface is available. A documented login
-status surface can be configured with `authArgs` and positive output markers;
-without positive authentication evidence a provider remains non-routable.
-Providers without a supported catalog or capability-probed execution surface
-remain unknown/disabled rather than being guessed into service.
-Unsupported quota, token and cost values stay `unknown`.
-
-## Installation
+## CLI
 
 Requires Node.js 22+ and pnpm.
 
@@ -189,6 +151,61 @@ Requires Node.js 22+ and pnpm.
 pnpm install
 pnpm build
 ```
+
+Typical operator commands:
+
+```bash
+# Environment diagnostics
+shipgraph doctor
+shipgraph doctor --json
+
+# Initialize / inspect one local project
+shipgraph init
+shipgraph status
+shipgraph status --json
+
+# Validate/sync the approved local backlog and inspect admission
+shipgraph backlog validate
+shipgraph backlog sync
+shipgraph ready
+shipgraph ready --json
+
+# Refresh and inspect provider state
+shipgraph providers refresh --json
+shipgraph providers list --json
+
+# Preview a model route
+shipgraph providers route implementation --risk medium --mode balanced --json
+
+# Inspect durable provider runs
+shipgraph agent list --json
+shipgraph agent inspect <run-id> --json
+
+# Inspect isolated workspaces
+shipgraph workspace list
+```
+
+Direct agent commands exist for bounded development/debugging, but production
+v1 dispatch is the Scheduler-authorized Linear webhook path rather than an
+agent autonomously choosing work.
+
+## Operational visibility
+
+ShipGraph's canonical runtime state is durable, so operators can inspect it
+without introducing a second control plane:
+
+```bash
+shipgraph status
+shipgraph agent list
+shipgraph agent inspect <run-id>
+shipgraph workspace list
+shipgraph providers list
+```
+
+For a long-running receiver, follow the host service logs alongside those
+read-only commands (for example with `journalctl -f` inside `tmux`). There is no
+first-class `shipgraph monitor` command yet; do not treat a terminal dashboard
+as authoritative state.
 
 ## Development
 
@@ -199,33 +216,22 @@ pnpm test
 pnpm build
 ```
 
-## Delivered through KAR-12
+## Repository map
 
-- **CORE-001 ✅** — Project foundation and safe state boundary
-- **CORE-002 ✅** — Persistent backlog DAG and eligibility/admission diagnostics
-- **WORK-001 ✅** — Safe isolated git worktree lifecycle
-- **AGENT-001 ✅** — Provider-neutral bounded agent execution and OpenCode adapter
+- `CONTEXT.md` — small canonical vocabulary
+- `docs/architecture/` — architecture and release invariants
+- `src/dispatch/` — Linear webhook/claim bridge
+- `src/execution/` — bounded provider execution
+- `src/model/` — provider discovery, routing, health and usage
+- `src/workspace/` — isolated worktree lifecycle
+- `src/review/`, `src/repair/`, `src/readiness/` — pre-PR evidence pipeline
 
-Delivered:
+## Philosophy
 
-- **MODEL-001 ✅** — Provider metadata, routing, health, and usage telemetry
-- **KAR-7 ✅** — Execution limits and human safety gates
-- **KAR-9 ✅** — Independent Contract and Engineering Reviews
-- **KAR-10 ✅** — Bounded pre-PR repair
-- **KAR-11 ✅** — Exact-SHA Pre-PR Readiness
-- **KAR-8 ✅** — GitHub PR and usage receipt handoff
-- **KAR-12 ✅** — Single-ticket EXEC-001 composition
-
-The production outer Scheduler, Linear webhook wake-up, post-PR supervision,
-merge authority, and successor-ticket selection remain outside ShipGraph's v1
-inner-loop boundary.
-
-## Comparison philosophy
-
-ShipGraph is inspired by autonomous coding-agent systems and orchestrators, but
-it occupies a different layer: the deterministic engineering execution plane. It does
-not claim to be a better code generator. It aims to make agent-generated changes
-safe to land at scale by enforcing policy, provenance, and isolation.
+ShipGraph is not trying to be a better code generator or a second autonomous
+project manager. Its job is to make one agent-generated change easier to reason
+about: explicit authorization, small scope, durable provenance, isolated state,
+bounded execution, independent review, and a hard stop at the PR boundary.
 
 ## License
 
