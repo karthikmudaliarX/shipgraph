@@ -384,7 +384,7 @@ async function executeAgentTaskInternal(
 
   let started: AgentRunRecord;
   try {
-    started = startRun(options, persisted, createEventId, now);
+    started = startRun(options, persisted, normalized.task, createEventId, now);
   } catch (error) {
     const recovered = markRunNeedsHuman(
       options,
@@ -400,33 +400,6 @@ async function executeAgentTaskInternal(
       );
     }
     throw error;
-  }
-
-  if (normalized.task === 'implementation') {
-    try {
-      persistTicketTransition(
-        options.db,
-        {
-          ticketId: started.ticketId,
-          projectId: started.projectId,
-          next: TicketState.IMPLEMENTING,
-          reason: `agent run ${started.id} passed its final provider launch probe`,
-        },
-        { createEventId, now }
-      );
-    } catch (error) {
-      const recovered = markRunNeedsHuman(
-        options,
-        started.id,
-        `Implementation could not enter its provider launch boundary safely: ${safeErrorMessage(error)}`,
-        createEventId,
-        now,
-        'persistence_error',
-        true
-      );
-      if (recovered) return { created: true, run: recovered };
-      throw new Error(`Run ${started.id} changed while its launch boundary was being recorded`);
-    }
   }
 
   let adapterResult: AgentExecutionResult;
@@ -1534,6 +1507,7 @@ function persistCreatedRun(
 function startRun(
   options: AgentExecutionServiceOptions,
   run: AgentRunRecord,
+  task: ModelTaskType,
   createEventId: () => string,
   now: () => string
 ): AgentRunRecord {
@@ -1558,6 +1532,18 @@ function startRun(
     );
     if (!running) throw new Error(`Run ${run.id} could not enter RUNNING state`);
     appendRunStateChange(options, running, 'STARTING', 'RUNNING', createEventId, now());
+    if (task === 'implementation') {
+      persistTicketTransition(
+        options.db,
+        {
+          ticketId: running.ticketId,
+          projectId: running.projectId,
+          next: TicketState.IMPLEMENTING,
+          reason: `agent run ${running.id} passed its final provider launch probe`,
+        },
+        { createEventId, now }
+      );
+    }
     return requireDurableRun(repository.findById(run.id));
   }).immediate;
   return start();

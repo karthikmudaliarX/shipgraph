@@ -17,7 +17,6 @@ import type {
   ModelExecutionTarget,
 } from '../adapters/agent/registry.js';
 import type { AgentExecutionAdapter } from '../adapters/agent/adapter.js';
-import { agentRunRecordSchema } from '../domain/agent-run.js';
 import type { DbConnection } from '../persistence/db.js';
 import { createModelRepository, type ModelRepository } from '../persistence/model-repositories.js';
 import { createEventRepository, createRunRepository } from '../persistence/repositories.js';
@@ -364,7 +363,6 @@ export class ModelRoutingService {
     let lastError: unknown;
     let pendingPrepared: { run: AgentTaskResult['run']; decision: ModelRoutingDecision } | undefined;
     let attemptRequest = request;
-    const unavailableProviders = new Map<ModelProviderId, string>();
     let lastProviderFailureResult: RoutedAgentTaskResult | undefined;
 
     for (let attempt = 0; providerCount === undefined || attempt < providerCount; attempt += 1) {
@@ -381,20 +379,7 @@ export class ModelRoutingService {
           );
           return { created: true, run: exhausted, decision: pendingPrepared.decision };
         }
-        if (lastProviderFailureResult !== undefined) {
-          const failureReason = [
-            lastProviderFailureResult.run.failureReason,
-            this.providerFallbackSummary(unavailableProviders, request.task),
-          ].filter((value): value is string => value !== undefined).join('; ').slice(0, 2_048);
-          const updated = createRunRepository(this.options.db).updateStatus(
-            lastProviderFailureResult.run.id, 'NEEDS_HUMAN', this.now(),
-            { failureReason }, ['NEEDS_HUMAN']
-          );
-          const run = updated === undefined
-            ? lastProviderFailureResult.run
-            : agentRunRecordSchema.parse(updated);
-          return { ...lastProviderFailureResult, run };
-        }
+        if (lastProviderFailureResult !== undefined) return lastProviderFailureResult;
         throw error;
       }
       providerCount ??= Math.max(this.registry.list().length, 1);
@@ -482,10 +467,6 @@ export class ModelRoutingService {
         ? await this.executeSelectedAgentTask(options, executionTarget, executionInput)
         : await this.executeSelectedPrePrReviewTask(options, executionTarget, executionInput, review);
       if (this.isProvenPreLaunchProviderFailure(result.run)) {
-        unavailableProviders.set(
-          target.modelProviderId,
-          'final launch capability probe failed before execution started'
-        );
         excluded.add(target.modelProviderId);
         await this.registry.refresh();
         lastProviderFailureResult = { ...result, decision };
@@ -593,47 +574,6 @@ export class ModelRoutingService {
       );
     return !enteredProviderBoundary &&
       this.repository.findActiveRoutingDecisionByRun(run.projectId, run.id) === undefined;
-  }
-
-  private providerFallbackSummary(
-    excluded: ReadonlyMap<ModelProviderId, string>,
-    task: ModelRoutingRequest['task']
-  ): string {
-    const healthByProvider = new Map(this.registry.health().map((health) => [health.providerId, health]));
-    return this.registry.list().map((provider) => {
-      const excludedReason = excluded.get(provider.providerId);
-      if (excludedReason !== undefined) {
-        return `${provider.providerId}: excluded — ${excludedReason}`;
-      }
-      if (!provider.configured) return `${provider.providerId}: unavailable — not configured`;
-      if (provider.availability !== 'available') {
-        return `${provider.providerId}: unavailable — provider availability ${provider.availability}`;
-      }
-      if (provider.executionStatus !== 'available') {
-        return `${provider.providerId}: unavailable — execution capability ${provider.executionStatus}`;
-      }
-      if (provider.catalogStatus !== 'known') {
-        return `${provider.providerId}: unavailable — catalog ${provider.catalogStatus}`;
-      }
-      const health = healthByProvider.get(provider.providerId);
-      if (health === undefined || health.auth !== 'authenticated') {
-        return `${provider.providerId}: unavailable — authentication ${health?.auth ?? 'unknown'}`;
-      }
-      if (health.status !== 'healthy' && health.status !== 'degraded') {
-        return `${provider.providerId}: unavailable — health ${health.status}`;
-      }
-      if (!provider.capabilities.includes(task) ||
-          !this.registry.models(provider.providerId).some((model) => model.capabilities.includes(task))) {
-        return `${provider.providerId}: unavailable — no ${task} model capability`;
-      }
-      if (typeof health.quotaRemaining === 'number' && health.quotaRemaining <= 0) {
-        return `${provider.providerId}: unavailable — quota exhausted`;
-      }
-      if (typeof health.maxConcurrentRuns === 'number' && health.activeRuns >= health.maxConcurrentRuns) {
-        return `${provider.providerId}: unavailable — provider capacity exhausted`;
-      }
-      return `${provider.providerId}: available — eligible fallback`;
-    }).join('; ');
   }
 
   private verifyExecutionBinding(

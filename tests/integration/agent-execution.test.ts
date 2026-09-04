@@ -1145,7 +1145,7 @@ describe('AGENT-001 durable execution', () => {
     expect(modelService.listHealth().every((health) => health.activeRuns === 0)).toBe(true);
   });
 
-  it('fails closed with bounded provider evidence when refreshed alternatives remain unknown', async () => {
+  it('fails closed while refreshed durable provider evidence keeps unknown alternatives non-routable', async () => {
     harness = await createHarness();
     const projectId = (await inspectAgentProjectId(harness)).projectId;
     const requests: AgentExecutionRequest[] = [];
@@ -1239,11 +1239,13 @@ describe('AGENT-001 durable execution', () => {
 
     expect(result.run.status).toBe('NEEDS_HUMAN');
     expect(result.run.failureCategory).toBe('executable_unavailable');
-    expect(result.run.failureReason).toContain('codex: excluded');
-    expect(result.run.failureReason).toContain('gemini: unavailable — authentication unknown');
-    expect(result.run.failureReason).toContain('grok: unavailable — execution capability unknown');
-    expect(result.run.failureReason).toContain('opencode-go: unavailable — catalog unknown');
     expect(result.run.failureReason?.length).toBeLessThanOrEqual(2_048);
+    expect(modelService.listHealth().find((entry) => entry.providerId === 'gemini')?.auth)
+      .toBe('unknown');
+    expect(modelService.listProviders().find((entry) => entry.providerId === 'grok')?.executionStatus)
+      .toBe('unknown');
+    expect(modelService.listProviders().find((entry) => entry.providerId === 'opencode-go')?.catalogStatus)
+      .toBe('unknown');
     expect(requests).toHaveLength(0);
     expect(createRunRepository(harness.db).findByTicketId('AG-001')).toHaveLength(1);
     expect(modelService.listHealth().every((health) => health.activeRuns === 0)).toBe(true);
