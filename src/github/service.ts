@@ -637,6 +637,12 @@ function buildUsageReceipt(
   readiness: CurrentPrePrReadinessEvidence,
   executionId?: string
 ): GitHubUsageReceipt {
+  const runEvents = createEventRepository(workspace.db).findByTicketId(ticketId);
+  const runCreationOrder = new Map(
+    runEvents
+      .filter((event) => event.type === EventType.RUN_CREATED && 'runId' in event)
+      .map((event, index) => [event.runId, index])
+  );
   const runs = createRunRepository(workspace.db)
     .findByTicketId(ticketId)
     .filter((run) =>
@@ -652,7 +658,10 @@ function buildUsageReceipt(
       ))
     )
     .sort((left, right) =>
-      (left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id))
+      ((runCreationOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
+        (runCreationOrder.get(right.id) ?? Number.MAX_SAFE_INTEGER)) ||
+      left.startedAt.localeCompare(right.startedAt) ||
+      left.id.localeCompare(right.id)
     );
   const implementationRuns = runs.filter((run) => run.task === 'implementation');
   const executionRunId = implementationRuns[0]?.id;
@@ -664,8 +673,10 @@ function buildUsageReceipt(
     review: runs.filter((run) => run.task === 'review'),
     repair: runs.filter((run) => run.task === 'repair'),
   };
-  const fallbackRuns = runs.filter((run) => isFallbackRun(run, runs));
   const modelRepository = createModelRepository(workspace.db);
+  const fallbackRuns = runs.filter((run) =>
+    isFallbackRun(run, runs, runEvents, modelRepository)
+  );
   const usageEntries = modelRepository.listUsage(projectId).filter((entry) =>
     runs.some((run) => run.id === entry.runId)
   );
@@ -762,18 +773,39 @@ function summarizeUsage(
   };
 }
 
-function isFallbackRun(run: RunRecord, runs: readonly RunRecord[]): boolean {
+function isFallbackRun(
+  run: RunRecord,
+  runs: readonly RunRecord[],
+  events: readonly ShipgraphEvent[],
+  modelRepository: ReturnType<typeof createModelRepository>
+): boolean {
   const sameAxis = runs.filter((candidate) =>
     candidate.task === run.task &&
     (run.task !== 'review' || candidate.reviewType === run.reviewType)
   );
   const position = sameAxis.indexOf(run);
   if (position <= 0) return false;
-  return sameAxis.slice(0, position).some((candidate) =>
-    candidate.status === 'NEEDS_HUMAN' &&
-    candidate.failureCategory === 'persistence_error' &&
-    candidate.failureReason === 'Selected provider could not be reserved before the next fallback was prepared'
-  );
+  return sameAxis.slice(0, position).some((candidate) => {
+    const fallbackFailure =
+      (candidate.failureCategory === 'persistence_error' &&
+        candidate.failureReason === 'Selected provider could not be reserved before the next fallback was prepared') ||
+      ['executable_missing', 'executable_unavailable', 'adapter_error'].includes(
+        candidate.failureCategory ?? ''
+      );
+    return candidate.status === 'NEEDS_HUMAN' &&
+      fallbackFailure &&
+      candidate.modelProviderId !== run.modelProviderId &&
+      candidate.providerProcessId === undefined &&
+      candidate.providerSessionId === undefined &&
+      !events.some((event) =>
+        'runId' in event &&
+        event.runId === candidate.id &&
+        event.type === EventType.RUN_STATE_CHANGED &&
+        event.payload.next === 'RUNNING'
+      ) &&
+      candidate.projectId !== undefined &&
+      modelRepository.findActiveRoutingDecisionByRun(candidate.projectId, candidate.id) === undefined;
+  });
 }
 
 function routingModeFor(

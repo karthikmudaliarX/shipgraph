@@ -321,6 +321,78 @@ function addReceiptRuns(
   }
 }
 
+function addPreLaunchProviderFailure(harness: Harness, timestamp: string): void {
+  const id = 'repair-kar-17-primary';
+  const policySha = '1'.repeat(64);
+  const completedAt = timestamp;
+  createRunRepository(harness.db).create({
+    id,
+    ticketId: harness.workspace.ticketId,
+    projectId: harness.workspace.projectId,
+    workspaceId: harness.workspace.id,
+    workspacePath: harness.workspace.worktreePath,
+    baseSha: harness.workspace.baseSha,
+    branchName: harness.workspace.branchName,
+    status: 'NEEDS_HUMAN',
+    provider: 'codex',
+    modelProviderId: 'codex',
+    task: 'repair',
+    model: 'codex/primary',
+    createdAt: timestamp,
+    startedAt: timestamp,
+    updatedAt: completedAt,
+    completedAt,
+    failureCategory: 'executable_unavailable',
+    failureReason: 'Agent execution capability is unavailable before provider launch',
+    instructionsSha256: '2'.repeat(64),
+    safetyPolicySha256: policySha,
+    timeoutMs: 1_000,
+  });
+  const events = createEventRepository(harness.db);
+  events.append({
+    id: randomUUID(),
+    timestamp,
+    projectId: harness.workspace.projectId,
+    ticketId: harness.workspace.ticketId,
+    runId: id,
+    type: EventType.RUN_CREATED,
+    payload: {
+      runId: id,
+      ticketId: harness.workspace.ticketId,
+      baseSha: harness.workspace.baseSha,
+      workspaceId: harness.workspace.id,
+      workspacePath: harness.workspace.worktreePath,
+      branchName: harness.workspace.branchName,
+      provider: 'codex',
+      modelProviderId: 'codex',
+      task: 'repair',
+      model: 'codex/primary',
+      createdAt: timestamp,
+      timeoutMs: 1_000,
+      instructionsSha256: '2'.repeat(64),
+      safetyPolicySha256: policySha,
+    },
+  });
+  events.append({
+    id: randomUUID(),
+    timestamp: completedAt,
+    projectId: harness.workspace.projectId,
+    ticketId: harness.workspace.ticketId,
+    runId: id,
+    type: EventType.RUN_COMPLETED,
+    payload: {
+      runId: id,
+      ticketId: harness.workspace.ticketId,
+      status: 'NEEDS_HUMAN',
+      completedAt,
+      timedOut: false,
+      cancelled: false,
+      failureCategory: 'executable_unavailable',
+      failureReason: 'Agent execution capability is unavailable before provider launch',
+    },
+  });
+}
+
 function cleanup(harness: Harness | undefined): void {
   if (harness === undefined) return;
   harness.db.close();
@@ -352,6 +424,39 @@ describe('KAR-8 GitHub handoff', () => {
     expect(events.filter((event) => event.type === EventType.GITHUB_PR_RECORDED)).toHaveLength(1);
     expect(events.filter((event) => event.type === EventType.GITHUB_USAGE_RECEIPT_RECORDED)).toHaveLength(1);
     expect(harness.host.comments[0]?.body).toContain('"knownTotal":"unknown"');
+  });
+
+  it('records a structurally proven KAR-17 provider fallback in the receipt', async () => {
+    harness = await createHarness();
+    addPreLaunchProviderFailure(harness, '2099-01-01T00:00:00.000Z');
+    addRun(
+      createRunRepository(harness.db),
+      createEventRepository(harness.db),
+      harness.workspace,
+      'repair',
+      harness.host.headSha,
+      '1'.repeat(64),
+      undefined,
+      '2099-01-01T00:00:00.000Z',
+      undefined,
+      'kar-17-fallback',
+      'opencode/fallback'
+    );
+
+    const result = await createGitHubPullRequest({
+      ticketId: 'GH-001',
+      gitHost: harness.host,
+      workspace: {
+        db: harness.db,
+        projectDir: harness.projectDir,
+        worktreeRoot: harness.worktreeRoot,
+        gitRunner: harness.gitRunner,
+      },
+    });
+
+    expect(result.receipt.fallback).toEqual([
+      { providerId: 'opencode-go', modelId: 'opencode/fallback' },
+    ]);
   });
 
   it('recovers a lost receipt response without creating a duplicate PR or comment', async () => {
