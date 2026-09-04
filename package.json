@@ -1,7 +1,7 @@
 {
   "name": "shipgraph",
   "version": "0.1.0",
-  "description": "Deterministic release control for autonomous coding agents.",
+  "description": "Deterministic engineering execution for one explicitly authorized work item.",
   "type": "module",
   "main": "dist/cli/index.js",
   "bin": {
@@ -16,11 +16,11 @@
     "test:watch": "vitest"
   },
   "keywords": [
-    "release-control",
-    "autonomous-agents",
+    "coding-agents",
+    "engineering-automation",
+    "reliability",
     "ci",
-    "git",
-    "orchestration"
+    "git"
   ],
   "author": "Karthik Mudaliar",
   "license": "MIT",
