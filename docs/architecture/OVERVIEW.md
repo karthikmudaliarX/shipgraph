@@ -128,8 +128,11 @@ loop in v1.
 ## Provider launch boundary
 
 Provider metadata, authentication, catalog state, execution capability, health,
-quota, and local capacity are discovered conservatively. Unknown state remains
-unknown and is not routed.
+quota, and local capacity are discovered conservatively. Unknown authentication,
+catalog, execution-capability, or health evidence remains non-routable. Unknown
+quota, provider concurrency, or execution-envelope limits stay explicitly
+unknown; routing may still proceed under conservative bounded defaults unless a
+known limit is exhausted.
 
 Safety and approval gates run before provider launch. The final capability probe
 also occurs before the durable `RUNNING` transition. KAR-17 permits a provider
