@@ -17,7 +17,7 @@ import type {
   ModelExecutionTarget,
 } from '../adapters/agent/registry.js';
 import type { AgentExecutionAdapter } from '../adapters/agent/adapter.js';
-import type { AgentFailureCategory } from '../domain/agent-run.js';
+import { agentRunRecordSchema } from '../domain/agent-run.js';
 import type { DbConnection } from '../persistence/db.js';
 import { createModelRepository, type ModelRepository } from '../persistence/model-repositories.js';
 import { createEventRepository, createRunRepository } from '../persistence/repositories.js';
@@ -365,40 +365,6 @@ export class ModelRoutingService {
     let pendingPrepared: { run: AgentTaskResult['run']; decision: ModelRoutingDecision } | undefined;
     let attemptRequest = request;
     const unavailableProviders = new Map<ModelProviderId, string>();
-    const persistPreflightFailure = async (
-      failure: {
-        decision: ModelRoutingDecision;
-        target: ModelExecutionTarget;
-        input: SelectedAgentTaskInput;
-        category: AgentFailureCategory;
-      },
-      reason: string
-    ): Promise<RoutedAgentTaskResult> => {
-      const preparedInput = {
-        ...failure.input,
-        task: failure.target.task,
-        provider: failure.target.provider,
-        modelProviderId: failure.target.modelProviderId,
-        model: failure.target.modelId,
-      };
-      const prepared = review === undefined
-        ? await prepareAgentTaskRun(
-            { ...options, adapter: this.createExecutionAdapter(failure.target) },
-            preparedInput
-          )
-        : await preparePrePrReviewTask(
-            { ...options, adapter: this.createExecutionAdapter(failure.target) },
-            preparedInput,
-            review
-          );
-      const terminal = await abandonPreparedAgentTaskRun(
-        options,
-        prepared.run.id,
-        reason,
-        failure.category
-      );
-      return { created: true, run: terminal, decision: failure.decision };
-    };
     let lastProviderFailureResult: RoutedAgentTaskResult | undefined;
 
     for (let attempt = 0; providerCount === undefined || attempt < providerCount; attempt += 1) {
@@ -415,7 +381,20 @@ export class ModelRoutingService {
           );
           return { created: true, run: exhausted, decision: pendingPrepared.decision };
         }
-        if (lastProviderFailureResult !== undefined) return lastProviderFailureResult;
+        if (lastProviderFailureResult !== undefined) {
+          const failureReason = [
+            lastProviderFailureResult.run.failureReason,
+            this.providerFallbackSummary(unavailableProviders, request.task),
+          ].filter((value): value is string => value !== undefined).join('; ').slice(0, 2_048);
+          const updated = createRunRepository(this.options.db).updateStatus(
+            lastProviderFailureResult.run.id, 'NEEDS_HUMAN', this.now(),
+            { failureReason }, ['NEEDS_HUMAN']
+          );
+          const run = updated === undefined
+            ? lastProviderFailureResult.run
+            : agentRunRecordSchema.parse(updated);
+          return { ...lastProviderFailureResult, run };
+        }
         throw error;
       }
       providerCount ??= Math.max(this.registry.list().length, 1);
@@ -439,45 +418,6 @@ export class ModelRoutingService {
       const executionInput = executionSafety === undefined
         ? input
         : { ...input, safety: executionSafety };
-      let preflightFailure: { category: AgentFailureCategory; reason: string } | undefined;
-      try {
-        const probe = await this.registry.probeExecution(target);
-        if (!probe.available) {
-          preflightFailure = {
-            category: 'executable_unavailable',
-            reason: 'execution capability unavailable in the current process',
-          };
-        }
-      } catch {
-        preflightFailure = {
-          category: 'adapter_error',
-          reason: 'execution capability probe failed in the current process',
-        };
-      }
-      if (preflightFailure !== undefined) {
-        excluded.add(target.modelProviderId);
-        unavailableProviders.set(target.modelProviderId, preflightFailure.reason);
-        await this.registry.refresh();
-        const failureReason =
-          `Provider could not pass the current-process launch preflight. ` +
-          this.providerFallbackSummary(unavailableProviders, request.task);
-        lastProviderFailureResult = await persistPreflightFailure(
-          {
-            decision: preview,
-            target,
-            input: executionInput,
-            category: preflightFailure.category,
-          },
-          failureReason
-        );
-        const finalAllowedAttempt = input.safety?.maxAttempts !== undefined &&
-          (executionSafety?.attempt ?? attempt + 1) >= input.safety.maxAttempts;
-        const finalProviderAttempt = attempt === providerCount - 1;
-        if (finalAllowedAttempt || finalProviderAttempt) {
-          return lastProviderFailureResult;
-        }
-        continue;
-      }
       const preparedInput = {
         ...executionInput,
         task: target.task,
