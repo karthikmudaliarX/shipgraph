@@ -84,7 +84,8 @@ export type ReviewOutput = z.infer<typeof reviewOutputSchema>;
  */
 export const normalizedAgentEvidenceSchema = z.object({
   outputFormat: z.enum(['json', 'jsonl']),
-  eventCount: z.number().int().min(1).max(10_000),
+  // The count describes the drained stream, not only the retained prefix.
+  eventCount: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
   eventTypes: z.array(z.string().min(1).max(80)).max(64),
   summary: z.string().max(4_096).optional(),
 }).strict();

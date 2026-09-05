@@ -991,6 +991,14 @@ describe('KAR-10 bounded pre-PR repair', () => {
     expect(value.adapter.requests).toHaveLength(0);
   });
 
+  it('allows default verification output that fits each retained stream independently', async () => {
+    value = await harness([PASS, PASS]);
+    value.db.prepare('UPDATE tickets SET verification_json = ? WHERE id = ?')
+      .run(JSON.stringify({ commands: [`node -e "process.stdout.write('x'.repeat(3000)); process.stderr.write('y'.repeat(3000))"`] }), 'REP-001');
+    const result = await runPrePrRepair(defaultRunnerInput(value));
+    expect(result.status).toBe('PASSED');
+  });
+
   it('fails closed when default verification exceeds its bounded output capture', async () => {
     value = await harness([PASS, PASS]);
     value.db.prepare('UPDATE tickets SET verification_json = ? WHERE id = ?')

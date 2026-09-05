@@ -1,4 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { JsonlOutputCollector, type JsonlProtocol, type StructuredOutput } from './structured-output.js';
+
+/** Combined stdout + stderr consumption budget, independent of retained evidence. */
+export const AGENT_STREAM_LIMIT_BYTES = 64 * 1024 * 1024;
 
 const TERMINATION_GRACE_MS = 1_000;
 const PROCESS_GROUP_POLL_MS = 25;
@@ -10,6 +14,9 @@ export type AgentProcessSpec = {
   env: Readonly<Record<string, string>>;
   timeoutMs: number;
   maxOutputBytes: number;
+  /** May lower, but never raise, the combined stream safety budget. */
+  maxStreamBytes?: number;
+  jsonlProtocol?: JsonlProtocol;
   signal?: AbortSignal;
   onStarted?: (processId: number) => void | Promise<void>;
 };
@@ -25,12 +32,16 @@ export type AgentProcessResult = {
   cancelled: boolean;
   /** False when an owned provider process group could not be proven stopped. */
   processGroupStopped?: boolean;
+  /** A consumption/record safety budget was exceeded, not merely retained text. */
   outputLimitExceeded: boolean;
   stdout: string;
   stderr: string;
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
   durationMs: number;
+  /** Bounded evidence computed from the drained JSONL stream, not its retained prefix. */
+  structuredOutput?: StructuredOutput;
+  retainedOutputBytes?: number;
 };
 
 export interface AgentProcessRunner {
@@ -62,7 +73,13 @@ class BoundedCapture {
   }
 
   public text(): string {
-    return Buffer.concat(this.chunks).toString('utf8');
+    // Do not turn an incomplete trailing UTF-8 sequence into a replacement
+    // character whose encoding could exceed the retained byte cap.
+    const decoded = new TextDecoder('utf-8').decode(Buffer.concat(this.chunks), { stream: this.wasTruncated });
+    const bytes = Buffer.from(decoded);
+    if (bytes.length <= this.limit) return decoded;
+    this.wasTruncated = true;
+    return new TextDecoder('utf-8').decode(bytes.subarray(0, this.limit), { stream: true });
   }
 
   public get truncated(): boolean {
@@ -79,6 +96,10 @@ type TerminationReason = 'timeout' | 'cancelled' | 'start_error' | 'output_limit
  */
 export const defaultAgentProcessRunner: AgentProcessRunner = {
   run(spec): Promise<AgentProcessResult> {
+    for (const [name, value] of Object.entries({ maxOutputBytes: spec.maxOutputBytes,
+      maxStreamBytes: spec.maxStreamBytes ?? AGENT_STREAM_LIMIT_BYTES })) {
+      if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
+    }
     const startedAt = Date.now();
     if (spec.signal?.aborted) {
       return Promise.resolve({
@@ -123,6 +144,10 @@ export const defaultAgentProcessRunner: AgentProcessRunner = {
 
     const stdout = new BoundedCapture(spec.maxOutputBytes);
     const stderr = new BoundedCapture(spec.maxOutputBytes);
+    const structured = spec.jsonlProtocol === undefined ? undefined : new JsonlOutputCollector(spec.jsonlProtocol);
+    const streamLimit = Math.min(spec.maxStreamBytes ?? AGENT_STREAM_LIMIT_BYTES, AGENT_STREAM_LIMIT_BYTES);
+    let consumedBytes = 0;
+    let outputLimitExceeded = false;
     let forceKillHandle: NodeJS.Timeout | undefined;
     let terminationReason: TerminationReason | undefined;
     let spawnErrorCode: string | undefined;
@@ -165,14 +190,20 @@ export const defaultAgentProcessRunner: AgentProcessRunner = {
     const onAbort = (): void => terminate('cancelled');
     spec.signal?.addEventListener('abort', onAbort, { once: true });
 
-    child.stdout?.on('data', (chunk: Buffer | string) => {
-      stdout.append(chunk);
-      if (stdout.truncated) terminate('output_limit');
-    });
-    child.stderr?.on('data', (chunk: Buffer | string) => {
-      stderr.append(chunk);
-      if (stderr.truncated) terminate('output_limit');
-    });
+    const consume = (chunk: Buffer | string, capture: BoundedCapture, isStdout: boolean): void => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      capture.append(bytes);
+      // Continue draining even after termination has been requested. Never
+      // parse or retain an unbounded suffix while waiting for the group to stop.
+      if (outputLimitExceeded) return;
+      consumedBytes += bytes.byteLength;
+      if (consumedBytes > streamLimit || (isStdout && structured?.append(bytes) === false)) {
+        outputLimitExceeded = true;
+        terminate('output_limit');
+      }
+    };
+    child.stdout?.on('data', (chunk: Buffer | string) => consume(chunk, stdout, true));
+    child.stderr?.on('data', (chunk: Buffer | string) => consume(chunk, stderr, false));
     child.once('error', (error: unknown) => {
       spawnErrorCode = errorCode(error);
       startError = errorMessage(error);
@@ -201,7 +232,9 @@ export const defaultAgentProcessRunner: AgentProcessRunner = {
           timedOut: terminationReason === 'timeout',
           cancelled: terminationReason === 'cancelled',
           processGroupStopped: group.stopped,
-          outputLimitExceeded: stdout.truncated || stderr.truncated,
+          outputLimitExceeded,
+          retainedOutputBytes: spec.maxOutputBytes,
+          ...(structured === undefined ? {} : { structuredOutput: structured.finish() }),
           stdout: stdout.text(),
           stderr: stderr.text(),
           stdoutTruncated: stdout.truncated,

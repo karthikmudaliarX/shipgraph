@@ -27,3 +27,17 @@ export function redactSensitiveText(value: string): string {
       '$1$2[REDACTED_SECRET]$2'
     );
 }
+
+/** Redaction can expand a short secret; bound the redacted UTF-8 result too. */
+export function boundedRedactedOutput(value: string, limit: number, prefixTruncated = false): { text: string; truncated: boolean } {
+  // A cut credential may no longer match the complete quoted-secret pattern.
+  // Discard the incomplete retained line before redaction; do not expose fragments.
+  const completePrefix = prefixTruncated ? value.slice(0, value.lastIndexOf('\n') + 1) : value;
+  const redacted = redactSensitiveText(completePrefix);
+  const bytes = Buffer.from(redacted);
+  if (bytes.length <= limit) return { text: redacted, truncated: false };
+  return {
+    text: new TextDecoder('utf-8').decode(bytes.subarray(0, limit), { stream: true }),
+    truncated: true,
+  };
+}

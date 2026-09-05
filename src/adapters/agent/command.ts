@@ -16,7 +16,7 @@ import {
   type AgentProcessResult,
   type AgentProcessRunner,
 } from './process.js';
-import { redactSensitiveText } from './safety.js';
+import { redactSensitiveText, boundedRedactedOutput } from './safety.js';
 
 const PROBE_TIMEOUT_MS = 5_000;
 const PROBE_OUTPUT_BYTES = 16 * 1024;
@@ -268,6 +268,7 @@ export class CommandAgentExecutionAdapter implements AgentExecutionAdapter {
       env: this.environment,
       timeoutMs: request.timeoutMs,
       maxOutputBytes: Math.min(request.maxOutputBytes, AGENT_OUTPUT_LIMIT_BYTES),
+      ...(this.outputFormat === 'jsonl' && this.provider === 'codex' ? { jsonlProtocol: 'codex' as const } : {}),
       signal: request.signal,
       onStarted: request.onProcessStarted,
     });
@@ -304,7 +305,12 @@ export function normalizeCommandResult(
   displayName: string,
   outputFormat: CommandAgentOutputFormat
 ): AgentExecutionResult {
-  const parsed = parseCommandOutput(result.stdout, result.stdoutTruncated, outputFormat);
+  const parsed = outputFormat === 'jsonl' && result.structuredOutput !== undefined
+    ? result.structuredOutput
+    : parseCommandOutput(result.stdout, result.stdoutTruncated, outputFormat);
+  const limit = result.retainedOutputBytes ?? AGENT_OUTPUT_LIMIT_BYTES;
+  const stdout = boundedRedactedOutput(result.stdout, limit, result.stdoutTruncated);
+  const stderr = boundedRedactedOutput(result.stderr, limit, result.stderrTruncated);
   const common = {
     ...(result.processId === undefined ? {} : { providerProcessId: result.processId }),
     ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }),
@@ -314,10 +320,10 @@ export function normalizeCommandResult(
     timedOut: result.timedOut,
     cancelled: result.cancelled,
     processGroupStopped: result.processGroupStopped === true,
-    stdout: redactSensitiveText(result.stdout),
-    stderr: redactSensitiveText(result.stderr),
-    stdoutTruncated: result.stdoutTruncated,
-    stderrTruncated: result.stderrTruncated,
+    stdout: stdout.text,
+    stderr: stderr.text,
+    stdoutTruncated: result.stdoutTruncated || stdout.truncated,
+    stderrTruncated: result.stderrTruncated || stderr.truncated,
   };
 
   if (result.spawnErrorCode === 'ENOENT') {
@@ -373,7 +379,7 @@ export function normalizeCommandResult(
       ...common,
       outcome: 'FAILED',
       failureCategory: 'output_limit',
-      failureReason: `${displayName} output exceeded ShipGraph’s retained-output limit`,
+      failureReason: `${displayName} output exceeded ShipGraph’s stream safety limit`,
       ...parsedEvidence(parsed),
     };
   }

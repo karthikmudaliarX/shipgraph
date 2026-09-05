@@ -935,12 +935,14 @@ const defaultVerificationRunner: RepairVerificationRunner = async (cwd, command,
     env: environment,
     timeoutMs,
     maxOutputBytes: VERIFICATION_OUTPUT_LIMIT,
+    // Verification requires complete per-stream evidence; allow both full windows.
+    maxStreamBytes: 2 * VERIFICATION_OUTPUT_LIMIT,
     ...(signal === undefined ? {} : { signal }),
   });
   if (signal?.aborted === true || result.cancelled) {
     throw new Error('Deterministic verification was cancelled');
   }
-  if (result.outputLimitExceeded) {
+  if (result.outputLimitExceeded || result.stdoutTruncated || result.stderrTruncated) {
     throw new Error(`Deterministic verification exceeded the ${VERIFICATION_OUTPUT_LIMIT}-byte output limit`);
   }
   if (result.unexpectedTermination || result.processGroupStopped === false) {
