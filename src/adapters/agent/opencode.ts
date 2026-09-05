@@ -20,7 +20,7 @@ import {
   type AgentProcessResult,
   type AgentProcessRunner,
 } from './process.js';
-import { redactSensitiveText } from './safety.js';
+import { redactSensitiveText, boundedRedactedOutput } from './safety.js';
 import { registerModelProviderAdapter } from './model-provider-owner.js';
 
 export { redactSensitiveText } from './safety.js';
@@ -158,6 +158,7 @@ export class OpenCodeAdapter implements AgentExecutionAdapter {
       env: this.environment,
       timeoutMs: request.timeoutMs,
       maxOutputBytes: Math.min(request.maxOutputBytes, AGENT_OUTPUT_LIMIT_BYTES),
+      jsonlProtocol: 'opencode',
       signal: request.signal,
       onStarted: request.onProcessStarted,
     });
@@ -209,7 +210,10 @@ function buildEnvironment(
 }
 
 function normalizeOpenCodeResult(result: AgentProcessResult): AgentExecutionResult {
-  const parsed = parseJsonLines(result.stdout, result.stdoutTruncated);
+  const parsed = result.structuredOutput ?? parseJsonLines(result.stdout, result.stdoutTruncated);
+  const limit = result.retainedOutputBytes ?? AGENT_OUTPUT_LIMIT_BYTES;
+  const stdout = boundedRedactedOutput(result.stdout, limit, result.stdoutTruncated);
+  const stderr = boundedRedactedOutput(result.stderr, limit, result.stderrTruncated);
   const common = {
     ...(result.processId === undefined ? {} : { providerProcessId: result.processId }),
     ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }),
@@ -219,10 +223,10 @@ function normalizeOpenCodeResult(result: AgentProcessResult): AgentExecutionResu
     timedOut: result.timedOut,
     cancelled: result.cancelled,
     processGroupStopped: result.processGroupStopped === true,
-    stdout: redactSensitiveText(result.stdout),
-    stderr: redactSensitiveText(result.stderr),
-    stdoutTruncated: result.stdoutTruncated,
-    stderrTruncated: result.stderrTruncated,
+    stdout: stdout.text,
+    stderr: stderr.text,
+    stdoutTruncated: result.stdoutTruncated || stdout.truncated,
+    stderrTruncated: result.stderrTruncated || stderr.truncated,
   };
 
   if (result.spawnErrorCode === 'ENOENT') {
@@ -278,7 +282,7 @@ function normalizeOpenCodeResult(result: AgentProcessResult): AgentExecutionResu
       ...common,
       outcome: 'FAILED',
       failureCategory: 'output_limit',
-      failureReason: 'OpenCode output exceeded ShipGraph’s retained-output limit',
+      failureReason: 'OpenCode output exceeded ShipGraph’s stream safety limit',
       ...(parsed.evidence === undefined ? {} : { evidence: parsed.evidence }),
       ...(parsed.sessionId === undefined ? {} : { providerSessionId: parsed.sessionId }),
     };

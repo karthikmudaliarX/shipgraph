@@ -53,7 +53,7 @@ import {
   listWorkspacesForProject,
   type WorkspaceServiceOptions,
 } from '../workspace/service.js';
-import { redactSensitiveText } from '../adapters/agent/safety.js';
+import { redactSensitiveText, boundedRedactedOutput } from '../adapters/agent/safety.js';
 
 const agentProviderSchema = z.enum(AGENT_PROVIDERS);
 const modelSchema = z.string().min(1).max(256);
@@ -949,6 +949,11 @@ function applyReviewResult(
       reviewFindings: undefined,
     };
   }
+
+  // A truncated prefix is not an authoritative review channel: a discarded
+  // suffix could contain a conflicting report. Streaming implementation
+  // evidence does not relax KAR-9's complete-report requirement.
+  if (result.stdoutTruncated) return malformedReviewResult(result, reviewType);
 
   const reports: Array<ReturnType<typeof reviewOutputSchema.parse>> = [];
   const direct = result.reviewResult === undefined
@@ -1907,10 +1912,8 @@ function normalizedResultContradiction(
 }
 
 function boundOutput(value: string, maxBytes: number): { value: string; truncated: boolean } {
-  const redacted = redactSensitiveText(value);
-  const bytes = Buffer.from(redacted, 'utf8');
-  if (bytes.byteLength <= maxBytes) return { value: redacted, truncated: false };
-  return { value: bytes.subarray(0, maxBytes).toString('utf8'), truncated: true };
+  const output = boundedRedactedOutput(value, maxBytes);
+  return { value: output.text, truncated: output.truncated };
 }
 
 function boundFailureReason(reason: string): string {

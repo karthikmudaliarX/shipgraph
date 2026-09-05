@@ -86,6 +86,31 @@ execution-available. Gemini's MODEL-001 identity is implemented through
 Antigravity (`agy`), not Gemini CLI. Grok uses its `workspace` sandbox profile
 and Antigravity uses its supported `--sandbox` mode; cwd alone is not treated
 as filesystem isolation.
+Retention and execution lifetime are separate limits. Each stream retains at most
+128 KiB (or the lower requested cap); filling that window sets truncation metadata
+but does not kill the provider. Both pipes continue draining. The runner enforces
+a separate 64 MiB combined stdout/stderr consumption budget and a 1 MiB per-record
+JSONL budget; exceeding either is `output_limit` and terminates the owned group.
+Timeout, cancellation, and descendant termination proofs are unchanged.
+
+Codex and OpenCode JSONL is validated incrementally with one bounded record and
+bounded session/event-type/summary metadata, including events beyond retention.
+Successful completion requires Codex `turn.completed` or OpenCode `step_finish`
+with `part.reason: stop`, a normal exit, and no malformed/error records or
+conflicting session IDs. A final complete JSON record need not end in a newline.
+An unfinished record or a new unfinished turn fails closed. Redaction is applied
+before evidence crosses the adapter boundary; an incomplete retained text line
+is discarded so a cut credential cannot evade redaction. UTF-8 and redaction
+expansion cannot increase retained text beyond its byte cap.
+
+Single-document JSON adapters still require a complete retained document for
+validation. Reviews still require a complete authoritative report channel:
+truncated review stdout fails closed even if streamed implementation evidence is
+valid. Streaming does not make a bounded summary an authoritative review report.
+Capability/model probes continue rejecting truncated output. Deterministic repair
+verification retains its separate complete-evidence policy: 4 KiB per stream,
+with an 8 KiB combined consumption ceiling, and rejects either truncated stream.
+
 Provider executables and local CLI configuration are trusted host inputs.
 OpenCode, Codex and Antigravity retain HOME/XDG access for established logins;
 environment allow-listing prevents accidental variable leakage but is not a

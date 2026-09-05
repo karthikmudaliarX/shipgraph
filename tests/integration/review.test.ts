@@ -311,6 +311,14 @@ function reviewAdapter(results: readonly string[]): ReviewAdapter {
           stderrTruncated: false,
         } satisfies AgentExecutionResult;
       }
+      if (output === 'truncated-report') {
+        return {
+          outcome: 'SUCCEEDED', timedOut: false, cancelled: false, processGroupStopped: true,
+          stdout: VALID_REVIEW_REPORT, stderr: '', stdoutTruncated: true, stderrTruncated: false,
+          reviewResult: 'PASS', reviewFindings: [],
+          evidence: { outputFormat: 'jsonl', eventCount: 10, eventTypes: ['turn.completed'] },
+        } satisfies AgentExecutionResult;
+      }
       if (output === 'envelope-direct-conflict') {
         return {
           outcome: 'SUCCEEDED',
@@ -907,6 +915,18 @@ describe('KAR-9 exact-SHA pre-PR reviews', () => {
     expect(result.contract.run.status).toBe('NEEDS_HUMAN');
     expect(result.contract.run.failureCategory).toBe('malformed_output');
     expect(result.engineering.passed).toBe(true);
+  });
+
+  it('fails closed when a complete-looking review prefix has a discarded suffix', async () => {
+    harness = await createHarness(['truncated-report', VALID_REVIEW_REPORT]);
+    const result = await runPrePrReviews({
+      ticketId: 'REV-001', modelService: harness.modelService,
+      workspace: { db: harness.db, projectDir: harness.projectDir, worktreeRoot: harness.worktreeRoot },
+      routing: routing(),
+    });
+    expect(result.contract.passed).toBe(false);
+    expect(result.contract.run.status).toBe('NEEDS_HUMAN');
+    expect(result.contract.run.failureCategory).toBe('malformed_output');
   });
 
   it('fails closed when an embedded envelope report conflicts with direct report fields', async () => {

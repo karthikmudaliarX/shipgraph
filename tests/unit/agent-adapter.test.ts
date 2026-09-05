@@ -291,7 +291,7 @@ esac
     expect(result.evidence?.summary).toBe('api_key=[REDACTED_SECRET]');
   });
 
-  it('bounds output and terminates the provider process tree when the limit is exceeded', async () => {
+  it('bounds retention and terminates the provider process tree at the separate stream safety limit', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'shipgraph-agent-process-'));
     temporaryDirectories.push(directory);
     const script = join(directory, 'provider.sh');
@@ -311,6 +311,7 @@ esac
       env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
       timeoutMs: 100,
       maxOutputBytes: 128,
+      maxStreamBytes: 1024,
     });
 
     expect(result.timedOut).toBe(false);

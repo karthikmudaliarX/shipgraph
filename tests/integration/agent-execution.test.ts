@@ -209,6 +209,22 @@ describe('AGENT-001 durable execution', () => {
     expect(persisted.workspace_path).toBe(harness.workspacePath);
   });
 
+  it('persists successful streamed evidence beyond the retained prefix and keeps durable UTF-8 bounded', async () => {
+    harness = await createHarness();
+    const adapter = fakeAdapter({
+      stdout: 'a' + '😀'.repeat(32768), stdoutTruncated: true,
+      evidence: { outputFormat: 'jsonl', eventCount: 11001, eventTypes: ['text', 'step_finish'], summary: 'completed after retention' },
+    });
+    const result = await executeAgentTask({ ...harness.options, adapter }, {
+      ticketId: 'AG-001', model: 'test', instructions: 'exercise persisted streaming evidence',
+    });
+    expect(result.run.status).toBe('SUCCEEDED');
+    const persisted = createRunRepository(harness.db).findById(result.run.id);
+    expect(persisted?.evidence).toMatchObject({ eventCount: 11001, summary: 'completed after retention' });
+    expect(persisted?.stdoutTruncated).toBe(true);
+    expect(Buffer.byteLength(persisted?.stdout ?? '')).toBeLessThanOrEqual(131072);
+  });
+
   it('does not persist unbound adapter review fields as KAR-9 evidence', async () => {
     harness = await createHarness();
     const adapter = fakeAdapter({ reviewResult: 'PASS', reviewFindings: [] });
