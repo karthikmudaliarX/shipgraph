@@ -20,6 +20,8 @@ import {
 import type { AgentSafetyPolicy } from './service.js';
 import type { ModelRoutingRequest } from '../domain/model-provider.js';
 import { EventType, type ShipgraphEvent } from '../events/event.js';
+import { createGitRunner, resolveCommitSha } from '../git/service.js';
+import { inspectCommittedChange } from '../git/path-authorization.js';
 import { createGitHubPullRequest, type GitHubPullRequestResult } from '../github/service.js';
 import { ModelRoutingService } from '../model/service.js';
 import {
@@ -173,7 +175,7 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
   }
 
   if (implementationRun === undefined && (executionStatus === TicketState.PLANNING || executionStatus === TicketState.IMPLEMENTING)) {
-    const instructions = implementationInstructions(input.issueId, contract);
+    const instructions = implementationInstructions(input.issueId, contract, ticket.scope);
     if (Buffer.byteLength(instructions, 'utf8') > AGENT_INSTRUCTIONS_LIMIT_BYTES) {
       return terminalize(
         input,
@@ -242,6 +244,23 @@ export async function executeTicket(input: ExecuteTicketInput): Promise<ExecuteT
       binding,
       remainingExecution.blocked.outcome,
       remainingExecution.blocked.reason,
+      workspace,
+      implementationRun
+    );
+  }
+  const scopeFailure = await implementationScopeFailure(
+    input,
+    workspace,
+    implementationRun.baseSha,
+    ticket.scope
+  );
+  if (scopeFailure !== undefined) {
+    return terminalize(
+      input,
+      projectId,
+      binding,
+      'NEEDS_HUMAN',
+      scopeFailure,
       workspace,
       implementationRun
     );
@@ -919,12 +938,60 @@ function repairOutcome(
   return 'NEEDS_HUMAN';
 }
 
+const FULL_SHA_PATTERN = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/u;
+
+/**
+ * Authorize the implementation's committed change against the ticket path
+ * scope before verification, reviews, or readiness can bless the candidate.
+ * The decision is bound to the exact current candidate HEAD; any inability to
+ * prove ancestry or the diff fails closed.
+ */
+async function implementationScopeFailure(
+  input: ExecuteTicketInput,
+  workspace: WorkspaceRecord,
+  baseSha: string,
+  scope: { allowedPaths: readonly string[]; forbiddenPaths: readonly string[] }
+): Promise<string | undefined> {
+  try {
+    const runner = input.workspace.gitRunner ?? createGitRunner();
+    const candidateSha = await resolveCommitSha(runner, workspace.worktreePath, 'HEAD');
+    if (candidateSha === undefined || !FULL_SHA_PATTERN.test(candidateSha)) {
+      return 'KAR-12 could not resolve an exact candidate HEAD SHA for scope authorization';
+    }
+    const inspection = await inspectCommittedChange(
+      runner,
+      workspace.worktreePath,
+      baseSha,
+      candidateSha,
+      scope
+    );
+    switch (inspection.status) {
+      case 'authorized':
+        return undefined;
+      case 'not-descendant':
+        return 'KAR-12 stopped for scope growth because the candidate commit does not descend from the recorded base SHA';
+      case 'diff-unavailable':
+        return `KAR-12 scope could not be verified: ${inspection.detail}`;
+      case 'forbidden':
+        return `KAR-12 stopped for scope growth because it changed forbidden path ${inspection.path}`;
+      case 'outside':
+        return `KAR-12 stopped for scope growth because it changed path outside the authorized scope: ${inspection.path}`;
+    }
+  } catch (error) {
+    return `KAR-12 scope authorization failed closed: ${errorMessage(error)}`;
+  }
+}
+
 function stageRequestId(executionId: string, stage: string): string {
   const value = `${executionId}:${stage}`;
   return value.length <= 256 ? value : `${createHash('sha256').update(value).digest('hex')}:${stage}`;
 }
 
-function implementationInstructions(issueId: string, contract: BehavioralTicketContract): string {
+function implementationInstructions(
+  issueId: string,
+  contract: BehavioralTicketContract,
+  scope: { allowedPaths: readonly string[]; forbiddenPaths: readonly string[] }
+): string {
   const serialized = JSON.stringify({
     summary: contract.summary,
     currentBehavior: contract.currentBehavior,
@@ -939,6 +1006,8 @@ function implementationInstructions(issueId: string, contract: BehavioralTicketC
     'Inspect the real repository and make the smallest safe change that satisfies the behavioral contract.',
     'Do not add implementation recipes, adjacent product work, or unrelated refactors.',
     'Leave the worktree with a committed functional change and do not include implementation reasoning in the result.',
+    `Authorized ticket path scope (trusted): ${JSON.stringify(scope)}`,
+    'Commit changes only within allowedPaths when it is non-empty, and never within forbiddenPaths. If the work genuinely requires broader scope, stop and report scope_growth instead of changing those paths.',
     `Behavioral Ticket Contract: ${serialized}`,
   ].join('\n\n');
 }

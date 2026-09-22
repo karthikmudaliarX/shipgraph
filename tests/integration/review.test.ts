@@ -543,12 +543,25 @@ function readinessInput(harness: Harness, gitRunner?: GitRunner) {
 
 function mutateAfterFirstCleanProof(harness: Harness, mutation: () => void): GitRunner {
   const runner = createGitRunner();
+  let statusProofs = 0;
   let mutated = false;
   return async (cwd, args) => {
     const result = await runner(cwd, args);
-    if (!mutated && cwd === harness.workspacePath && args.join('\0') === 'clean\0-ndx') {
-      mutated = true;
-      mutation();
+    // A candidate check issues three cleanliness status proofs before it is
+    // fully validated: workspace admission, the worktree-state inspection, and
+    // the candidate predicate. Mutate after the third so the first candidate
+    // check still observes a clean candidate and the boundary re-check
+    // observes the mutation.
+    const isStatusProof =
+      cwd === harness.workspacePath &&
+      args.includes('status') &&
+      args.includes('--porcelain');
+    if (isStatusProof) {
+      statusProofs += 1;
+      if (!mutated && statusProofs === 3) {
+        mutated = true;
+        mutation();
+      }
     }
     return result;
   };

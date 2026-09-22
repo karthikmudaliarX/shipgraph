@@ -567,6 +567,38 @@ export async function isStrictlyClean(
 }
 
 /**
+ * Cleanliness for a committed pre-PR candidate.
+ *
+ * Unlike {@link isStrictlyClean}, which guards destructive worktree removal,
+ * this predicate permits genuinely ignored artifacts (for example `.next/`,
+ * `node_modules/`, ignored test output, and `next-env.d.ts`) while still
+ * failing closed on every state that could hide a real modification: tracked
+ * modifications, staged changes, non-ignored untracked files, assume-unchanged
+ * or skip-worktree flags, gitlink/submodule ambiguity, and any Git inspection
+ * failure.
+ */
+export async function isCandidateClean(
+  runner: GitRunner,
+  worktreePath: string
+): Promise<boolean> {
+  // Deliberately omits --ignored: Git still reports tracked modifications,
+  // staged changes, and non-ignored untracked files, while ignored artifacts
+  // remain absent from the porcelain output.
+  const status = await runGit(runner, worktreePath, [
+    '-c',
+    'status.showUntrackedFiles=all',
+    'status',
+    '--porcelain',
+    '--untracked-files=all',
+    '--ignore-submodules=none',
+  ]);
+  if (status.exitCode !== 0) return false;
+  const ambiguousFlags = await hasAmbiguousIndexFlags(runner, worktreePath);
+  if (ambiguousFlags === undefined || ambiguousFlags) return false;
+  return status.stdout.trim() === '';
+}
+
+/**
  * Detect tracked files that hide modifications from status
  * (assume-unchanged / skip-worktree markers) AND gitlink entries
  * (submodules, mode 160000). Both make a worktree unsafe to delete.
