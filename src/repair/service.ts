@@ -15,7 +15,8 @@ import { TicketState } from '../core/state-machine/state.js';
 import { redactSensitiveText } from '../adapters/agent/safety.js';
 import { createAgentProcessRunner } from '../adapters/agent/process.js';
 import { EventType, type ShipgraphEvent } from '../events/event.js';
-import { createGitRunner, isStrictlyClean, resolveCommitSha } from '../git/service.js';
+import { createGitRunner, isCandidateClean, resolveCommitSha } from '../git/service.js';
+import { inspectCommittedChange } from '../git/path-authorization.js';
 import { ModelRoutingService, type RoutedAgentTaskResult } from '../model/service.js';
 import {
   createEventRepository,
@@ -915,7 +916,7 @@ async function assertVerificationHead(
   sha: string
 ): Promise<void> {
   const record = await getVerifiedWorkspaceForExecution(workspace, ticketId, 'changed', sha);
-  if (!(await isStrictlyClean(workspace.gitRunner ?? createGitRunner(), record.worktreePath))) {
+  if (!(await isCandidateClean(workspace.gitRunner ?? createGitRunner(), record.worktreePath))) {
     throw new Error(`Deterministic verification changed the worktree for exact SHA ${sha}`);
   }
 }
@@ -1001,52 +1002,27 @@ async function validateRepairBoundary(
 ): Promise<string | undefined> {
   const record = await getVerifiedWorkspaceForExecution(workspace, ticketId, 'changed', resultingSha);
   const runner = workspace.gitRunner ?? createGitRunner();
-  const ancestry = await runner(record.worktreePath, [
-    'merge-base',
-    '--is-ancestor',
+  const inspection = await inspectCommittedChange(
+    runner,
+    record.worktreePath,
     candidateSha,
     resultingSha,
-  ]);
-  if (ancestry.exitCode !== 0) {
-    return 'Repair stopped for scope growth because the resulting commit does not descend from the candidate SHA';
+    scope
+  );
+  switch (inspection.status) {
+    case 'authorized':
+      return inspection.changedPaths.length === 0
+        ? 'Repair agent created a new commit without a functional file change'
+        : undefined;
+    case 'not-descendant':
+      return 'Repair stopped for scope growth because the resulting commit does not descend from the candidate SHA';
+    case 'diff-unavailable':
+      return `Repair scope could not be verified: ${bounded(inspection.detail)}`;
+    case 'forbidden':
+      return `Repair stopped for scope growth because it changed forbidden path ${inspection.path}`;
+    case 'outside':
+      return `Repair stopped for scope growth because it changed path outside the authorized scope: ${inspection.path}`;
   }
-  const changed = await runner(record.worktreePath, [
-    'diff',
-    '--no-renames',
-    '--name-only',
-    '-z',
-    candidateSha,
-    resultingSha,
-    '--',
-  ]);
-  if (changed.exitCode !== 0) {
-    return `Repair scope could not be verified: ${bounded(changed.stderr || 'git diff failed')}`;
-  }
-  const paths = changed.stdout.split('\0').filter((path) => path.length > 0);
-  if (paths.length === 0) {
-    return 'Repair agent created a new commit without a functional file change';
-  }
-  const forbidden = paths.find((path) => scope.forbiddenPaths.some((entry) => pathInScope(path, entry)));
-  if (forbidden !== undefined) {
-    return `Repair stopped for scope growth because it changed forbidden path ${forbidden}`;
-  }
-  if (scope.allowedPaths.length > 0) {
-    const outside = paths.find((path) => !scope.allowedPaths.some((entry) => pathInScope(path, entry)));
-    if (outside !== undefined) {
-      return `Repair stopped for scope growth because it changed path outside the authorized scope: ${outside}`;
-    }
-  }
-  return undefined;
-}
-
-function pathInScope(path: string, configuredPath: string): boolean {
-  const normalized = configuredPath.replace(/^\.\//u, '').replace(/\/+$/u, '');
-  if (normalized.endsWith('/**')) {
-    const directory = normalized.slice(0, -3).replace(/\/+$/u, '');
-    return directory.length > 0 && (path === directory || path.startsWith(`${directory}/`));
-  }
-  if (normalized.includes('*')) return false;
-  return normalized.length > 0 && path === normalized;
 }
 
 async function exactCleanHead(workspace: WorkspaceServiceOptions, ticketId: string): Promise<string> {
@@ -1085,7 +1061,7 @@ async function resolveHead(workspace: WorkspaceServiceOptions, ticketId: string)
 
 async function isClean(workspace: WorkspaceServiceOptions, ticketId: string): Promise<boolean> {
   const record = await getVerifiedWorkspaceForExecution(workspace, ticketId, 'changed');
-  return isStrictlyClean(workspace.gitRunner ?? createGitRunner(), record.worktreePath);
+  return isCandidateClean(workspace.gitRunner ?? createGitRunner(), record.worktreePath);
 }
 
 function recordAttempt(input: PrePrRepairInput, evidence: RepairAttemptEvidence): void {

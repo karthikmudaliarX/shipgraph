@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   createGitRunner,
   inspectWorktreeState,
-  isStrictlyClean,
+  isCandidateClean,
   resolveCommitSha,
 } from '../git/service.js';
 import { createRunRepository, createTicketRepository, type WorkspaceRecord } from '../persistence/repositories.js';
@@ -242,7 +242,7 @@ async function readReviewSnapshot(
     throw new Error(`Could not resolve a full review HEAD SHA for workspace ${workspace.id}`);
   }
   const live = await inspectWorktreeState(runner, workspace.sourceRepositoryPath, workspace.worktreePath);
-  if (!live.registered || live.head !== headSha || live.clean !== true || !(await isStrictlyClean(runner, workspace.worktreePath))) {
+  if (!live.registered || live.head !== headSha || live.clean !== true || !(await isCandidateClean(runner, workspace.worktreePath))) {
     throw new Error(`Workspace HEAD changed while preparing the KAR-9 review snapshot`);
   }
   const diffResult = await runner(workspace.worktreePath, [
@@ -324,7 +324,7 @@ async function assertCurrentReviewHead(
     !live.registered ||
     live.head !== expectedHeadSha ||
     live.clean !== true ||
-    !(await isStrictlyClean(runner, workspace.worktreePath))
+    !(await isCandidateClean(runner, workspace.worktreePath))
   ) {
     throw new Error(`Review workspace changed before the next KAR-9 axis`);
   }

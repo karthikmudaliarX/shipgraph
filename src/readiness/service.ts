@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   createGitRunner,
   inspectWorktreeState,
-  isStrictlyClean,
+  isCandidateClean,
   resolveCommitSha,
 } from '../git/service.js';
 import { TicketState } from '../core/state-machine/state.js';
@@ -285,7 +285,7 @@ async function currentCandidate(
     !live.registered ||
     live.head !== sha ||
     live.clean !== true ||
-    !(await isStrictlyClean(runner, verified.worktreePath))
+    !(await isCandidateClean(runner, verified.worktreePath))
   ) {
     throw new Error('KAR-11 requires a clean committed candidate with a known exact HEAD SHA');
   }
